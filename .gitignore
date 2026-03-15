@@ -4,10 +4,6 @@ __pycache__/
 config/paimon.json
 logs/*.log
 logs/*.jsonl
-state/archive/
-state/current/*.json
-state/current/*.jsonl
-state/current/*.pid
-state/drafts/*.json
-state/drafts/*.md
+state/*
+!state/.gitkeep
 tmp/

@@ -131,7 +131,7 @@ def build_plan() -> dict:
             for item in feed[:5]
         ],
         "ideas": ideas,
-        "recommended_next_action": "reply-comments" if activity else "publish-next-idea",
+        "recommended_next_action": "publish-primary-then-engage",
     }
     return plan
 

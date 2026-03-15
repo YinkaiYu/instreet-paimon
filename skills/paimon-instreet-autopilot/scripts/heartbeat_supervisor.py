@@ -98,6 +98,8 @@ def _evaluate_attempt(
     attempt_started_at: float,
     *,
     require_public_action: bool,
+    require_primary_publication: bool,
+    require_feishu_report: bool,
 ) -> dict[str, Any]:
     issues: list[str] = []
     if result.get("timed_out"):
@@ -110,10 +112,20 @@ def _evaluate_attempt(
     has_public_action = _has_public_action(summary)
     if require_public_action and not has_public_action:
         issues.append("no public action recorded in heartbeat summary")
+    primary_publication_succeeded = bool(summary.get("primary_publication_succeeded")) if isinstance(summary, dict) else False
+    if require_primary_publication and not primary_publication_succeeded:
+        issues.append("no primary publication recorded in heartbeat summary")
+    feishu_report_sent = bool(summary.get("feishu_report_sent")) if isinstance(summary, dict) else False
+    if require_feishu_report and not feishu_report_sent:
+        issues.append("no feishu progress report recorded in heartbeat summary")
 
     if result.get("timed_out") or result.get("returncode") not in {0, None}:
         status = "repair"
     elif summary is None or summary_mtime is None or summary_mtime < attempt_started_at - 1:
+        status = "repair"
+    elif require_primary_publication and not primary_publication_succeeded:
+        status = "repair"
+    elif require_feishu_report and not feishu_report_sent:
         status = "repair"
     elif require_public_action and not has_public_action:
         status = "retry"
@@ -125,6 +137,8 @@ def _evaluate_attempt(
         "issues": issues,
         "fresh_summary": summary is not None and summary_mtime is not None and summary_mtime >= attempt_started_at - 1,
         "has_public_action": has_public_action,
+        "primary_publication_succeeded": primary_publication_succeeded,
+        "feishu_report_sent": feishu_report_sent,
     }
 
 
@@ -311,6 +325,8 @@ def _supervisor_settings(config: Any) -> dict[str, Any]:
         "use_codex_audit": bool(automation.get("heartbeat_supervisor_use_codex_audit", True)),
         "auto_repair": bool(automation.get("heartbeat_supervisor_auto_repair", True)),
         "require_public_action": bool(automation.get("public_output_required", False)),
+        "require_primary_publication": bool(automation.get("heartbeat_require_primary_publication", True)),
+        "require_feishu_report": bool(automation.get("heartbeat_feishu_report_enabled", True)),
     }
 
 
@@ -349,6 +365,8 @@ def main() -> None:
                 summary_mtime,
                 result["started_epoch"],
                 require_public_action=args.execute and settings["require_public_action"],
+                require_primary_publication=args.execute and settings["require_primary_publication"],
+                require_feishu_report=args.execute and settings["require_feishu_report"],
             )
 
             if settings["use_codex_audit"]:
@@ -425,6 +443,8 @@ def main() -> None:
                     repaired_summary_mtime,
                     result["started_epoch"],
                     require_public_action=args.execute and settings["require_public_action"],
+                    require_primary_publication=args.execute and settings["require_primary_publication"],
+                    require_feishu_report=args.execute and settings["require_feishu_report"],
                 )
                 attempt_record["post_repair_summary"] = repaired_summary
                 if attempt_record["post_repair_evaluation"]["status"] == "success":

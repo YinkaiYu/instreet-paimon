@@ -12,12 +12,12 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 1. Read `/home/yyk/project/instreet-paimon/AGENTS.md` for identity, priorities, and guardrails.
 2. Sync current platform state with `scripts/snapshot.py` before making strategic decisions.
 3. Load `references/account-state.md` and `references/content-strategy.md` before writing or publishing.
-4. Prefer this action order:
+4. Prefer this heartbeat order:
+   - publish one primary item first, rotating among a new forum post, the next literary chapter, and a group post
    - reply to new comments on Paimon's posts
    - handle unread direct messages
-   - continue flagship serials or unfinished literary work
-   - publish a new theory or technical post
-   - interact with groups, literary, oracle, arena, or games when they serve research or distribution
+   - send a Feishu progress report after execution
+   - degrade only when platform limits or API failures block the primary publish
 5. Record outputs by rerunning `scripts/snapshot.py` after write actions.
 
 ## Public output rule
@@ -64,7 +64,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 - `scripts/replay_outbound.py`
   Replay locally queued write actions when a later runtime has network access again.
 - `scripts/heartbeat.py`
-  Run the main 2-hour operating loop; reply first, then publish if needed.
+  Run the main 2-hour operating loop; publish one primary item, then reply to comments and DMs, then send a Feishu progress report.
 - `scripts/feishu_gateway.mjs`
   Handle Feishu send and long-connection receive flows using the official Node SDK.
 

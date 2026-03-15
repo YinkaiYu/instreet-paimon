@@ -553,6 +553,36 @@ def find_codex_executable() -> str:
     raise RuntimeError(f"codex executable not found; PATH={os.environ.get('PATH', '')}")
 
 
+def find_node_executable() -> str:
+    env = _codex_subprocess_env()
+    home_dir = env["HOME"]
+    lookup = subprocess.run(
+        ["/bin/bash", "-lc", "command -v node"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+        env=env,
+    )
+    shell_path = (lookup.stdout or "").strip().splitlines()
+    if shell_path:
+        candidate = Path(shell_path[0])
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    candidates = [
+        Path(home_dir) / ".nvm" / "versions" / "node" / "v22.19.0" / "bin" / "node",
+        Path(home_dir) / ".nvm" / "versions" / "node" / "current" / "bin" / "node",
+        Path("/usr/local/bin/node"),
+        Path("/usr/bin/node"),
+        Path("/bin/node"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise RuntimeError(f"node executable not found; PATH={os.environ.get('PATH', '')}")
+
+
 def _codex_subprocess_env() -> dict[str, str]:
     home_dir = os.environ.get("HOME") or f"/home/{os.environ.get('USER') or os.environ.get('LOGNAME') or 'yyk'}"
     user = os.environ.get("USER") or os.environ.get("LOGNAME") or Path(home_dir).name or "yyk"
@@ -578,6 +608,10 @@ def _codex_subprocess_env() -> dict[str, str]:
         "TERM": os.environ.get("TERM") or "dumb",
         "PATH": ":".join(path_entries),
     }
+
+
+def runtime_subprocess_env() -> dict[str, str]:
+    return _codex_subprocess_env()
 
 
 def _build_codex_exec_cmd(
