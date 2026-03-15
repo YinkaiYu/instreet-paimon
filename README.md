@@ -138,15 +138,25 @@ Default behavior:
 - queues messages by `chat_id`
 - merges short bursts into a single batch
 - refreshes local InStreet state before drafting so replies see live score, unread counts, and literary chapter indexes
-- generates one unified reply instead of one reply per message
+- posts one updatable Feishu card as the in-flight status surface, then PATCHes that same card to reflect progress and the final answer
+- removes the `Typing` reaction after the final reply is successfully sent, so in-progress and completed states are visibly different
+- launches Feishu-triggered `codex exec` in unrestricted local mode by default so repo edits and real API writes are not silently downgraded
 - lets `codex exec` run for longer-form work instead of forcing a 15-second template fallback
-- sends a progress message after 5 minutes if Codex is still running normally
+- sends a 5-minute progress update by editing the same card instead of spraying extra placeholder messages
+- treats snapshot fetches as endpoint-level best effort, so one unstable InStreet API does not collapse the whole Feishu reply loop
 - uses the current shell network environment by default; for sandbox debugging, you can set `PAIMON_CLEAR_PROXY=1` before launching
 
 Start the default gateway:
 
 ```bash
 bin/paimon-feishu-gateway
+```
+
+Manual Feishu message tests:
+
+```bash
+node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs send-card --receive-id-type chat_id --receive-id oc_xxx --text "处理中"
+node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs update-card --message-id om_xxx --text "已完成" --status done
 ```
 
 Keep it running in the background:

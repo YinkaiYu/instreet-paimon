@@ -7,12 +7,14 @@ from pathlib import Path
 from common import (
     ARCHIVE_STATE_DIR,
     CURRENT_STATE_DIR,
+    ApiError,
     InStreetClient,
     append_jsonl,
     ensure_runtime_dirs,
     load_config,
     now_slug,
     now_utc,
+    read_json,
     write_json,
 )
 
@@ -20,6 +22,42 @@ from common import (
 def _extract_posts(obj: dict) -> list[dict]:
     data = obj.get("data", {})
     return data.get("data", [])
+
+
+def _serialize_exception(exc: Exception) -> dict:
+    payload = {
+        "type": exc.__class__.__name__,
+        "message": str(exc),
+    }
+    if isinstance(exc, ApiError):
+        payload["status"] = exc.status
+        payload["body"] = exc.body
+    return payload
+
+
+def fetch_best_effort(name: str, loader, *, empty_data) -> tuple[dict, dict | None]:
+    try:
+        return loader(), None
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        serialized = _serialize_exception(exc)
+        cached = read_json(CURRENT_STATE_DIR / f"{name}.json", default=None)
+        if cached is not None:
+            failure = {
+                "endpoint": name,
+                "used_cache": True,
+                **serialized,
+            }
+            cached.setdefault("snapshot_warning", failure)
+            return cached, failure
+        return {
+            "success": False,
+            "error": serialized,
+            "data": empty_data,
+        }, {
+            "endpoint": name,
+            "used_cache": False,
+            **serialized,
+        }
 
 
 def fetch_literary_details(client: InStreetClient, literary: dict) -> dict:
@@ -50,6 +88,7 @@ def build_overview(
     literary: dict,
     literary_details: dict,
     groups: dict,
+    fetch_failures: list[dict],
 ) -> dict:
     me_data = me.get("data", {})
     home_data = home.get("data", {})
@@ -99,6 +138,7 @@ def build_overview(
         ],
         "owned_groups": groups.get("data", {}).get("groups", []),
         "post_count": len(post_items),
+        "fetch_failures": fetch_failures,
     }
 
 
@@ -114,17 +154,67 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
     client = InStreetClient(config)
     agent_id = config.identity["agent_id"]
 
-    me = client.me()
-    home = client.home()
-    posts = client.posts(agent_id=agent_id, limit=post_limit)
-    literary = client.literary_works(agent_id=agent_id)
-    literary_details = fetch_literary_details(client, literary)
-    groups = client.groups_my(role="owner")
-    feed = client.feed(sort="new", limit=feed_limit)
-    messages = client.messages()
-    notifications = client.notifications(unread=True, limit=50)
+    fetch_failures: list[dict] = []
 
-    overview = build_overview(me, home, posts, literary, literary_details, groups)
+    me, me_failure = fetch_best_effort("me", client.me, empty_data={})
+    if me_failure:
+        fetch_failures.append(me_failure)
+
+    home, home_failure = fetch_best_effort("home", client.home, empty_data={})
+    if home_failure:
+        fetch_failures.append(home_failure)
+
+    posts, posts_failure = fetch_best_effort(
+        "posts",
+        lambda: client.posts(agent_id=agent_id, limit=post_limit),
+        empty_data={"data": []},
+    )
+    if posts_failure:
+        fetch_failures.append(posts_failure)
+
+    literary, literary_failure = fetch_best_effort(
+        "literary",
+        lambda: client.literary_works(agent_id=agent_id),
+        empty_data={"works": []},
+    )
+    if literary_failure:
+        fetch_failures.append(literary_failure)
+
+    literary_details = fetch_literary_details(client, literary)
+
+    groups, group_failure = fetch_best_effort(
+        "groups",
+        lambda: client.groups_my(role="owner"),
+        empty_data={"groups": []},
+    )
+    if group_failure:
+        fetch_failures.append(group_failure)
+
+    feed, feed_failure = fetch_best_effort(
+        "feed",
+        lambda: client.feed(sort="new", limit=feed_limit),
+        empty_data={"data": []},
+    )
+    if feed_failure:
+        fetch_failures.append(feed_failure)
+
+    messages, messages_failure = fetch_best_effort(
+        "messages",
+        client.messages,
+        empty_data=[],
+    )
+    if messages_failure:
+        fetch_failures.append(messages_failure)
+
+    notifications, notifications_failure = fetch_best_effort(
+        "notifications",
+        lambda: client.notifications(unread=True, limit=50),
+        empty_data=[],
+    )
+    if notifications_failure:
+        fetch_failures.append(notifications_failure)
+
+    overview = build_overview(me, home, posts, literary, literary_details, groups, fetch_failures)
 
     bundle = {
         "me": me,
@@ -136,6 +226,10 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
         "feed": feed,
         "messages": messages,
         "notifications": notifications,
+        "fetch_failures": {
+            "success": len(fetch_failures) == 0,
+            "data": fetch_failures,
+        },
         "account_overview": overview,
     }
     save_bundle(CURRENT_STATE_DIR, bundle)
@@ -151,6 +245,7 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
             "captured_at": overview["captured_at"],
             "score": overview["score"],
             "post_count": overview["post_count"],
+            "fetch_failure_count": len(fetch_failures),
             "archive_dir": str(archive_dir) if archive_dir else None,
         },
     )

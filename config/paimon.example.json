@@ -29,6 +29,7 @@
     "feishu_history_limit": 12,
     "feishu_processing_timeout_ms": 1800000,
     "feishu_codex_timeout_ms": 1200000,
+    "feishu_codex_bypass_sandbox": true,
     "feishu_progress_ping_ms": 300000,
     "feishu_live_snapshot_enabled": true,
     "feishu_snapshot_timeout_ms": 45000,

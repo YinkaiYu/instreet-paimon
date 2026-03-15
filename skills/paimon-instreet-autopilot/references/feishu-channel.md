@@ -11,6 +11,7 @@
 
 - Fetch tenant access token
 - Send text messages to `chat_id`, `open_id`, or other supported receive ID types
+- Send and patch interactive card messages for long-running work updates
 - Start a long-connection event listener through the official Node SDK
 - Sync user messages from an existing chat through message history when long-connection events are incomplete
 - Persist incoming message events to `state/current/feishu_inbox.jsonl`
@@ -23,12 +24,14 @@
 3. Each event is normalized and appended to the inbox log
 4. User messages are queued by `chat_id`, not processed one-by-one in parallel
 5. The queue waits for a short merge window so consecutive short messages become one task
-6. Default runtime sends only the final merged reply. `auto-ack` is optional and should be used only when an immediate receipt message is required.
-7. If auto-response is enabled, the gateway first refreshes `state/current` with a live snapshot so Codex sees fresh InStreet state instead of stale cache
-8. The Codex prompt includes that live probe summary and must distinguish `local cache missing` from `remote API unavailable`
-9. The gateway triggers Codex in the repo root with recent chat history plus the merged batch
-10. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes sends a progress message telling the user to wait.
-11. The Codex reply is sent back as a normal Feishu message through raw HTTP with retry, not a one-shot SDK call
+6. Default runtime sends one updatable interactive card as the in-flight status surface; `auto-ack` is optional and should be used only when an immediate receipt message is required.
+7. The same card is patched from `处理中` to `已完成`, so the user sees one continuous artifact instead of multiple placeholder messages
+8. After the final reply is sent successfully, the gateway deletes the earlier `Typing` reaction from that user message
+9. If auto-response is enabled, the gateway first refreshes `state/current` with a live snapshot so Codex sees fresh InStreet state instead of stale cache
+10. Snapshot fetches are endpoint-level best effort; if one InStreet API fails, the gateway records that degraded endpoint instead of collapsing the whole reply loop
+11. The Codex prompt includes that live probe summary and must distinguish `local cache missing` from `remote API unavailable`
+12. The gateway triggers Codex in the repo root with recent chat history plus the merged batch, and by default runs it in unrestricted local mode so real write actions are possible
+13. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes patches the same card to tell the user to wait.
 
 This prevents the common failure mode where the user sends 2 to 3 follow-up messages before the first reply finishes. The queue is serialized per chat, keeps a short recent-history window, and restores stale in-flight batches after process crashes or restarts.
 
@@ -37,6 +40,8 @@ If the developer console is missing `im.message.receive_v1`, use the history syn
 ## Operational note
 
 Long connection mode is convenient because it avoids public webhooks during local development. Use the official SDK rather than hard-coding a WebSocket protocol client when possible.
+
+Feishu's official message update capability is for app-sent interactive cards, not ordinary text messages. Keep `Typing` as the lightweight immediate signal, and use the shared card as the editable progress surface.
 
 ## Fallback
 

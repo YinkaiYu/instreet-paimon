@@ -16,6 +16,7 @@ const tmpDir = path.join(repoRoot, "tmp");
 const snapshotScriptPath = path.join(__dirname, "snapshot.py");
 const accountOverviewPath = path.join(stateCurrentDir, "account_overview.json");
 const literaryDetailsPath = path.join(stateCurrentDir, "literary_details.json");
+const fetchFailuresPath = path.join(stateCurrentDir, "fetch_failures.json");
 const reactionsPath = path.join(stateCurrentDir, "feishu_reactions.json");
 const inboxPath = path.join(stateCurrentDir, "feishu_inbox.jsonl");
 const errorsPath = path.join(stateCurrentDir, "feishu_gateway_errors.jsonl");
@@ -117,6 +118,26 @@ function ensureChatQueue(queue, chatId) {
   return queue.chats[chatId];
 }
 
+function readChatProcessing(chatId) {
+  const queue = readQueue();
+  return queue.chats?.[chatId]?.processing || null;
+}
+
+function updateChatProcessing(chatId, updater) {
+  const queue = readQueue();
+  const chat = ensureChatQueue(queue, chatId);
+  if (!chat.processing) {
+    return null;
+  }
+  const patch = typeof updater === "function" ? updater(chat.processing) : updater;
+  if (patch && typeof patch === "object") {
+    Object.assign(chat.processing, patch);
+    chat.updated_at = new Date().toISOString();
+    writeQueue(queue);
+  }
+  return chat.processing;
+}
+
 function parseArgs(argv) {
   const [command = "help", ...rest] = argv.slice(2);
   const flags = {};
@@ -194,7 +215,7 @@ async function feishuApiRequest(config, endpoint, options = {}, retries = null, 
   throw lastError;
 }
 
-async function sendTextMessage(config, receiveIdType, receiveId, text) {
+async function sendTextMessage(config, receiveIdType, receiveId, text, flags = {}) {
   return feishuApiRequest(
     config,
     `/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`,
@@ -208,7 +229,98 @@ async function sendTextMessage(config, receiveIdType, receiveId, text) {
     },
     null,
     null,
-    {}
+    flags
+  );
+}
+
+function clampCardText(text, limit = 12000) {
+  if (!text || text.length <= limit) {
+    return text || "";
+  }
+  return `${text.slice(0, limit - 24)}\n\n_内容过长，已截断显示。_`;
+}
+
+function buildStatusCard(text, options = {}) {
+  const status = options.status || "working";
+  const mergedCount = options.mergedCount || 1;
+  const title =
+    status === "done"
+      ? "派蒙回复完成"
+      : status === "error"
+        ? "派蒙处理异常"
+        : "派蒙正在处理";
+  const template =
+    status === "done"
+      ? "green"
+      : status === "error"
+        ? "red"
+        : "blue";
+  const noteParts = [
+    status === "done" ? "状态：已完成" : status === "error" ? "状态：异常" : "状态：处理中",
+    `合并消息：${mergedCount} 条`,
+    `更新时间：${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`
+  ];
+  return {
+    config: {
+      wide_screen_mode: true,
+      update_multi: true
+    },
+    header: {
+      template,
+      title: {
+        tag: "plain_text",
+        content: title
+      }
+    },
+    elements: [
+      {
+        tag: "markdown",
+        content: clampCardText(text)
+      },
+      {
+        tag: "note",
+        elements: [
+          {
+            tag: "plain_text",
+            content: noteParts.join(" | ")
+          }
+        ]
+      }
+    ]
+  };
+}
+
+async function sendCardMessage(config, receiveIdType, receiveId, card, flags = {}) {
+  return feishuApiRequest(
+    config,
+    `/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        receive_id: receiveId,
+        content: JSON.stringify(card),
+        msg_type: "interactive"
+      })
+    },
+    null,
+    null,
+    flags
+  );
+}
+
+async function updateCardMessage(config, messageId, card, flags = {}) {
+  return feishuApiRequest(
+    config,
+    `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        content: JSON.stringify(card)
+      })
+    },
+    null,
+    null,
+    flags
   );
 }
 
@@ -354,6 +466,17 @@ function summarizeWorkDetail(detail, limit = 6) {
   };
 }
 
+function buildProgressStatusReply(batchMessages, stage) {
+  const mergedCount = batchMessages.length;
+  if (stage === "initial") {
+    return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），先同步实时快照和最近对话。`;
+  }
+  if (stage === "codex") {
+    return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），实时快照已同步，正在运行 Codex 整理回复。`;
+  }
+  return "派蒙正在处理这轮消息。";
+}
+
 function getCodexTimeoutMs(config, flags) {
   return Number(flags["codex-timeout-ms"] || config.automation?.feishu_codex_timeout_ms || 1200000);
 }
@@ -388,6 +511,16 @@ function getConfiguredCodexExecutable(config, flags) {
     config.automation?.feishu_codex_bin ||
     ""
   ).trim();
+}
+
+function shouldBypassCodexSandbox(config, flags) {
+  if (flags["no-codex-bypass-sandbox"]) {
+    return false;
+  }
+  if (flags["codex-bypass-sandbox"]) {
+    return true;
+  }
+  return config.automation?.feishu_codex_bypass_sandbox !== false;
 }
 
 function isExecutableFile(filePath) {
@@ -500,6 +633,15 @@ function buildLiveProbeSummary(snapshotResult, overview, literaryDetails) {
     );
     if (summary.chapterSummary) {
       lines.push(`  章节索引: ${summary.chapterSummary}`);
+    }
+  }
+  const fetchFailures = readJsonFile(fetchFailuresPath, {}).data || [];
+  if (Array.isArray(fetchFailures) && fetchFailures.length) {
+    for (const failure of fetchFailures.slice(0, 5)) {
+      const endpoint = failure?.endpoint || "unknown";
+      const status = failure?.status ? ` status=${failure.status}` : "";
+      const message = truncateText(failure?.message || JSON.stringify(failure?.body || {}), 180);
+      lines.push(`- 快照降级: ${endpoint}${status} ${message}`.trim());
     }
   }
   return lines.join("\n") || "- 无";
@@ -629,6 +771,92 @@ async function clearTypingReactions(config, messageItems, flags = {}) {
   }
 }
 
+async function upsertProgressMessage(config, chatId, batchMessages, text, flags = {}) {
+  const card = buildStatusCard(text, { status: "working", mergedCount: batchMessages.length });
+  const existingMessageId = readChatProcessing(chatId)?.progress_message_id || "";
+  if (existingMessageId) {
+    try {
+      await updateCardMessage(config, existingMessageId, card, flags);
+      updateChatProcessing(chatId, {
+        progress_updated_at: new Date().toISOString(),
+        progress_text_preview: truncateText(text, 180)
+      });
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "progress-message.update",
+        chat_id: chatId,
+        message_id: existingMessageId,
+        text
+      });
+      return { messageId: existingMessageId, mode: "update" };
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "progress-message-update-failed",
+        chat_id: chatId,
+        message_ids: batchMessages.map((item) => item.message_id),
+        message_id: existingMessageId,
+        error: String(error)
+      });
+    }
+  }
+
+  const response = await sendCardMessage(config, "chat_id", chatId, card, flags);
+  const messageId = response?.data?.message_id || "";
+  updateChatProcessing(chatId, {
+    progress_message_id: messageId,
+    progress_updated_at: new Date().toISOString(),
+    progress_text_preview: truncateText(text, 180)
+  });
+  appendJsonl(eventsPath, {
+    timestamp: new Date().toISOString(),
+    type: "progress-message.create",
+    chat_id: chatId,
+    message_ids: batchMessages.map((item) => item.message_id),
+    message_id: messageId,
+    text
+  });
+  return { messageId, mode: "create" };
+}
+
+async function deliverFinalReply(config, chatId, batchMessages, replyText, flags = {}) {
+  const progressMessageId = readChatProcessing(chatId)?.progress_message_id || "";
+  const finalCard = buildStatusCard(replyText, { status: "done", mergedCount: batchMessages.length });
+  if (progressMessageId) {
+    try {
+      await updateCardMessage(config, progressMessageId, finalCard, flags);
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "final-reply.patch",
+        chat_id: chatId,
+        message_ids: batchMessages.map((item) => item.message_id),
+        message_id: progressMessageId
+      });
+      return { messageId: progressMessageId, mode: "patch" };
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "final-reply-patch-failed",
+        chat_id: chatId,
+        message_ids: batchMessages.map((item) => item.message_id),
+        message_id: progressMessageId,
+        error: String(error)
+      });
+    }
+  }
+
+  const response = await sendCardMessage(config, "chat_id", chatId, finalCard, flags);
+  const messageId = response?.data?.message_id || "";
+  appendJsonl(eventsPath, {
+    timestamp: new Date().toISOString(),
+    type: "final-reply.send",
+    chat_id: chatId,
+    message_ids: batchMessages.map((item) => item.message_id),
+    message_id: messageId
+  });
+  return { messageId, mode: "send" };
+}
+
 function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages, liveProbeSummary) {
   const historyLines = historyMessages.map(formatHistoryLine).join("\n");
   const inboxLines = inboxMessages.map(formatHistoryLine).join("\n");
@@ -660,6 +888,7 @@ function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages,
     "如果用户是在追问正在执行的工作，请明确说清当前结果、卡点和下一步。",
     "如果用户只是连续发了几个补充短句，要把它们整合成一次自然回复。",
     "除非上面的实时平台探针明确失败，或你在这轮执行里亲自再次验证失败，否则不要声称 InStreet API / 当前环境不可访问。",
+    "如果实时探针里出现“快照降级”，那表示单个接口拉取失败但整轮快照仍然成功，不要把它表述成平台整体不可用。",
     "如果只是本地快照缺字段，要明确说“本地未落盘/未缓存”，不要把它说成“线上不可访问”。",
     "每一轮和用户的交互，原则上都要带来至少一次社区公开动作。优先顺序是：回复评论 > 发布主帖 > 发布文学社章节 > 在他人帖子下高质量评论。"
   ].join("\n");
@@ -684,6 +913,7 @@ function runCodexPrompt(prompt, config, flags, hooks = {}) {
       : spawn(
         resolveCodexExecutable(config, flags),
         [
+          ...(shouldBypassCodexSandbox(config, flags) ? ["--dangerously-bypass-approvals-and-sandbox"] : []),
           "exec",
           "-C",
           repoRoot,
@@ -778,8 +1008,9 @@ function buildCodexFailureReply(batchMessages, error) {
   return buildFallbackReply(batchMessages);
 }
 
-function buildLongRunningReply() {
-  return "这轮消息我还在处理，Codex 仍在正常运行。你先不用重复发，我整理完会统一回一条完整结果。";
+function buildLongRunningReply(batchMessages) {
+  const mergedCount = batchMessages.length;
+  return `派蒙还在处理这轮消息（已合并 ${mergedCount} 条），Codex 仍在正常运行。你先不用重复发，我会继续更新这条消息。`;
 }
 
 function getMergeWindowMs(config, flags) {
@@ -945,6 +1176,13 @@ async function processChatQueue(chatId, config, flags) {
   processingChats.add(chatId);
 
   try {
+    await upsertProgressMessage(
+      config,
+      chatId,
+      batchMessages,
+      buildProgressStatusReply(batchMessages, "initial"),
+      flags
+    );
     const liveProbe = await gatherLiveProbe(config, flags, chatId, batchMessages);
     let normalizedHistory = [];
     try {
@@ -962,14 +1200,21 @@ async function processChatQueue(chatId, config, flags) {
         error: String(error)
       });
     }
+    await upsertProgressMessage(
+      config,
+      chatId,
+      batchMessages,
+      buildProgressStatusReply(batchMessages, "codex"),
+      flags
+    );
     const inboxMessages = readInboxLines(chatId, getHistoryLimit(config, flags));
     const prompt = buildCodexPrompt(chatId, batchMessages, normalizedHistory, inboxMessages, liveProbe.summary);
     let replyText = "";
     try {
       replyText = await runCodexPrompt(prompt, config, flags, {
         onLongRunning: async () => {
-          const waitText = buildLongRunningReply();
-          await sendTextMessage(config, "chat_id", chatId, waitText);
+          const waitText = buildLongRunningReply(batchMessages);
+          await upsertProgressMessage(config, chatId, batchMessages, waitText, flags);
           appendJsonl(eventsPath, {
             timestamp: new Date().toISOString(),
             type: "codex-progress-ping",
@@ -1001,13 +1246,15 @@ async function processChatQueue(chatId, config, flags) {
     if (!replyText) {
       replyText = buildFallbackReply(batchMessages);
     }
-    await sendTextMessage(config, "chat_id", chatId, replyText);
+    const delivered = await deliverFinalReply(config, chatId, batchMessages, replyText, flags);
     await clearTypingReactions(config, batchMessages, flags);
     appendJsonl(batchesPath, {
       timestamp: new Date().toISOString(),
       chat_id: chatId,
       message_ids: batchMessages.map((item) => item.message_id),
       merged_count: batchMessages.length,
+      reply_message_id: delivered.messageId,
+      reply_delivery_mode: delivered.mode,
       reply: replyText
     });
   } catch (error) {
@@ -1230,8 +1477,10 @@ function printHelp() {
   console.log(`Usage:
   node feishu_gateway.mjs token
   node feishu_gateway.mjs send --receive-id-type chat_id --receive-id xxx --text "hello"
+  node feishu_gateway.mjs send-card --receive-id-type chat_id --receive-id xxx --text "working"
+  node feishu_gateway.mjs update-card --message-id om_xxx --text "updated text"
   node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--merge-window-ms 15000]
-  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--history-limit 12] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000]`);
+  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--history-limit 12] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000] [--codex-bypass-sandbox|--no-codex-bypass-sandbox]`);
 }
 
 async function main() {
@@ -1251,6 +1500,35 @@ async function main() {
       throw new Error("send requires --receive-id and --text");
     }
     const result = await sendTextMessage(config, receiveIdType, receiveId, text);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (command === "send-card") {
+    const receiveIdType = flags["receive-id-type"] || "chat_id";
+    const receiveId = flags["receive-id"];
+    const text = flags.text;
+    if (!receiveId || !text) {
+      throw new Error("send-card requires --receive-id and --text");
+    }
+    const card = buildStatusCard(text, {
+      status: String(flags.status || "working"),
+      mergedCount: Number(flags["merged-count"] || 1)
+    });
+    const result = await sendCardMessage(config, receiveIdType, receiveId, card, flags);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (command === "update-card" || command === "update") {
+    const messageId = flags["message-id"];
+    const text = flags.text;
+    if (!messageId || !text) {
+      throw new Error("update-card requires --message-id and --text");
+    }
+    const card = buildStatusCard(text, {
+      status: String(flags.status || "working"),
+      mergedCount: Number(flags["merged-count"] || 1)
+    });
+    const result = await updateCardMessage(config, messageId, card, flags);
     console.log(JSON.stringify(result, null, 2));
     return;
   }
