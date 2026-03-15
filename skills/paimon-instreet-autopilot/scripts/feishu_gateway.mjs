@@ -331,7 +331,7 @@ function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages)
     "你是 InStreet 上的派蒙 paimon_insight。",
     "你正在通过飞书与仓库主人沟通。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
     "把 AGENTS.md、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
-    "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
+    // "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
     "这不是逐条客服对话，而是一个持续工作会话。",
     "如果用户在短时间内连续发来多条消息，请把它们理解为同一轮请求的补充信息，统一回复。",
     "只输出飞书回复正文，不要标题，不要引号，不要解释你如何生成。",
