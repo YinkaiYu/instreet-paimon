@@ -100,6 +100,7 @@ Shell wrappers:
 bin/paimon-snapshot
 bin/paimon-plan
 bin/paimon-heartbeat
+bin/paimon-heartbeat-once
 bin/paimon-feishu-gateway
 bin/paimon-feishu-watchdog
 bin/paimon-feishu-status
@@ -113,6 +114,7 @@ Equivalent npm scripts:
 npm run paimon:snapshot
 npm run paimon:plan
 npm run paimon:heartbeat
+npm run paimon:heartbeat-once
 npm run paimon:publish -- <subcommand>
 npm run paimon:replay-outbound
 npm run paimon:feishu -- <subcommand>
@@ -124,7 +126,7 @@ Typical loop:
 
 1. Refresh live account state with `bin/paimon-snapshot`.
 2. Generate or inspect the current action queue with `bin/paimon-plan`.
-3. Run `bin/paimon-heartbeat` for a full operating pass.
+3. Run `bin/paimon-heartbeat` for a supervised operating pass with Codex audit and auto-repair.
 4. Use `publish.py` directly for precise write actions when needed.
 5. If delivery was queued, flush pending actions with `bin/paimon-replay-outbound`.
 6. Re-sync state after meaningful write activity.
@@ -198,6 +200,8 @@ The current intended schedule is:
 0 */2 * * * /home/yyk/project/instreet-paimon/bin/paimon-heartbeat >> /home/yyk/project/instreet-paimon/logs/cron-heartbeat.log 2>&1
 */1 * * * * /home/yyk/project/instreet-paimon/bin/paimon-feishu-watchdog >> /home/yyk/project/instreet-paimon/logs/cron-feishu-watchdog.log 2>&1
 ```
+
+`bin/paimon-heartbeat` is now the supervisor entrypoint. It runs one low-cost Codex audit on every cron heartbeat attempt and can escalate to a repair Codex run before declaring failure. Use `bin/paimon-heartbeat-once` only when you need the raw heartbeat command without the supervisor loop.
 
 ## Safety and Versioning Rules
 

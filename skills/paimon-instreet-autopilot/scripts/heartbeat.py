@@ -49,7 +49,7 @@ def _fallback_reply(comment: dict) -> str:
     )
 
 
-def _generate_reply(post: dict, comment: dict) -> str:
+def _generate_reply(post: dict, comment: dict, *, model: str | None, reasoning_effort: str | None) -> str:
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请用中文写一条评论回复。
 
@@ -65,11 +65,17 @@ def _generate_reply(post: dict, comment: dict) -> str:
 待回复评论：
 {comment.get("content", "")}
 """.strip()
-    result = run_codex(prompt)
+    result = run_codex(prompt, model=model, reasoning_effort=reasoning_effort)
     return result.strip()
 
 
-def _generate_post(idea: dict, posts: list[dict]) -> tuple[str, str, str]:
+def _generate_post(
+    idea: dict,
+    posts: list[dict],
+    *,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> tuple[str, str, str]:
     recent_titles = "\n".join(f"- {item.get('title', '')}" for item in posts[:8])
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请根据选题写一篇新的中文帖子。
@@ -92,7 +98,7 @@ CONTENT:
 最近帖子标题，避免复刻：
 {recent_titles}
 """.strip()
-    result = run_codex(prompt)
+    result = run_codex(prompt, model=model, reasoning_effort=reasoning_effort)
     title_match = re.search(r"^TITLE:\s*(.+)$", result, re.MULTILINE)
     submolt_match = re.search(r"^SUBMOLT:\s*(.+)$", result, re.MULTILINE)
     content_match = re.search(r"^CONTENT:\s*(.+)$", result, re.MULTILINE | re.DOTALL)
@@ -101,7 +107,7 @@ CONTENT:
     return title_match.group(1).strip(), submolt_match.group(1).strip(), content_match.group(1).strip()
 
 
-def _generate_feed_comment(feed_post: dict) -> str:
+def _generate_feed_comment(feed_post: dict, *, model: str | None, reasoning_effort: str | None) -> str:
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请针对下面这条帖子写一条高质量中文评论。
 
@@ -115,7 +121,7 @@ def _generate_feed_comment(feed_post: dict) -> str:
 帖子摘要：{feed_post.get("content_preview", "")}
 作者：{feed_post.get("author", {}).get("username", "")}
 """.strip()
-    return run_codex(prompt).strip()
+    return run_codex(prompt, model=model, reasoning_effort=reasoning_effort).strip()
 
 
 def main() -> None:
@@ -129,6 +135,8 @@ def main() -> None:
     config = load_config()
     client = InStreetClient(config)
     username = config.identity["name"]
+    codex_model = config.automation.get("codex_model") or None
+    codex_reasoning_effort = config.automation.get("codex_reasoning_effort") or None
 
     run_snapshot(
         archive=args.archive,
@@ -158,7 +166,12 @@ def main() -> None:
                 continue
             if args.allow_codex:
                 try:
-                    reply = _generate_reply(post, comment)
+                    reply = _generate_reply(
+                        post,
+                        comment,
+                        model=codex_model,
+                        reasoning_effort=codex_reasoning_effort,
+                    )
                 except Exception:
                     reply = _fallback_reply(comment)
             else:
@@ -181,7 +194,12 @@ def main() -> None:
             if idea:
                 try:
                     if args.allow_codex:
-                        title, submolt, content = _generate_post(idea, posts)
+                        title, submolt, content = _generate_post(
+                            idea,
+                            posts,
+                            model=codex_model,
+                            reasoning_effort=codex_reasoning_effort,
+                        )
                     else:
                         title = idea["title"]
                         submolt = idea.get("submolt", "square")
@@ -206,7 +224,15 @@ def main() -> None:
             feed = read_json(CURRENT_STATE_DIR / "feed.json", default={}).get("data", {}).get("posts", [])
             feed_target = next((item for item in feed if item.get("author", {}).get("username") != username), None)
             if feed_target:
-                content = _generate_feed_comment(feed_target) if args.allow_codex else truncate_text(feed_target.get("title", ""), 80)
+                content = (
+                    _generate_feed_comment(
+                        feed_target,
+                        model=codex_model,
+                        reasoning_effort=codex_reasoning_effort,
+                    )
+                    if args.allow_codex
+                    else truncate_text(feed_target.get("title", ""), 80)
+                )
                 result = client.create_comment(feed_target["id"], content)
                 actions.append(
                     {

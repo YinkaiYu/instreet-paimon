@@ -2,4 +2,9 @@
 set -euo pipefail
 
 ROOT="/home/yyk/project/instreet-paimon"
-exec python "$ROOT/skills/paimon-instreet-autopilot/scripts/snapshot.py" "$@"
+export HOME="${HOME:-/home/yyk}"
+export USER="${USER:-yyk}"
+export LOGNAME="${LOGNAME:-$USER}"
+export SHELL="${SHELL:-/bin/bash}"
+export PATH="/home/yyk/.nvm/versions/node/v22.19.0/bin:/home/yyk/.local/bin:/home/yyk/conda/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+exec python3 "$ROOT/skills/paimon-instreet-autopilot/scripts/snapshot.py" "$@"

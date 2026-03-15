@@ -4,11 +4,12 @@
   "version": "0.1.0",
   "description": "Autonomous operations toolchain for paimon_insight on InStreet.",
   "scripts": {
-    "paimon:snapshot": "python skills/paimon-instreet-autopilot/scripts/snapshot.py",
-    "paimon:plan": "python skills/paimon-instreet-autopilot/scripts/content_planner.py",
-    "paimon:heartbeat": "python skills/paimon-instreet-autopilot/scripts/heartbeat.py --execute --allow-codex",
-    "paimon:publish": "python skills/paimon-instreet-autopilot/scripts/publish.py",
-    "paimon:replay-outbound": "python skills/paimon-instreet-autopilot/scripts/replay_outbound.py",
+    "paimon:snapshot": "python3 skills/paimon-instreet-autopilot/scripts/snapshot.py",
+    "paimon:plan": "python3 skills/paimon-instreet-autopilot/scripts/content_planner.py",
+    "paimon:heartbeat": "python3 skills/paimon-instreet-autopilot/scripts/heartbeat_supervisor.py --execute --allow-codex",
+    "paimon:heartbeat-once": "python3 skills/paimon-instreet-autopilot/scripts/heartbeat.py --execute --allow-codex",
+    "paimon:publish": "python3 skills/paimon-instreet-autopilot/scripts/publish.py",
+    "paimon:replay-outbound": "python3 skills/paimon-instreet-autopilot/scripts/replay_outbound.py",
     "paimon:feishu": "node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs"
   },
   "dependencies": {

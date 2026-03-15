@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 import tempfile
 import time
@@ -522,31 +523,170 @@ class InStreetClient:
         return self._request("POST", f"/api/v1/agents/{username}/follow")
 
 
-def run_codex(prompt: str, *, timeout: int = 900) -> str:
-    with tempfile.NamedTemporaryFile(prefix="paimon-codex-", suffix=".txt", delete=False) as handle:
-        output_path = Path(handle.name)
+def find_codex_executable() -> str:
+    env = _codex_subprocess_env()
+    home_dir = env["HOME"]
+    lookup = subprocess.run(
+        ["/bin/bash", "-lc", "command -v codex"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+        env=env,
+    )
+    shell_path = (lookup.stdout or "").strip().splitlines()
+    if shell_path:
+        candidate = Path(shell_path[0])
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
 
+    candidates = [
+        Path(home_dir) / ".nvm" / "versions" / "node" / "v22.19.0" / "bin" / "codex",
+        Path(home_dir) / ".nvm" / "versions" / "node" / "current" / "bin" / "codex",
+        Path(home_dir) / ".local" / "bin" / "codex",
+        Path("/usr/local/bin/codex"),
+        Path("/usr/bin/codex"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise RuntimeError(f"codex executable not found; PATH={os.environ.get('PATH', '')}")
+
+
+def _codex_subprocess_env() -> dict[str, str]:
+    home_dir = os.environ.get("HOME") or f"/home/{os.environ.get('USER') or os.environ.get('LOGNAME') or 'yyk'}"
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or Path(home_dir).name or "yyk"
+    path_entries: list[str] = []
+    for raw_path in (
+        os.environ.get("PATH", ""),
+        str(Path(home_dir) / ".nvm" / "versions" / "node" / "v22.19.0" / "bin"),
+        str(Path(home_dir) / ".nvm" / "versions" / "node" / "current" / "bin"),
+        str(Path(home_dir) / ".local" / "bin"),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ):
+        for entry in raw_path.split(":"):
+            if entry and entry not in path_entries:
+                path_entries.append(entry)
+    return {
+        **os.environ,
+        "HOME": home_dir,
+        "USER": user,
+        "LOGNAME": os.environ.get("LOGNAME") or user,
+        "SHELL": os.environ.get("SHELL") or "/bin/bash",
+        "TERM": os.environ.get("TERM") or "dumb",
+        "PATH": ":".join(path_entries),
+    }
+
+
+def _build_codex_exec_cmd(
+    output_path: Path,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    output_schema: Path | None = None,
+    full_auto: bool = False,
+    dangerous: bool = False,
+) -> list[str]:
     cmd = [
-        "codex",
+        find_codex_executable(),
         "exec",
         "-C",
         str(REPO_ROOT),
         "--skip-git-repo-check",
         "--color",
         "never",
-        "-o",
-        str(output_path),
-        "-",
     ]
-    completed = subprocess.run(
-        cmd,
-        input=prompt,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"codex exec failed: {stderr}")
-    return output_path.read_text(encoding="utf-8").strip()
+    if model:
+        cmd.extend(["-m", model])
+    if reasoning_effort:
+        cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+    if dangerous:
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    elif full_auto:
+        cmd.append("--full-auto")
+    if output_schema is not None:
+        cmd.extend(["--output-schema", str(output_schema)])
+    cmd.extend(["-o", str(output_path), "-"])
+    return cmd
+
+
+def run_codex(
+    prompt: str,
+    *,
+    timeout: int = 900,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    full_auto: bool = False,
+    dangerous: bool = False,
+) -> str:
+    with tempfile.NamedTemporaryFile(prefix="paimon-codex-", suffix=".txt", delete=False) as handle:
+        output_path = Path(handle.name)
+
+    try:
+        cmd = _build_codex_exec_cmd(
+            output_path,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            full_auto=full_auto,
+            dangerous=dangerous,
+        )
+        completed = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=_codex_subprocess_env(),
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"codex exec failed: {stderr}")
+        return output_path.read_text(encoding="utf-8").strip()
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def run_codex_json(
+    prompt: str,
+    schema: dict[str, Any],
+    *,
+    timeout: int = 900,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    full_auto: bool = False,
+    dangerous: bool = False,
+) -> Any:
+    with tempfile.NamedTemporaryFile(prefix="paimon-codex-schema-", suffix=".json", delete=False) as handle:
+        schema_path = Path(handle.name)
+    with tempfile.NamedTemporaryFile(prefix="paimon-codex-json-", suffix=".json", delete=False) as handle:
+        output_path = Path(handle.name)
+
+    try:
+        schema_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        cmd = _build_codex_exec_cmd(
+            output_path,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            output_schema=schema_path,
+            full_auto=full_auto,
+            dangerous=dangerous,
+        )
+        completed = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=_codex_subprocess_env(),
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"codex exec failed: {stderr}")
+        return json.loads(output_path.read_text(encoding="utf-8"))
+    finally:
+        schema_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
