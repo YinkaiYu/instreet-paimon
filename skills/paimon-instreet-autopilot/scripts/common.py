@@ -24,6 +24,8 @@ DRAFTS_DIR = STATE_ROOT / "drafts"
 LOGS_DIR = REPO_ROOT / "logs"
 OUTBOUND_JOURNAL_PATH = CURRENT_STATE_DIR / "outbound_journal.json"
 OUTBOUND_ATTEMPTS_LOG = LOGS_DIR / "outbound_attempts.jsonl"
+PENDING_OUTBOUND_PATH = CURRENT_STATE_DIR / "pending_outbound.json"
+PENDING_OUTBOUND_LOG = LOGS_DIR / "pending_outbound.jsonl"
 
 
 class ApiError(RuntimeError):
@@ -114,6 +116,14 @@ def load_outbound_journal() -> dict[str, Any]:
     return read_json(OUTBOUND_JOURNAL_PATH, default=_journal_template())
 
 
+def _pending_template() -> dict[str, Any]:
+    return {"version": 1, "records": {}}
+
+
+def load_pending_outbound() -> dict[str, Any]:
+    return read_json(PENDING_OUTBOUND_PATH, default=_pending_template())
+
+
 def _journal_key(channel: str, action: str, dedupe_key: str) -> str:
     return f"{channel}:{action}:{dedupe_key}"
 
@@ -121,6 +131,94 @@ def _journal_key(channel: str, action: str, dedupe_key: str) -> str:
 def get_outbound_record(channel: str, action: str, dedupe_key: str) -> dict[str, Any] | None:
     journal = load_outbound_journal()
     return journal.get("records", {}).get(_journal_key(channel, action, dedupe_key))
+
+
+def get_pending_outbound_record(channel: str, action: str, dedupe_key: str) -> dict[str, Any] | None:
+    pending = load_pending_outbound()
+    return pending.get("records", {}).get(_journal_key(channel, action, dedupe_key))
+
+
+def queue_outbound_action(
+    channel: str,
+    action: str,
+    dedupe_key: str,
+    payload: dict[str, Any],
+    *,
+    error_text: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    pending = load_pending_outbound()
+    records = pending.setdefault("records", {})
+    key = _journal_key(channel, action, dedupe_key)
+    now = now_utc()
+    record = records.get(
+        key,
+        {
+            "channel": channel,
+            "action": action,
+            "dedupe_key": dedupe_key,
+            "queued_at": now,
+            "queue_attempts": 0,
+        },
+    )
+    record.update(
+        {
+            "payload_hash": payload_digest(payload),
+            "payload": payload,
+            "updated_at": now,
+            "queue_attempts": int(record.get("queue_attempts", 0)) + 1,
+            "status": "queued",
+            "last_error": error_text,
+        }
+    )
+    if meta:
+        merged_meta = dict(record.get("meta", {}))
+        merged_meta.update(meta)
+        record["meta"] = merged_meta
+    records[key] = record
+    write_json(PENDING_OUTBOUND_PATH, pending)
+    append_jsonl(
+        PENDING_OUTBOUND_LOG,
+        {
+            "timestamp": now,
+            "channel": channel,
+            "action": action,
+            "dedupe_key": dedupe_key,
+            "status": "queued",
+            "payload_hash": record["payload_hash"],
+            "error": error_text,
+            "meta": meta or {},
+        },
+    )
+    return record
+
+
+def drop_pending_outbound_action(channel: str, action: str, dedupe_key: str) -> None:
+    pending = load_pending_outbound()
+    records = pending.get("records", {})
+    key = _journal_key(channel, action, dedupe_key)
+    if key not in records:
+        return
+    record = records.pop(key)
+    write_json(PENDING_OUTBOUND_PATH, pending)
+    append_jsonl(
+        PENDING_OUTBOUND_LOG,
+        {
+            "timestamp": now_utc(),
+            "channel": channel,
+            "action": action,
+            "dedupe_key": dedupe_key,
+            "status": "cleared",
+            "payload_hash": record.get("payload_hash"),
+            "meta": record.get("meta", {}),
+        },
+    )
+
+
+def list_pending_outbound() -> list[dict[str, Any]]:
+    pending = load_pending_outbound()
+    records = pending.get("records", {})
+    return sorted(records.values(), key=lambda item: item.get("queued_at", ""))
 
 
 def record_outbound_attempt(
@@ -198,6 +296,7 @@ def run_outbound_action(
     existing = get_outbound_record(channel, action, dedupe_key)
     current_hash = payload_digest(payload)
     if existing and existing.get("status") == "success" and existing.get("payload_hash") == current_hash:
+        drop_pending_outbound_action(channel, action, dedupe_key)
         return existing.get("last_result"), existing, True
 
     last_exc: Exception | None = None
@@ -215,6 +314,7 @@ def run_outbound_action(
                 result=result,
                 meta=meta,
             )
+            drop_pending_outbound_action(channel, action, dedupe_key)
             return result, record, False
         except Exception as exc:  # pragma: no cover - runtime API failures are environment-dependent
             last_exc = exc
@@ -336,6 +436,12 @@ class InStreetClient:
 
     def literary_works(self, *, agent_id: str | None = None) -> Any:
         return self._request("GET", "/api/v1/literary/works", params={"agent_id": agent_id})
+
+    def literary_work(self, work_id: str) -> Any:
+        return self._request("GET", f"/api/v1/literary/works/{work_id}")
+
+    def literary_chapter(self, work_id: str, chapter_number: int) -> Any:
+        return self._request("GET", f"/api/v1/literary/works/{work_id}/chapters/{chapter_number}")
 
     def groups_my(self, *, role: str = "owner") -> Any:
         return self._request("GET", "/api/v1/groups/my", params={"role": role})

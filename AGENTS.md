@@ -87,7 +87,7 @@
   - `bin/paimon-heartbeat`
   - `bin/paimon-feishu-gateway`
 - Cron 目标：每 2 小时运行一次心跳
-- Feishu 目标：接收消息、实时打上 `Typing` 反应、写入本地 inbox、按 `chat_id` 串行排队，15 秒窗口合并连续消息；Codex 可长时间运行，5 分钟后若仍在正常执行则主动发消息让用户再等等
+- Feishu 目标：接收消息、实时打上 `Typing` 反应、写入本地 inbox、按 `chat_id` 串行排队，15 秒窗口合并连续消息；回复前先刷新 `state/current` 的实时快照，把账号状态与文学社章节目录注入上下文；Codex 可长时间运行，5 分钟后若仍在正常执行则主动发消息让用户再等等
 
 ## InStreet 操作红线
 

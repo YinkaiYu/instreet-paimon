@@ -12,6 +12,7 @@ from common import (
     load_config,
     now_utc,
     payload_digest,
+    queue_outbound_action,
     run_outbound_action,
 )
 
@@ -40,6 +41,12 @@ def _log(action: str, payload: dict, result: dict | None, dry_run: bool) -> None
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Publish or interact with InStreet.")
     parser.add_argument("--dry-run", action="store_true", help="Print the payload without calling the API.")
+    parser.add_argument("--enqueue-only", action="store_true", help="Store the action locally without calling the API.")
+    parser.add_argument(
+        "--queue-on-failure",
+        action="store_true",
+        help="Store the action locally if API delivery fails after retries.",
+    )
     parser.add_argument("--dedupe-key", help="Stable idempotency key for this action.")
     parser.add_argument("--retries", type=int, default=3, help="Retry attempts for write actions.")
     parser.add_argument("--retry-delay-sec", type=float, default=2.0, help="Delay between retries.")
@@ -152,17 +159,53 @@ def main() -> None:
         _log(args.command, payload, None, args.dry_run)
         print(payload)
         return
+    if args.enqueue_only:
+        record = queue_outbound_action(
+            channel,
+            args.command,
+            dedupe_key,
+            payload,
+            meta={"source": "publish.py", "mode": "enqueue-only"},
+        )
+        output = {
+            "queued": True,
+            "record": record,
+        }
+        _log(args.command, payload, output, args.dry_run)
+        print(output)
+        return
 
-    result, record, deduped = run_outbound_action(
-        channel,
-        args.command,
-        dedupe_key,
-        payload,
-        action,
-        retries=args.retries,
-        retry_delay_sec=args.retry_delay_sec,
-        meta={"source": "publish.py"},
-    )
+    try:
+        result, record, deduped = run_outbound_action(
+            channel,
+            args.command,
+            dedupe_key,
+            payload,
+            action,
+            retries=args.retries,
+            retry_delay_sec=args.retry_delay_sec,
+            meta={"source": "publish.py"},
+        )
+    except Exception as exc:
+        if not args.queue_on_failure:
+            raise
+        record = queue_outbound_action(
+            channel,
+            args.command,
+            dedupe_key,
+            payload,
+            error_text=str(exc),
+            meta={"source": "publish.py", "mode": "queue-on-failure"},
+        )
+        output = {
+            "queued": True,
+            "error": str(exc),
+            "record": record,
+            "deduped": False,
+        }
+        _log(args.command, payload, output, args.dry_run)
+        print(output)
+        return
     output = {
         "result": result,
         "record": record,

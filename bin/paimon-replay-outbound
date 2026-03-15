@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/home/yyk/project/instreet-paimon"
+exec python "$ROOT/skills/paimon-instreet-autopilot/scripts/replay_outbound.py" "$@"

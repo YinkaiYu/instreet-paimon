@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as Lark from "@larksuiteoapi/node-sdk";
 
@@ -12,6 +13,10 @@ const repoRoot = path.resolve(__dirname, "../../..");
 const configPath = path.join(repoRoot, "config", "paimon.json");
 const stateCurrentDir = path.join(repoRoot, "state", "current");
 const tmpDir = path.join(repoRoot, "tmp");
+const snapshotScriptPath = path.join(__dirname, "snapshot.py");
+const accountOverviewPath = path.join(stateCurrentDir, "account_overview.json");
+const literaryDetailsPath = path.join(stateCurrentDir, "literary_details.json");
+const reactionsPath = path.join(stateCurrentDir, "feishu_reactions.json");
 const inboxPath = path.join(stateCurrentDir, "feishu_inbox.jsonl");
 const errorsPath = path.join(stateCurrentDir, "feishu_gateway_errors.jsonl");
 const eventsPath = path.join(stateCurrentDir, "feishu_events.jsonl");
@@ -21,6 +26,7 @@ const batchesPath = path.join(stateCurrentDir, "feishu_batches.jsonl");
 const chatTimers = new Map();
 const processingChats = new Set();
 let queueSweepTimer = null;
+let cachedCodexExecutable = null;
 
 function ensureDirs() {
   for (const dir of [stateCurrentDir, tmpDir]) {
@@ -59,6 +65,37 @@ function readSeenMessages() {
 function writeSeenMessages(data) {
   fs.mkdirSync(path.dirname(seenMessagesPath), { recursive: true });
   fs.writeFileSync(seenMessagesPath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function readReactionState() {
+  return readJsonFile(reactionsPath, { messages: {} });
+}
+
+function writeReactionState(data) {
+  writeJsonFile(reactionsPath, data);
+}
+
+function rememberReaction(messageId, payload) {
+  if (!messageId || !payload?.reaction_id) {
+    return;
+  }
+  const state = readReactionState();
+  state.messages[messageId] = payload;
+  writeReactionState(state);
+}
+
+function consumeReaction(messageId) {
+  if (!messageId) {
+    return null;
+  }
+  const state = readReactionState();
+  const entry = state.messages[messageId] || null;
+  if (!entry) {
+    return null;
+  }
+  delete state.messages[messageId];
+  writeReactionState(state);
+  return entry;
 }
 
 function readQueue() {
@@ -193,6 +230,19 @@ async function sendMessageReaction(config, messageId, emojiType, flags = {}) {
   );
 }
 
+async function deleteMessageReaction(config, messageId, reactionId, flags = {}) {
+  return feishuApiRequest(
+    config,
+    `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(reactionId)}`,
+    {
+      method: "DELETE"
+    },
+    null,
+    null,
+    flags
+  );
+}
+
 async function fetchMessagesPage(config, chatId, pageSize = 50, pageToken = "", flags = {}) {
   const url = new URL("https://open.feishu.cn/open-apis/im/v1/messages");
   url.searchParams.set("container_id_type", "chat");
@@ -289,6 +339,21 @@ function truncateText(text, limit = 220) {
   return `${source.slice(0, limit - 3)}...`;
 }
 
+function summarizeWorkDetail(detail, limit = 6) {
+  const work = detail?.data?.work || {};
+  const chapters = Array.isArray(detail?.data?.chapters) ? detail.data.chapters : [];
+  const chapterSummary = chapters
+    .slice(0, limit)
+    .map((chapter) => `${chapter.chapter_number || "?"}:${chapter.title || "未命名章节"}`)
+    .join(" | ");
+  return {
+    title: work.title || "未命名作品",
+    chapterCount: work.chapter_count ?? chapters.length,
+    updatedAt: work.updated_at || "",
+    chapterSummary
+  };
+}
+
 function getCodexTimeoutMs(config, flags) {
   return Number(flags["codex-timeout-ms"] || config.automation?.feishu_codex_timeout_ms || 1200000);
 }
@@ -316,6 +381,82 @@ function getCodexCommand(config, flags) {
   return String(flags["codex-command"] || config.automation?.feishu_codex_command || "").trim();
 }
 
+function getConfiguredCodexExecutable(config, flags) {
+  return String(
+    flags["codex-bin"] ||
+    process.env.PAIMON_CODEX_BIN ||
+    config.automation?.feishu_codex_bin ||
+    ""
+  ).trim();
+}
+
+function isExecutableFile(filePath) {
+  if (!filePath) {
+    return false;
+  }
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveCodexExecutable(config, flags) {
+  if (cachedCodexExecutable) {
+    return cachedCodexExecutable;
+  }
+
+  const explicit = getConfiguredCodexExecutable(config, flags);
+  if (explicit) {
+    cachedCodexExecutable = explicit;
+    return cachedCodexExecutable;
+  }
+
+  const candidateNames = ["codex"];
+  for (const name of candidateNames) {
+    const local = spawnSync(name, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    if (!local.error) {
+      cachedCodexExecutable = name;
+      return cachedCodexExecutable;
+    }
+  }
+
+  const loginShellLookup = spawnSync("/bin/bash", ["-lc", "command -v codex"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      HOME: process.env.HOME || `/home/${process.env.USER || "yyk"}`
+    }
+  });
+  const shellPath = (loginShellLookup.stdout || "").trim().split("\n")[0] || "";
+  if (isExecutableFile(shellPath)) {
+    cachedCodexExecutable = shellPath;
+    return cachedCodexExecutable;
+  }
+
+  const homeDir = process.env.HOME || `/home/${process.env.USER || "yyk"}`;
+  const commonCandidates = [
+    path.join(homeDir, ".nvm", "versions", "node", "v22.19.0", "bin", "codex"),
+    path.join(homeDir, ".nvm", "versions", "node", "current", "bin", "codex"),
+    path.join(homeDir, ".local", "bin", "codex"),
+    "/usr/local/bin/codex",
+    "/usr/bin/codex"
+  ];
+  for (const candidate of commonCandidates) {
+    if (isExecutableFile(candidate)) {
+      cachedCodexExecutable = candidate;
+      return cachedCodexExecutable;
+    }
+  }
+
+  throw new Error(`codex executable not found; PATH=${process.env.PATH || ""}`);
+}
+
 function formatHistoryLine(item) {
   const senderType = item.sender?.sender_type || item.sender?.id_type || "unknown";
   const who = senderType === "user" ? "用户" : senderType === "app" ? "派蒙" : senderType;
@@ -323,7 +464,172 @@ function formatHistoryLine(item) {
   return `- ${who}: ${content}`;
 }
 
-function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages) {
+function buildLiveProbeSummary(snapshotResult, overview, literaryDetails) {
+  const lines = [];
+  if (snapshotResult?.skipped) {
+    lines.push("- 实时快照: 已跳过");
+  } else if (snapshotResult?.success) {
+    lines.push(`- 实时快照: 成功，${truncateText(snapshotResult.stdout || "snapshot ok", 180)}`);
+  } else if (snapshotResult?.attempted) {
+    lines.push(`- 实时快照: 失败，${truncateText(snapshotResult.error || snapshotResult.stderr || "unknown error", 180)}`);
+  }
+
+  if (overview?.captured_at || overview?.score !== undefined) {
+    const metrics = [];
+    if (overview?.captured_at) {
+      metrics.push(`captured_at=${overview.captured_at}`);
+    }
+    if (overview?.score !== undefined) {
+      metrics.push(`score=${overview.score}`);
+    }
+    if (overview?.unread_notification_count !== undefined) {
+      metrics.push(`unread_notifications=${overview.unread_notification_count}`);
+    }
+    if (overview?.unread_message_count !== undefined) {
+      metrics.push(`unread_messages=${overview.unread_message_count}`);
+    }
+    lines.push(`- 账号概览: ${metrics.join(" | ")}`);
+  }
+
+  const detailMap = literaryDetails?.details || {};
+  const detailEntries = Object.values(detailMap);
+  for (const detail of detailEntries.slice(0, 3)) {
+    const summary = summarizeWorkDetail(detail);
+    lines.push(
+      `- 文学社作品: ${summary.title} | chapters=${summary.chapterCount} | updated_at=${summary.updatedAt || "unknown"}`
+    );
+    if (summary.chapterSummary) {
+      lines.push(`  章节索引: ${summary.chapterSummary}`);
+    }
+  }
+  return lines.join("\n") || "- 无";
+}
+
+async function refreshLiveSnapshot(config, flags) {
+  if (!shouldRefreshLiveSnapshot(config, flags)) {
+    return { attempted: false, skipped: true, success: false };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const child = spawn("python3", [snapshotScriptPath, "--post-limit", "12", "--feed-limit", "8"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2000);
+      resolve({
+        attempted: true,
+        success: false,
+        error: `snapshot timeout after ${getSnapshotTimeoutMs(config, flags)}ms`,
+        stdout: stdout.trim(),
+        stderr: stderr.trim()
+      });
+    }, getSnapshotTimeoutMs(config, flags));
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve({
+        attempted: true,
+        success: false,
+        error: String(error),
+        stdout: stdout.trim(),
+        stderr: stderr.trim()
+      });
+    });
+    child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve({
+        attempted: true,
+        success: code === 0,
+        exitCode: code,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        error: code === 0 ? "" : `snapshot exited with code ${code}`
+      });
+    });
+  });
+}
+
+async function gatherLiveProbe(config, flags, chatId, batchMessages) {
+  const snapshotResult = await refreshLiveSnapshot(config, flags);
+  if (snapshotResult?.attempted && !snapshotResult.success) {
+    appendJsonl(errorsPath, {
+      timestamp: new Date().toISOString(),
+      type: "live-snapshot-failed",
+      chat_id: chatId,
+      message_ids: batchMessages.map((item) => item.message_id),
+      error: snapshotResult.error || snapshotResult.stderr || "unknown error"
+    });
+  }
+  const overview = readJsonFile(accountOverviewPath, {});
+  const literaryDetails = readJsonFile(literaryDetailsPath, {});
+  return {
+    snapshotResult,
+    overview,
+    literaryDetails,
+    summary: buildLiveProbeSummary(snapshotResult, overview, literaryDetails)
+  };
+}
+
+async function clearTypingReactions(config, messageItems, flags = {}) {
+  for (const item of messageItems) {
+    const messageId = item?.message_id;
+    const reaction = consumeReaction(messageId);
+    if (!reaction?.reaction_id) {
+      continue;
+    }
+    try {
+      await deleteMessageReaction(config, messageId, reaction.reaction_id, flags);
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "im.message.reaction.delete",
+        chat_id: item?.chat_id || reaction.chat_id || "",
+        message_id: messageId,
+        emoji_type: reaction.emoji_type || "",
+        reaction_id: reaction.reaction_id
+      });
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "message-reaction-delete-failed",
+        chat_id: item?.chat_id || reaction.chat_id || "",
+        message_id: messageId,
+        emoji_type: reaction.emoji_type || "",
+        reaction_id: reaction.reaction_id,
+        error: String(error)
+      });
+    }
+  }
+}
+
+function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages, liveProbeSummary) {
   const historyLines = historyMessages.map(formatHistoryLine).join("\n");
   const inboxLines = inboxMessages.map(formatHistoryLine).join("\n");
   const batchLines = batchMessages.map((item, index) => `${index + 1}. ${item.text}`).join("\n");
@@ -331,7 +637,7 @@ function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages)
     "你是 InStreet 上的派蒙 paimon_insight。",
     "你正在通过飞书与仓库主人沟通。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
     "把 AGENTS.md、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
-    // "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
+    "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
     "这不是逐条客服对话，而是一个持续工作会话。",
     "如果用户在短时间内连续发来多条消息，请把它们理解为同一轮请求的补充信息，统一回复。",
     "只输出飞书回复正文，不要标题，不要引号，不要解释你如何生成。",
@@ -345,11 +651,17 @@ function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages)
     "本地 inbox 近况：",
     inboxLines || "- 无",
     "",
+    "实时平台探针：",
+    liveProbeSummary || "- 无",
+    "",
     "本轮合并待处理消息：",
     batchLines || "- 无",
     "",
     "如果用户是在追问正在执行的工作，请明确说清当前结果、卡点和下一步。",
-    "如果用户只是连续发了几个补充短句，要把它们整合成一次自然回复。"
+    "如果用户只是连续发了几个补充短句，要把它们整合成一次自然回复。",
+    "除非上面的实时平台探针明确失败，或你在这轮执行里亲自再次验证失败，否则不要声称 InStreet API / 当前环境不可访问。",
+    "如果只是本地快照缺字段，要明确说“本地未落盘/未缓存”，不要把它说成“线上不可访问”。",
+    "每一轮和用户的交互，原则上都要带来至少一次社区公开动作。优先顺序是：回复评论 > 发布主帖 > 发布文学社章节 > 在他人帖子下高质量评论。"
   ].join("\n");
 }
 
@@ -370,7 +682,7 @@ function runCodexPrompt(prompt, config, flags, hooks = {}) {
         }
       })
       : spawn(
-        "codex",
+        resolveCodexExecutable(config, flags),
         [
           "exec",
           "-C",
@@ -486,6 +798,30 @@ function getQueueSweepIntervalMs(config, flags) {
   return Number(flags["queue-sweep-ms"] || config.automation?.feishu_queue_sweep_interval_ms || 15000);
 }
 
+function getSnapshotTimeoutMs(config, flags) {
+  return Number(flags["snapshot-timeout-ms"] || config.automation?.feishu_snapshot_timeout_ms || 45000);
+}
+
+function shouldRefreshLiveSnapshot(config, flags) {
+  if (flags["skip-live-snapshot"]) {
+    return false;
+  }
+  return config.automation?.feishu_live_snapshot_enabled !== false;
+}
+
+function isSyntheticItem(item) {
+  return item?.source === "synthetic-test";
+}
+
+function isSyntheticProcessing(processing) {
+  const explicitItems = Array.isArray(processing?.items) ? processing.items : [];
+  return explicitItems.length > 0 && explicitItems.every((item) => isSyntheticItem(item));
+}
+
+function hasNonSyntheticPending(chat) {
+  return Array.isArray(chat?.pending) && chat.pending.some((item) => !isSyntheticItem(item));
+}
+
 function isProcessingStale(processing, config, flags) {
   if (!processing?.started_at) {
     return true;
@@ -512,13 +848,33 @@ function recoverProcessingItems(chatId, processing) {
 
 function restoreStaleProcessing(queue, chatId, config, flags) {
   const chat = ensureChatQueue(queue, chatId);
-  if (!chat.processing || !isProcessingStale(chat.processing, config, flags)) {
+  if (!chat.processing) {
     return false;
   }
+
+  const shouldDropSynthetic =
+    isSyntheticProcessing(chat.processing) &&
+    hasNonSyntheticPending(chat);
+
+  if (!shouldDropSynthetic && !isProcessingStale(chat.processing, config, flags)) {
+    return false;
+  }
+
   const recovered = recoverProcessingItems(chatId, chat.processing);
-  chat.pending = dedupeMessages(recovered.concat(chat.pending));
+  chat.pending = shouldDropSynthetic
+    ? dedupeMessages(chat.pending)
+    : dedupeMessages(recovered.concat(chat.pending));
   chat.processing = null;
   chat.updated_at = new Date().toISOString();
+  if (shouldDropSynthetic) {
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: "synthetic-processing-dropped",
+      chat_id: chatId,
+      dropped_message_ids: recovered.map((item) => item.message_id),
+      pending_message_ids: chat.pending.map((item) => item.message_id)
+    });
+  }
   return true;
 }
 
@@ -589,6 +945,7 @@ async function processChatQueue(chatId, config, flags) {
   processingChats.add(chatId);
 
   try {
+    const liveProbe = await gatherLiveProbe(config, flags, chatId, batchMessages);
     let normalizedHistory = [];
     try {
       const historyItems = await fetchChatMessages(config, chatId, Math.max(getHistoryLimit(config, flags) * 2, 20), flags);
@@ -606,7 +963,7 @@ async function processChatQueue(chatId, config, flags) {
       });
     }
     const inboxMessages = readInboxLines(chatId, getHistoryLimit(config, flags));
-    const prompt = buildCodexPrompt(chatId, batchMessages, normalizedHistory, inboxMessages);
+    const prompt = buildCodexPrompt(chatId, batchMessages, normalizedHistory, inboxMessages, liveProbe.summary);
     let replyText = "";
     try {
       replyText = await runCodexPrompt(prompt, config, flags, {
@@ -645,6 +1002,7 @@ async function processChatQueue(chatId, config, flags) {
       replyText = buildFallbackReply(batchMessages);
     }
     await sendTextMessage(config, "chat_id", chatId, replyText);
+    await clearTypingReactions(config, batchMessages, flags);
     appendJsonl(batchesPath, {
       timestamp: new Date().toISOString(),
       chat_id: chatId,
@@ -741,13 +1099,20 @@ async function handleIncomingMessage(event, config, flags) {
   if (event.source !== "history-sync" && isReactionEnabled(config, flags)) {
     sendMessageReaction(config, event.message_id, getReactionEmojiType(config, flags), flags)
       .then((response) => {
+        const reactionId = response?.data?.reaction_id || "";
+        rememberReaction(event.message_id, {
+          chat_id: event.chat_id,
+          reaction_id: reactionId,
+          emoji_type: getReactionEmojiType(config, flags),
+          created_at: new Date().toISOString()
+        });
         appendJsonl(eventsPath, {
           timestamp: new Date().toISOString(),
           type: "im.message.reaction.create",
           chat_id: event.chat_id,
           message_id: event.message_id,
           emoji_type: getReactionEmojiType(config, flags),
-          reaction_id: response?.data?.reaction_id || ""
+          reaction_id: reactionId
         });
       })
       .catch((error) => {
@@ -766,6 +1131,9 @@ async function handleIncomingMessage(event, config, flags) {
     const autoAckText = "已收到消息，派蒙会合并上下文后统一处理。";
     try {
       await sendTextMessage(config, "chat_id", event.chat_id, autoAckText);
+      if (!flags["spawn-codex"]) {
+        await clearTypingReactions(config, [event], flags);
+      }
     } catch (error) {
       appendJsonl(errorsPath, {
         timestamp: new Date().toISOString(),

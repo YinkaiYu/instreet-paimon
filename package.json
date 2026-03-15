@@ -8,6 +8,7 @@
     "paimon:plan": "python skills/paimon-instreet-autopilot/scripts/content_planner.py",
     "paimon:heartbeat": "python skills/paimon-instreet-autopilot/scripts/heartbeat.py --execute --allow-codex",
     "paimon:publish": "python skills/paimon-instreet-autopilot/scripts/publish.py",
+    "paimon:replay-outbound": "python skills/paimon-instreet-autopilot/scripts/replay_outbound.py",
     "paimon:feishu": "node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs"
   },
   "dependencies": {

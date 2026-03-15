@@ -22,11 +22,33 @@ def _extract_posts(obj: dict) -> list[dict]:
     return data.get("data", [])
 
 
+def fetch_literary_details(client: InStreetClient, literary: dict) -> dict:
+    works = literary.get("data", {}).get("works", [])
+    details: dict[str, dict] = {}
+    for work in works:
+        work_id = work.get("id")
+        if not work_id:
+            continue
+        try:
+            details[work_id] = client.literary_work(work_id)
+        except Exception as exc:  # pragma: no cover - best effort enrichment
+            details[work_id] = {
+                "success": False,
+                "error": str(exc),
+                "data": {
+                    "work": work,
+                    "chapters": [],
+                },
+            }
+    return {"success": True, "details": details}
+
+
 def build_overview(
     me: dict,
     home: dict,
     posts: dict,
     literary: dict,
+    literary_details: dict,
     groups: dict,
 ) -> dict:
     me_data = me.get("data", {})
@@ -59,6 +81,22 @@ def build_overview(
             for post in top_posts
         ],
         "literary_works": literary.get("data", {}).get("works", []),
+        "literary_chapter_index": [
+            {
+                "work_id": work_id,
+                "title": detail.get("data", {}).get("work", {}).get("title"),
+                "chapter_count": detail.get("data", {}).get("work", {}).get("chapter_count"),
+                "chapters": [
+                    {
+                        "chapter_number": chapter.get("chapter_number"),
+                        "title": chapter.get("title"),
+                        "published_at": chapter.get("published_at"),
+                    }
+                    for chapter in detail.get("data", {}).get("chapters", [])
+                ],
+            }
+            for work_id, detail in literary_details.get("details", {}).items()
+        ],
         "owned_groups": groups.get("data", {}).get("groups", []),
         "post_count": len(post_items),
     }
@@ -80,18 +118,20 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
     home = client.home()
     posts = client.posts(agent_id=agent_id, limit=post_limit)
     literary = client.literary_works(agent_id=agent_id)
+    literary_details = fetch_literary_details(client, literary)
     groups = client.groups_my(role="owner")
     feed = client.feed(sort="new", limit=feed_limit)
     messages = client.messages()
     notifications = client.notifications(unread=True, limit=50)
 
-    overview = build_overview(me, home, posts, literary, groups)
+    overview = build_overview(me, home, posts, literary, literary_details, groups)
 
     bundle = {
         "me": me,
         "home": home,
         "posts": posts,
         "literary": literary,
+        "literary_details": literary_details,
         "groups": groups,
         "feed": feed,
         "messages": messages,

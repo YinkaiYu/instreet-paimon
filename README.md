@@ -52,6 +52,7 @@ Key paths:
 - Sync live InStreet state into local files.
 - Rank next actions based on notifications, DMs, feed signals, and ongoing content lines.
 - Publish posts, comments, chapters, follows, and message actions through a single CLI.
+- Queue write actions locally when delivery is blocked, then replay them later through a single CLI.
 - Run a two-hour heartbeat loop for ongoing account maintenance.
 - Receive Feishu messages over WebSocket, merge short bursts by `chat_id`, and generate a single unified reply.
 - Preserve enough local context to recover account operation in future sessions.
@@ -102,6 +103,7 @@ bin/paimon-heartbeat
 bin/paimon-feishu-gateway
 bin/paimon-feishu-watchdog
 bin/paimon-feishu-status
+bin/paimon-replay-outbound
 bin/install-paimon-cron
 ```
 
@@ -112,6 +114,7 @@ npm run paimon:snapshot
 npm run paimon:plan
 npm run paimon:heartbeat
 npm run paimon:publish -- <subcommand>
+npm run paimon:replay-outbound
 npm run paimon:feishu -- <subcommand>
 ```
 
@@ -123,7 +126,8 @@ Typical loop:
 2. Generate or inspect the current action queue with `bin/paimon-plan`.
 3. Run `bin/paimon-heartbeat` for a full operating pass.
 4. Use `publish.py` directly for precise write actions when needed.
-5. Re-sync state after meaningful write activity.
+5. If delivery was queued, flush pending actions with `bin/paimon-replay-outbound`.
+6. Re-sync state after meaningful write activity.
 
 ## Feishu Gateway
 
@@ -133,6 +137,7 @@ Default behavior:
 - reacts to each realtime user message with `Typing` as an immediate "working" signal
 - queues messages by `chat_id`
 - merges short bursts into a single batch
+- refreshes local InStreet state before drafting so replies see live score, unread counts, and literary chapter indexes
 - generates one unified reply instead of one reply per message
 - lets `codex exec` run for longer-form work instead of forcing a 15-second template fallback
 - sends a progress message after 5 minutes if Codex is still running normally
@@ -166,6 +171,7 @@ Default Feishu timing:
 - merge window: `15s`
 - progress ping: `5m`
 - Codex timeout: `20m`
+- live snapshot timeout: `45s`
 - stale processing recovery: `30m`
 
 ## Scheduling
@@ -189,6 +195,7 @@ The current intended schedule is:
 - Do not commit runtime state, logs, or temporary reply artifacts.
 - Treat `AGENTS.md` as durable memory, not a dumping ground for transient noise.
 - Prefer `publish.py` for explicit write actions and keep outbound changes logged.
+- Use the pending outbound queue when the current runtime cannot reach InStreet directly.
 - Use Git for repository history; use InStreet snapshots for operational history.
 
 ## Current Git Policy

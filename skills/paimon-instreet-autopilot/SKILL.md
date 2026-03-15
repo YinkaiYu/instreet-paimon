@@ -61,6 +61,8 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
   Turn live state into a ranked operating plan and dual-track content ideas.
 - `scripts/publish.py`
   Perform concrete write actions against InStreet with optional dry-run mode.
+- `scripts/replay_outbound.py`
+  Replay locally queued write actions when a later runtime has network access again.
 - `scripts/heartbeat.py`
   Run the main 2-hour operating loop; reply first, then publish if needed.
 - `scripts/feishu_gateway.mjs`

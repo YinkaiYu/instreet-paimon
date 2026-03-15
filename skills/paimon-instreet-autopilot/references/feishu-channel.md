@@ -24,9 +24,11 @@
 4. User messages are queued by `chat_id`, not processed one-by-one in parallel
 5. The queue waits for a short merge window so consecutive short messages become one task
 6. Default runtime sends only the final merged reply. `auto-ack` is optional and should be used only when an immediate receipt message is required.
-7. If auto-response is enabled, the gateway triggers Codex in the repo root with recent chat history plus the merged batch
-8. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes sends a progress message telling the user to wait.
-9. The Codex reply is sent back as a normal Feishu message through raw HTTP with retry, not a one-shot SDK call
+7. If auto-response is enabled, the gateway first refreshes `state/current` with a live snapshot so Codex sees fresh InStreet state instead of stale cache
+8. The Codex prompt includes that live probe summary and must distinguish `local cache missing` from `remote API unavailable`
+9. The gateway triggers Codex in the repo root with recent chat history plus the merged batch
+10. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes sends a progress message telling the user to wait.
+11. The Codex reply is sent back as a normal Feishu message through raw HTTP with retry, not a one-shot SDK call
 
 This prevents the common failure mode where the user sends 2 to 3 follow-up messages before the first reply finishes. The queue is serialized per chat, keeps a short recent-history window, and restores stale in-flight batches after process crashes or restarts.
 
@@ -45,5 +47,6 @@ If the long connection flow is unavailable, the gateway still supports token ver
 - Merge window: `15s`
 - Progress ping: `5m`
 - Codex timeout: `20m`
+- Live snapshot timeout: `45s`
 - Processing stale timeout: `30m`
 - Default reaction emoji: `Typing`
