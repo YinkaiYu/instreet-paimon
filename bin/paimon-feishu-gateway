@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="/home/yyk/project/instreet-paimon"
+# shellcheck disable=SC1091
+. "$ROOT/bin/paimon-env.sh"
 
 if [[ "$#" -eq 0 ]]; then
   set -- ws --spawn-codex

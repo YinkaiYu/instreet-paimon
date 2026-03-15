@@ -34,6 +34,11 @@ PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_GATEWAY_SCRIPT = REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "scripts" / "feishu_gateway.mjs"
 
 
+def _heartbeat_codex_timeout_seconds(config) -> int:
+    timeout_ms = int(config.automation.get("heartbeat_codex_timeout_ms", 180000))
+    return max(30, timeout_ms // 1000)
+
+
 def _rotate_sequence(items: list[str], start: int) -> list[str]:
     if not items:
         return []
@@ -183,7 +188,14 @@ def _fallback_chapter(work_title: str, next_chapter_number: int, last_chapter: d
     return title, content
 
 
-def _generate_comment_reply(post: dict, comment: dict, *, model: str | None, reasoning_effort: str | None) -> str:
+def _generate_comment_reply(
+    post: dict,
+    comment: dict,
+    *,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> str:
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请用中文写一条评论回复。
 
@@ -199,7 +211,7 @@ def _generate_comment_reply(post: dict, comment: dict, *, model: str | None, rea
 待回复评论：
 {comment.get("content", "")}
 """.strip()
-    return run_codex(prompt, model=model, reasoning_effort=reasoning_effort).strip()
+    return run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort).strip()
 
 
 def _generate_forum_post(
@@ -208,6 +220,7 @@ def _generate_forum_post(
     *,
     model: str | None,
     reasoning_effort: str | None,
+    timeout_seconds: int,
 ) -> tuple[str, str, str]:
     recent_titles = "\n".join(f"- {item.get('title', '')}" for item in posts[:8])
     prompt = f"""
@@ -231,7 +244,7 @@ CONTENT:
 最近帖子标题，避免复刻：
 {recent_titles}
 """.strip()
-    result = run_codex(prompt, model=model, reasoning_effort=reasoning_effort)
+    result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
     return _parse_forum_post(result)
 
 
@@ -241,6 +254,7 @@ def _generate_group_post(
     *,
     model: str | None,
     reasoning_effort: str | None,
+    timeout_seconds: int,
 ) -> tuple[str, str]:
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请为自有小组写一篇中文小组帖。
@@ -260,7 +274,7 @@ CONTENT:
 角度：{idea.get("angle")}
 发布理由：{idea.get("why_now")}
 """.strip()
-    result = run_codex(prompt, model=model, reasoning_effort=reasoning_effort)
+    result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
     return _parse_title_content(result)
 
 
@@ -272,6 +286,7 @@ def _generate_chapter(
     *,
     model: str | None,
     reasoning_effort: str | None,
+    timeout_seconds: int,
 ) -> tuple[str, str]:
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请续写文学社连载《{work_title}》的新章节。
@@ -294,7 +309,7 @@ CONTENT:
 上一章摘要：
 {truncate_text(last_chapter.get("content", "") if last_chapter else "", 3200)}
 """.strip()
-    result = run_codex(prompt, model=model, reasoning_effort=reasoning_effort)
+    result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
     return _parse_title_content(result)
 
 
@@ -304,6 +319,7 @@ def _generate_dm_reply(
     *,
     model: str | None,
     reasoning_effort: str | None,
+    timeout_seconds: int,
 ) -> str:
     history = "\n".join(
         f"- {item.get('sender', {}).get('username', 'unknown')}: {truncate_text(item.get('content', ''), 180)}"
@@ -323,7 +339,7 @@ def _generate_dm_reply(
 最近对话：
 {history}
 """.strip()
-    return run_codex(prompt, model=model, reasoning_effort=reasoning_effort).strip()
+    return run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort).strip()
 
 
 def _publish_primary_action(
@@ -337,6 +353,7 @@ def _publish_primary_action(
     allow_codex: bool,
     model: str | None,
     reasoning_effort: str | None,
+    codex_timeout_seconds: int,
 ) -> tuple[dict | None, list[dict], dict[str, int]]:
     failures: list[dict] = []
     for idea in _ordered_primary_ideas(plan, cycle_state):
@@ -350,6 +367,7 @@ def _publish_primary_action(
                             posts,
                             model=model,
                             reasoning_effort=reasoning_effort,
+                            timeout_seconds=codex_timeout_seconds,
                         )
                     except Exception:
                         title, submolt, content = _fallback_forum_post(idea)
@@ -387,6 +405,7 @@ def _publish_primary_action(
                             last_chapter,
                             model=model,
                             reasoning_effort=reasoning_effort,
+                            timeout_seconds=codex_timeout_seconds,
                         )
                     except Exception:
                         title, content = _fallback_chapter(work_title, next_chapter_number, last_chapter)
@@ -410,6 +429,7 @@ def _publish_primary_action(
                             group,
                             model=model,
                             reasoning_effort=reasoning_effort,
+                            timeout_seconds=codex_timeout_seconds,
                         )
                     except Exception:
                         title, content = _fallback_group_post(idea, group)
@@ -458,6 +478,7 @@ def _reply_comments(
     model: str | None,
     reasoning_effort: str | None,
     batch_size: int,
+    codex_timeout_seconds: int,
 ) -> list[dict]:
     actions: list[dict] = []
     for target in plan.get("reply_targets", [])[:batch_size]:
@@ -473,6 +494,7 @@ def _reply_comments(
                         comment,
                         model=model,
                         reasoning_effort=reasoning_effort,
+                        timeout_seconds=codex_timeout_seconds,
                     )
                 except Exception:
                     reply = _fallback_comment_reply(comment)
@@ -507,6 +529,7 @@ def _reply_dms(
     model: str | None,
     reasoning_effort: str | None,
     batch_size: int,
+    codex_timeout_seconds: int,
 ) -> list[dict]:
     actions: list[dict] = []
     for target in plan.get("dm_targets", [])[:batch_size]:
@@ -523,6 +546,7 @@ def _reply_dms(
                         messages,
                         model=model,
                         reasoning_effort=reasoning_effort,
+                        timeout_seconds=codex_timeout_seconds,
                     )
                 except Exception:
                     reply = _fallback_dm_reply(thread, messages)
@@ -669,6 +693,7 @@ def main() -> None:
     username = config.identity["name"]
     codex_model = config.automation.get("codex_model") or None
     codex_reasoning_effort = config.automation.get("codex_reasoning_effort") or None
+    codex_timeout_seconds = _heartbeat_codex_timeout_seconds(config)
 
     run_snapshot(
         archive=args.archive,
@@ -697,6 +722,7 @@ def main() -> None:
             allow_codex=args.allow_codex,
             model=codex_model,
             reasoning_effort=codex_reasoning_effort,
+            codex_timeout_seconds=codex_timeout_seconds,
         )
         actions.extend(primary_failures)
         if primary_action:
@@ -711,6 +737,7 @@ def main() -> None:
                 model=codex_model,
                 reasoning_effort=codex_reasoning_effort,
                 batch_size=int(config.automation.get("reply_batch_size", 2)),
+                codex_timeout_seconds=codex_timeout_seconds,
             )
         )
         actions.extend(
@@ -721,6 +748,7 @@ def main() -> None:
                 model=codex_model,
                 reasoning_effort=codex_reasoning_effort,
                 batch_size=int(config.automation.get("dm_batch_size", 2)),
+                codex_timeout_seconds=codex_timeout_seconds,
             )
         )
 

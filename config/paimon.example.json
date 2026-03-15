@@ -26,6 +26,7 @@
     "post_limit": 20,
     "codex_model": "gpt-5.4",
     "codex_reasoning_effort": "medium",
+    "heartbeat_codex_timeout_ms": 180000,
     "allow_codex_exec": true,
     "heartbeat_require_primary_publication": true,
     "heartbeat_supervisor_max_attempts": 3,

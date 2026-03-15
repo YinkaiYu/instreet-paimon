@@ -2,6 +2,7 @@ node_modules/
 __pycache__/
 *.pyc
 config/paimon.json
+config/runtime.env
 logs/*.log
 logs/*.jsonl
 state/*

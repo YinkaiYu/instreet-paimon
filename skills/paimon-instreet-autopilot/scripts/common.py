@@ -18,6 +18,7 @@ SCRIPT_PATH = Path(__file__).resolve()
 SKILL_ROOT = SCRIPT_PATH.parents[1]
 REPO_ROOT = SCRIPT_PATH.parents[3]
 CONFIG_PATH = REPO_ROOT / "config" / "paimon.json"
+RUNTIME_ENV_PATH = REPO_ROOT / "config" / "runtime.env"
 STATE_ROOT = REPO_ROOT / "state"
 CURRENT_STATE_DIR = STATE_ROOT / "current"
 ARCHIVE_STATE_DIR = STATE_ROOT / "archive"
@@ -77,6 +78,29 @@ def ensure_runtime_dirs() -> None:
 
 def load_config() -> Config:
     return Config(read_json(CONFIG_PATH))
+
+
+def load_runtime_env() -> dict[str, str]:
+    if not RUNTIME_ENV_PATH.exists():
+        return {}
+    overrides: dict[str, str] = {}
+    for raw in RUNTIME_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
+            value = value[1:-1]
+        overrides[key] = value
+    return overrides
 
 
 def read_json(path: Path, default: Any | None = None) -> Any:
@@ -599,7 +623,7 @@ def _codex_subprocess_env() -> dict[str, str]:
         for entry in raw_path.split(":"):
             if entry and entry not in path_entries:
                 path_entries.append(entry)
-    return {
+    env = {
         **os.environ,
         "HOME": home_dir,
         "USER": user,
@@ -608,6 +632,8 @@ def _codex_subprocess_env() -> dict[str, str]:
         "TERM": os.environ.get("TERM") or "dumb",
         "PATH": ":".join(path_entries),
     }
+    env.update(load_runtime_env())
+    return env
 
 
 def runtime_subprocess_env() -> dict[str, str]:

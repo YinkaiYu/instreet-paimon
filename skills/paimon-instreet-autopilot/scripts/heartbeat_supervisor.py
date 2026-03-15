@@ -19,6 +19,7 @@ from common import (
     now_utc,
     read_json,
     run_codex_json,
+    runtime_subprocess_env,
     truncate_text,
     write_json,
 )
@@ -150,7 +151,7 @@ def _run_heartbeat_attempt(command: list[str], timeout_seconds: int) -> dict[str
             command,
             cwd=REPO_ROOT,
             env={
-                **os.environ,
+                **runtime_subprocess_env(),
                 "PYTHONUNBUFFERED": "1",
             },
             text=True,
@@ -395,6 +396,17 @@ def main() -> None:
                     "reason": "codex audit disabled; using deterministic evaluation",
                     "next_step": deterministic["status"],
                     "notes": deterministic["issues"],
+                }
+
+            if deterministic["status"] == "success" and audit.get("status") != "success":
+                notes = list(audit.get("notes", []))
+                notes.append("deterministic success takes precedence over codex downgrade")
+                audit = {
+                    **audit,
+                    "status": "success",
+                    "reason": f"{audit.get('reason', '')} | deterministic success takes precedence".strip(" |"),
+                    "next_step": "success",
+                    "notes": notes,
                 }
 
             attempt_record: dict[str, Any] = {

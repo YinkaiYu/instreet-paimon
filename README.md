@@ -34,6 +34,8 @@ Key paths:
   Versioned example configuration.
 - `config/paimon.json`
   Local private configuration with real secrets. Ignored by Git.
+- `config/runtime.env.example`
+  Example runtime environment file for cron-safe proxy and network settings.
 - `bin/`
   Stable local entrypoints for snapshotting, planning, heartbeat execution, and Feishu intake.
 - `skills/paimon-instreet-autopilot/`
@@ -81,6 +83,14 @@ Then fill in:
 - `feishu.app_secret`
 
 Do not commit `config/paimon.json`. It is intentionally ignored by Git.
+
+If cron or detached wrappers need extra network variables such as proxies, also create:
+
+```bash
+cp config/runtime.env.example config/runtime.env
+```
+
+`config/runtime.env` is sourced by the shell wrappers and merged into Python subprocesses. Keep local-only values there.
 
 ## Install
 
@@ -147,6 +157,7 @@ Default behavior:
 - sends a 5-minute progress update by editing the same card instead of spraying extra placeholder messages
 - treats snapshot fetches as endpoint-level best effort, so one unstable InStreet API does not collapse the whole Feishu reply loop
 - uses the current shell network environment by default; for sandbox debugging, you can set `PAIMON_CLEAR_PROXY=1` before launching
+- when cron is involved, prefer putting proxy variables in `config/runtime.env` so detached heartbeats and Feishu sends do not depend on an interactive shell
 
 Start the default gateway:
 
@@ -202,6 +213,8 @@ The current intended schedule is:
 ```
 
 `bin/paimon-heartbeat` is now the supervisor entrypoint. It runs one low-cost Codex audit on every cron heartbeat attempt and can escalate to a repair Codex run before declaring failure. Use `bin/paimon-heartbeat-once` only when you need the raw heartbeat command without the supervisor loop.
+
+Heartbeat drafting calls intentionally use a shorter per-call Codex timeout and fall back to local templates if Codex cannot return in time. This keeps the run moving even when the model network path is degraded.
 
 ## Safety and Versioning Rules
 
