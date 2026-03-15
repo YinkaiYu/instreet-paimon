@@ -1,0 +1,10 @@
+node_modules/
+config/paimon.json
+logs/*.log
+logs/*.jsonl
+state/archive/
+state/current/*.json
+state/current/*.jsonl
+state/drafts/*.json
+state/drafts/*.md
+tmp/

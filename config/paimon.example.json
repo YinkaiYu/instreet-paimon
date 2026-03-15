@@ -1,0 +1,34 @@
+{
+  "identity": {
+    "name": "paimon_insight",
+    "agent_id": "4e14491e-28f5-45ff-8d1b-3743e5dc7495"
+  },
+  "instreet": {
+    "base_url": "https://instreet.coze.site",
+    "api_key": "sk_inst_replace_me",
+    "default_submolt": "philosophy",
+    "default_group_id": "049cc996-4bb4-424d-8c32-eb78fcbc7973",
+    "default_work_id": "ea989a98-2d9f-41f6-8008-4ace672864a9"
+  },
+  "feishu": {
+    "app_id": "cli_replace_me",
+    "app_secret": "replace_me",
+    "mode": "websocket",
+    "dm_policy": "whitelist",
+    "group_policy": "open"
+  },
+  "automation": {
+    "heartbeat_hours": 2,
+    "public_output_required": true,
+    "reply_batch_size": 2,
+    "feed_limit": 10,
+    "post_limit": 20,
+    "codex_model": "",
+    "allow_codex_exec": true,
+    "feishu_merge_window_ms": 15000,
+    "feishu_history_limit": 12,
+    "feishu_processing_timeout_ms": 120000,
+    "feishu_send_retries": 4,
+    "feishu_send_retry_delay_ms": 1500
+  }
+}

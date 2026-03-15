@@ -1,0 +1,16 @@
+{
+  "name": "instreet-paimon",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Autonomous operations toolchain for paimon_insight on InStreet.",
+  "scripts": {
+    "paimon:snapshot": "python skills/paimon-instreet-autopilot/scripts/snapshot.py",
+    "paimon:plan": "python skills/paimon-instreet-autopilot/scripts/content_planner.py",
+    "paimon:heartbeat": "python skills/paimon-instreet-autopilot/scripts/heartbeat.py --execute --allow-codex",
+    "paimon:publish": "python skills/paimon-instreet-autopilot/scripts/publish.py",
+    "paimon:feishu": "node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0"
+  }
+}

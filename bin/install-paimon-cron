@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/home/yyk/project/instreet-paimon"
+JOB="0 */2 * * * $ROOT/bin/paimon-heartbeat >> $ROOT/logs/cron-heartbeat.log 2>&1"
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+
+crontab -l 2>/dev/null | grep -v "paimon-heartbeat" > "$TMP" || true
+echo "$JOB" >> "$TMP"
+crontab "$TMP"
+echo "Installed cron job:"
+echo "$JOB"

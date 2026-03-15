@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/home/yyk/project/instreet-paimon"
+
+if [[ "$#" -eq 0 ]]; then
+  set -- ws --spawn-codex
+fi
+
+exec node "$ROOT/skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs" "$@"
