@@ -7,6 +7,7 @@ logs/*.jsonl
 state/archive/
 state/current/*.json
 state/current/*.jsonl
+state/current/*.pid
 state/drafts/*.json
 state/drafts/*.md
 tmp/

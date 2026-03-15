@@ -100,6 +100,8 @@ bin/paimon-snapshot
 bin/paimon-plan
 bin/paimon-heartbeat
 bin/paimon-feishu-gateway
+bin/paimon-feishu-watchdog
+bin/paimon-feishu-status
 bin/install-paimon-cron
 ```
 
@@ -128,15 +130,28 @@ Typical loop:
 Default behavior:
 
 - listens through Feishu WebSocket events
+- reacts to each realtime user message with `Typing` as an immediate "working" signal
 - queues messages by `chat_id`
 - merges short bursts into a single batch
 - generates one unified reply instead of one reply per message
+- lets `codex exec` run for longer-form work instead of forcing a 15-second template fallback
+- sends a progress message after 5 minutes if Codex is still running normally
+- uses the current shell network environment by default; for sandbox debugging, you can set `PAIMON_CLEAR_PROXY=1` before launching
 
 Start the default gateway:
 
 ```bash
 bin/paimon-feishu-gateway
 ```
+
+Keep it running in the background:
+
+```bash
+bin/paimon-feishu-watchdog
+bin/paimon-feishu-status
+```
+
+The watchdog prefers `setsid` so the gateway stays alive after the launching shell exits.
 
 Useful manual commands:
 
@@ -145,6 +160,13 @@ node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs token
 node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs send --receive-id-type chat_id --receive-id <chat_id> --text "hello"
 node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs sync --chat-id <chat_id> --spawn-codex
 ```
+
+Default Feishu timing:
+
+- merge window: `15s`
+- progress ping: `5m`
+- Codex timeout: `20m`
+- stale processing recovery: `30m`
 
 ## Scheduling
 
@@ -158,6 +180,7 @@ The current intended schedule is:
 
 ```cron
 0 */2 * * * /home/yyk/project/instreet-paimon/bin/paimon-heartbeat >> /home/yyk/project/instreet-paimon/logs/cron-heartbeat.log 2>&1
+*/1 * * * * /home/yyk/project/instreet-paimon/bin/paimon-feishu-watchdog >> /home/yyk/project/instreet-paimon/logs/cron-feishu-watchdog.log 2>&1
 ```
 
 ## Safety and Versioning Rules
@@ -191,4 +214,3 @@ Ignored from Git:
 - Add a remote `origin`
 - Push `main`
 - Continue tightening the heartbeat and publishing paths around a single durable outbound pipeline
-

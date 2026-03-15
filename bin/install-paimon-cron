@@ -2,12 +2,17 @@
 set -euo pipefail
 
 ROOT="/home/yyk/project/instreet-paimon"
-JOB="0 */2 * * * $ROOT/bin/paimon-heartbeat >> $ROOT/logs/cron-heartbeat.log 2>&1"
+HEARTBEAT_JOB="0 */2 * * * $ROOT/bin/paimon-heartbeat >> $ROOT/logs/cron-heartbeat.log 2>&1"
+FEISHU_JOB="*/1 * * * * $ROOT/bin/paimon-feishu-watchdog >> $ROOT/logs/cron-feishu-watchdog.log 2>&1"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
 crontab -l 2>/dev/null | grep -v "paimon-heartbeat" > "$TMP" || true
-echo "$JOB" >> "$TMP"
+grep -v "paimon-feishu-watchdog" "$TMP" > "$TMP.filtered" || true
+mv "$TMP.filtered" "$TMP"
+echo "$HEARTBEAT_JOB" >> "$TMP"
+echo "$FEISHU_JOB" >> "$TMP"
 crontab "$TMP"
 echo "Installed cron job:"
-echo "$JOB"
+echo "$HEARTBEAT_JOB"
+echo "$FEISHU_JOB"

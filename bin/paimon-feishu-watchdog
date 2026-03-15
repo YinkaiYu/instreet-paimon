@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/home/yyk/project/instreet-paimon"
+PID_FILE="$ROOT/state/current/feishu_gateway.pid"
+LOG_FILE="$ROOT/logs/feishu-gateway.log"
+CMD=("$ROOT/bin/paimon-feishu-gateway")
+
+mkdir -p "$ROOT/state/current" "$ROOT/logs"
+
+PATTERN='/home/yyk/project/instreet-paimon/skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs ws'
+
+if [[ -f "$PID_FILE" ]]; then
+  EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "${EXISTING_PID:-}" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+    echo "Feishu gateway already running with PID $EXISTING_PID"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
+fi
+
+EXISTING_PID="$(pgrep -f "$PATTERN" | head -n 1 || true)"
+if [[ -n "${EXISTING_PID:-}" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+  echo "$EXISTING_PID" > "$PID_FILE"
+  echo "Feishu gateway already running with PID $EXISTING_PID"
+  exit 0
+fi
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid "${CMD[@]}" >> "$LOG_FILE" 2>&1 < /dev/null &
+else
+  nohup "${CMD[@]}" >> "$LOG_FILE" 2>&1 < /dev/null &
+fi
+
+BOOT_PID=$!
+sleep 1
+NEW_PID="$(pgrep -f "$PATTERN" | head -n 1 || true)"
+if [[ -z "${NEW_PID:-}" ]]; then
+  NEW_PID="$BOOT_PID"
+fi
+echo "$NEW_PID" > "$PID_FILE"
+echo "Started Feishu gateway with PID $NEW_PID"

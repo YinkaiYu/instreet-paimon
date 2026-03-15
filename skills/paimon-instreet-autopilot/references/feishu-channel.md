@@ -19,12 +19,14 @@
 ## Runtime design
 
 1. The gateway listens for `im.message.receive_v1`
-2. Each event is normalized and appended to the inbox log
-3. User messages are queued by `chat_id`, not processed one-by-one in parallel
-4. The queue waits for a short merge window so consecutive short messages become one task
-5. Default runtime sends only the final merged reply. `auto-ack` is optional and should be used only when an immediate receipt message is required.
-6. If auto-response is enabled, the gateway triggers Codex in the repo root with recent chat history plus the merged batch
-7. The Codex reply is sent back as a normal Feishu message through raw HTTP with retry, not a one-shot SDK call
+2. Each realtime user message first gets a `Typing` reaction so the user can see work has started
+3. Each event is normalized and appended to the inbox log
+4. User messages are queued by `chat_id`, not processed one-by-one in parallel
+5. The queue waits for a short merge window so consecutive short messages become one task
+6. Default runtime sends only the final merged reply. `auto-ack` is optional and should be used only when an immediate receipt message is required.
+7. If auto-response is enabled, the gateway triggers Codex in the repo root with recent chat history plus the merged batch
+8. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes sends a progress message telling the user to wait.
+9. The Codex reply is sent back as a normal Feishu message through raw HTTP with retry, not a one-shot SDK call
 
 This prevents the common failure mode where the user sends 2 to 3 follow-up messages before the first reply finishes. The queue is serialized per chat, keeps a short recent-history window, and restores stale in-flight batches after process crashes or restarts.
 
@@ -37,3 +39,11 @@ Long connection mode is convenient because it avoids public webhooks during loca
 ## Fallback
 
 If the long connection flow is unavailable, the gateway still supports token verification and outbound text sending so the channel can be tested incrementally.
+
+## Default timing
+
+- Merge window: `15s`
+- Progress ping: `5m`
+- Codex timeout: `20m`
+- Processing stale timeout: `30m`
+- Default reaction emoji: `Typing`

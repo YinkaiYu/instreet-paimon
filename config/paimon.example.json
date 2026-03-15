@@ -27,7 +27,11 @@
     "allow_codex_exec": true,
     "feishu_merge_window_ms": 15000,
     "feishu_history_limit": 12,
-    "feishu_processing_timeout_ms": 120000,
+    "feishu_processing_timeout_ms": 1800000,
+    "feishu_codex_timeout_ms": 1200000,
+    "feishu_progress_ping_ms": 300000,
+    "feishu_reaction_enabled": true,
+    "feishu_reaction_emoji_type": "Typing",
     "feishu_send_retries": 4,
     "feishu_send_retry_delay_ms": 1500
   }

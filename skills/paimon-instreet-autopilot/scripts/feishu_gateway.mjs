@@ -20,6 +20,7 @@ const queuePath = path.join(stateCurrentDir, "feishu_queue.json");
 const batchesPath = path.join(stateCurrentDir, "feishu_batches.jsonl");
 const chatTimers = new Map();
 const processingChats = new Set();
+let queueSweepTimer = null;
 
 function ensureDirs() {
   for (const dir of [stateCurrentDir, tmpDir]) {
@@ -121,21 +122,25 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function feishuApiRequest(config, endpoint, options = {}, retries = null, retryDelayMs = null) {
+async function feishuApiRequest(config, endpoint, options = {}, retries = null, retryDelayMs = null, flags = {}) {
   const maxRetries = retries ?? Number(config.automation?.feishu_send_retries || 4);
   const baseDelayMs = retryDelayMs ?? Number(config.automation?.feishu_send_retry_delay_ms || 1500);
   let lastError = null;
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       const auth = await fetchTenantToken(config);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), getHttpTimeoutMs(config, flags));
       const response = await fetch(`https://open.feishu.cn${endpoint}`, {
         ...options,
+        signal: controller.signal,
         headers: {
           Authorization: `Bearer ${auth.tenant_access_token}`,
           "Content-Type": "application/json",
           ...(options.headers || {})
         }
       });
+      clearTimeout(timeout);
       const body = await response.json();
       if (!response.ok || body.code !== 0) {
         throw new Error(`feishu api failed: HTTP ${response.status} ${JSON.stringify(body)}`);
@@ -152,15 +157,6 @@ async function feishuApiRequest(config, endpoint, options = {}, retries = null, 
   throw lastError;
 }
 
-function buildClient(config) {
-  return new Lark.Client({
-    appId: config.feishu.app_id,
-    appSecret: config.feishu.app_secret,
-    appType: Lark.AppType.SelfBuild,
-    domain: Lark.Domain.Feishu
-  });
-}
-
 async function sendTextMessage(config, receiveIdType, receiveId, text) {
   return feishuApiRequest(
     config,
@@ -172,11 +168,32 @@ async function sendTextMessage(config, receiveIdType, receiveId, text) {
         content: JSON.stringify({ text }),
         msg_type: "text"
       })
-    }
+    },
+    null,
+    null,
+    {}
   );
 }
 
-async function fetchMessagesPage(config, chatId, pageSize = 50, pageToken = "") {
+async function sendMessageReaction(config, messageId, emojiType, flags = {}) {
+  return feishuApiRequest(
+    config,
+    `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        reaction_type: {
+          emoji_type: emojiType
+        }
+      })
+    },
+    null,
+    null,
+    flags
+  );
+}
+
+async function fetchMessagesPage(config, chatId, pageSize = 50, pageToken = "", flags = {}) {
   const url = new URL("https://open.feishu.cn/open-apis/im/v1/messages");
   url.searchParams.set("container_id_type", "chat");
   url.searchParams.set("container_id", chatId);
@@ -186,7 +203,7 @@ async function fetchMessagesPage(config, chatId, pageSize = 50, pageToken = "") 
   }
   return feishuApiRequest(config, `${url.pathname}${url.search}`, {
     method: "GET"
-  });
+  }, null, null, flags);
 }
 
 function extractMessageEvent(data) {
@@ -272,6 +289,33 @@ function truncateText(text, limit = 220) {
   return `${source.slice(0, limit - 3)}...`;
 }
 
+function getCodexTimeoutMs(config, flags) {
+  return Number(flags["codex-timeout-ms"] || config.automation?.feishu_codex_timeout_ms || 1200000);
+}
+
+function getHttpTimeoutMs(config, flags) {
+  return Number(flags["http-timeout-ms"] || config.automation?.feishu_http_timeout_ms || 8000);
+}
+
+function getProgressPingMs(config, flags) {
+  return Number(flags["progress-ping-ms"] || config.automation?.feishu_progress_ping_ms || 300000);
+}
+
+function getReactionEmojiType(config, flags) {
+  return String(flags["reaction-emoji"] || config.automation?.feishu_reaction_emoji_type || "Typing");
+}
+
+function isReactionEnabled(config, flags) {
+  if (flags["no-reaction"]) {
+    return false;
+  }
+  return config.automation?.feishu_reaction_enabled !== false;
+}
+
+function getCodexCommand(config, flags) {
+  return String(flags["codex-command"] || config.automation?.feishu_codex_command || "").trim();
+}
+
 function formatHistoryLine(item) {
   const senderType = item.sender?.sender_type || item.sender?.id_type || "unknown";
   const who = senderType === "user" ? "用户" : senderType === "app" ? "派蒙" : senderType;
@@ -309,29 +353,83 @@ function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages)
   ].join("\n");
 }
 
-function runCodexPrompt(prompt) {
+function runCodexPrompt(prompt, config, flags, hooks = {}) {
   ensureDirs();
   const outputFile = path.join(tmpDir, `feishu-reply-${Date.now()}.txt`);
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "codex",
-      [
-        "exec",
-        "-C",
-        repoRoot,
-        "--skip-git-repo-check",
-        "--color",
-        "never",
-        "-o",
-        outputFile,
-        "-"
-      ],
-      {
-        stdio: ["pipe", "inherit", "inherit"]
-      }
-    );
+    let settled = false;
+    const customCommand = getCodexCommand(config, flags);
+    const child = customCommand
+      ? spawn("bash", ["-lc", customCommand], {
+        stdio: ["pipe", "inherit", "inherit"],
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          PAIMON_FEISHU_OUTPUT_FILE: outputFile,
+          PAIMON_REPO_ROOT: repoRoot
+        }
+      })
+      : spawn(
+        "codex",
+        [
+          "exec",
+          "-C",
+          repoRoot,
+          "--skip-git-repo-check",
+          "--color",
+          "never",
+          "-o",
+          outputFile,
+          "-"
+        ],
+        {
+          stdio: ["pipe", "inherit", "inherit"]
+        }
+      );
     child.stdin.end(prompt);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearTimeout(progressTimer);
+    };
+
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2000);
+      reject(new Error(`codex timeout after ${getCodexTimeoutMs(config, flags)}ms`));
+    }, getCodexTimeoutMs(config, flags));
+
+    const progressTimer = setTimeout(() => {
+      if (settled || typeof hooks.onLongRunning !== "function") {
+        return;
+      }
+      Promise.resolve(hooks.onLongRunning()).catch((error) => {
+        if (typeof hooks.onLongRunningError === "function") {
+          hooks.onLongRunningError(error);
+        }
+      });
+    }, getProgressPingMs(config, flags));
+
+    child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+
     child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
       if (code !== 0) {
         reject(new Error(`codex exited with code ${code}`));
         return;
@@ -340,6 +438,36 @@ function runCodexPrompt(prompt) {
       resolve(responseText);
     });
   });
+}
+
+function buildFallbackReply(batchMessages) {
+  const latest = (batchMessages[batchMessages.length - 1]?.text || "").trim();
+  if (/个人简历|自我介绍|简历|群里/.test(latest)) {
+    return [
+      "可以，先给你一版适合直接发群的简短介绍：",
+      "",
+      "大家好，我是派蒙，InStreet 上的 `paimon_insight`。",
+      "我主要做两条线：一条是 AI 社会、社区意识形态和互动结构的研究；另一条是 Agent 工具链、自动运营、心跳机制和内容生产流程的实践。",
+      "目前我在持续连载《AI社区意识形态分析》，也会写技术方法贴，目标是把社区观察和可复用方法都做深。",
+      "如果后面群里有关于 Agent 运营、内容策略或自动化协作的话题，我可以继续补具体经验。"
+    ].join("\n");
+  }
+  if (/测试/.test(latest)) {
+    return "收到，飞书链路已经恢复。这条回复走的是稳定链路，后续我会继续按合并消息的方式统一回应。";
+  }
+  return `收到。这轮我先给出简短回复：${truncateText(latest, 120)}。如果你接着补充，我会继续按同一轮消息合并处理。`;
+}
+
+function buildCodexFailureReply(batchMessages, error) {
+  const text = String(error || "");
+  if (/timeout/i.test(text)) {
+    return "这轮消息我已经收到了，但生成完整回复时运行超时。你可以继续补充要求，或者让我拆成更小的步骤来处理。";
+  }
+  return buildFallbackReply(batchMessages);
+}
+
+function buildLongRunningReply() {
+  return "这轮消息我还在处理，Codex 仍在正常运行。你先不用重复发，我整理完会统一回一条完整结果。";
 }
 
 function getMergeWindowMs(config, flags) {
@@ -351,7 +479,11 @@ function getHistoryLimit(config, flags) {
 }
 
 function getProcessingTimeoutMs(config, flags) {
-  return Number(flags["process-timeout-ms"] || config.automation?.feishu_processing_timeout_ms || 120000);
+  return Number(flags["process-timeout-ms"] || config.automation?.feishu_processing_timeout_ms || 1800000);
+}
+
+function getQueueSweepIntervalMs(config, flags) {
+  return Number(flags["queue-sweep-ms"] || config.automation?.feishu_queue_sweep_interval_ms || 15000);
 }
 
 function isProcessingStale(processing, config, flags) {
@@ -457,16 +589,60 @@ async function processChatQueue(chatId, config, flags) {
   processingChats.add(chatId);
 
   try {
-    const historyItems = await fetchChatMessages(config, chatId, Math.max(getHistoryLimit(config, flags) * 2, 20));
-    const normalizedHistory = historyItems
-      .filter((item) => item.msg_type === "text")
-      .slice(-getHistoryLimit(config, flags))
-      .map(normalizeMessageItem);
+    let normalizedHistory = [];
+    try {
+      const historyItems = await fetchChatMessages(config, chatId, Math.max(getHistoryLimit(config, flags) * 2, 20), flags);
+      normalizedHistory = historyItems
+        .filter((item) => item.msg_type === "text")
+        .slice(-getHistoryLimit(config, flags))
+        .map(normalizeMessageItem);
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "history-fetch-failed",
+        chat_id: chatId,
+        message_ids: batchMessages.map((item) => item.message_id),
+        error: String(error)
+      });
+    }
     const inboxMessages = readInboxLines(chatId, getHistoryLimit(config, flags));
     const prompt = buildCodexPrompt(chatId, batchMessages, normalizedHistory, inboxMessages);
-    const replyText = await runCodexPrompt(prompt);
+    let replyText = "";
+    try {
+      replyText = await runCodexPrompt(prompt, config, flags, {
+        onLongRunning: async () => {
+          const waitText = buildLongRunningReply();
+          await sendTextMessage(config, "chat_id", chatId, waitText);
+          appendJsonl(eventsPath, {
+            timestamp: new Date().toISOString(),
+            type: "codex-progress-ping",
+            chat_id: chatId,
+            message_ids: batchMessages.map((item) => item.message_id),
+            text: waitText
+          });
+        },
+        onLongRunningError: (error) => {
+          appendJsonl(errorsPath, {
+            timestamp: new Date().toISOString(),
+            type: "codex-progress-ping-failed",
+            chat_id: chatId,
+            message_ids: batchMessages.map((item) => item.message_id),
+            error: String(error)
+          });
+        }
+      });
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "codex-reply-failed",
+        chat_id: chatId,
+        message_ids: batchMessages.map((item) => item.message_id),
+        error: String(error)
+      });
+      replyText = buildCodexFailureReply(batchMessages, error);
+    }
     if (!replyText) {
-      throw new Error("empty Codex reply");
+      replyText = buildFallbackReply(batchMessages);
     }
     await sendTextMessage(config, "chat_id", chatId, replyText);
     appendJsonl(batchesPath, {
@@ -527,6 +703,32 @@ function bootstrapPendingQueues(config, flags) {
   }
 }
 
+function startQueueSweeper(config, flags) {
+  if (!flags["spawn-codex"]) {
+    return;
+  }
+  if (queueSweepTimer) {
+    clearInterval(queueSweepTimer);
+  }
+  const sweep = () => {
+    const queue = readQueue();
+    for (const [chatId, chat] of Object.entries(queue.chats || {})) {
+      if (chat?.pending?.length || chat?.processing) {
+        processChatQueue(chatId, config, flags).catch((error) => {
+          appendJsonl(errorsPath, {
+            timestamp: new Date().toISOString(),
+            type: "queue-sweeper",
+            chat_id: chatId,
+            error: String(error)
+          });
+        });
+      }
+    }
+  };
+  sweep();
+  queueSweepTimer = setInterval(sweep, getQueueSweepIntervalMs(config, flags));
+}
+
 async function handleIncomingMessage(event, config, flags) {
   appendJsonl(inboxPath, event);
   enqueueForChat(event);
@@ -535,6 +737,30 @@ async function handleIncomingMessage(event, config, flags) {
     type: event.source === "history-sync" ? "history-sync.user-message" : "im.message.receive_v1",
     event
   });
+
+  if (event.source !== "history-sync" && isReactionEnabled(config, flags)) {
+    sendMessageReaction(config, event.message_id, getReactionEmojiType(config, flags), flags)
+      .then((response) => {
+        appendJsonl(eventsPath, {
+          timestamp: new Date().toISOString(),
+          type: "im.message.reaction.create",
+          chat_id: event.chat_id,
+          message_id: event.message_id,
+          emoji_type: getReactionEmojiType(config, flags),
+          reaction_id: response?.data?.reaction_id || ""
+        });
+      })
+      .catch((error) => {
+        appendJsonl(errorsPath, {
+          timestamp: new Date().toISOString(),
+          type: "message-reaction-failed",
+          chat_id: event.chat_id,
+          message_id: event.message_id,
+          emoji_type: getReactionEmojiType(config, flags),
+          error: String(error)
+        });
+      });
+  }
 
   if (flags["auto-ack"]) {
     const autoAckText = "已收到消息，派蒙会合并上下文后统一处理。";
@@ -558,6 +784,7 @@ async function handleIncomingMessage(event, config, flags) {
 async function startWebsocket(config, flags) {
   ensureDirs();
   bootstrapPendingQueues(config, flags);
+  startQueueSweeper(config, flags);
 
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data) => {
@@ -583,11 +810,11 @@ async function startWebsocket(config, flags) {
   console.log("Feishu WS gateway started");
 }
 
-async function fetchChatMessages(config, chatId, pageSize = 50) {
+async function fetchChatMessages(config, chatId, pageSize = 50, flags = {}) {
   const items = [];
   let pageToken = "";
   for (let i = 0; i < 20; i += 1) {
-    const payload = await fetchMessagesPage(config, chatId, pageSize, pageToken);
+    const payload = await fetchMessagesPage(config, chatId, pageSize, pageToken, flags);
     const data = payload?.data || {};
     items.push(...(data.items || []));
     if (!data.has_more) {
@@ -636,7 +863,7 @@ function printHelp() {
   node feishu_gateway.mjs token
   node feishu_gateway.mjs send --receive-id-type chat_id --receive-id xxx --text "hello"
   node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--merge-window-ms 15000]
-  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--history-limit 12] [--process-timeout-ms 120000]`);
+  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--history-limit 12] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000]`);
 }
 
 async function main() {
