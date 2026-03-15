@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +33,18 @@ from snapshot import run_snapshot
 
 
 PRIMARY_CYCLE_PATH = CURRENT_STATE_DIR / "heartbeat_primary_cycle.json"
+NEXT_ACTIONS_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions.json"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_GATEWAY_SCRIPT = REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "scripts" / "feishu_gateway.mjs"
 DEFAULT_HEARTBEAT_WRITE_RETRIES = 3
 DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC = 2.0
+DEFAULT_REPLY_MAX_PER_RUN = 8
+DEFAULT_REPLY_PROCESSING_TIME_BUDGET_SEC = 180
+DEFAULT_REPLY_POST_SCAN_LIMIT = 12
+DEFAULT_FAILURE_DETAIL_LIMIT = 3
+DEFAULT_COMMENT_REPLY_MIN_INTERVAL_SEC = 2.2
 
 
 def _heartbeat_codex_timeout_seconds(config) -> int:
@@ -79,10 +86,162 @@ def _heartbeat_write_retry_delay_sec(config) -> float:
         return DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC
 
 
+def _reply_max_per_run(config) -> int:
+    minimum = max(1, int(config.automation.get("reply_batch_size", 2)))
+    raw = config.automation.get("reply_max_per_run", DEFAULT_REPLY_MAX_PER_RUN)
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return max(minimum, DEFAULT_REPLY_MAX_PER_RUN)
+
+
+def _reply_processing_time_budget_sec(config) -> int:
+    raw = config.automation.get("reply_processing_time_budget_sec", DEFAULT_REPLY_PROCESSING_TIME_BUDGET_SEC)
+    try:
+        return max(15, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_REPLY_PROCESSING_TIME_BUDGET_SEC
+
+
+def _reply_post_scan_limit(config) -> int:
+    raw = config.automation.get(
+        "reply_post_scan_limit",
+        config.automation.get("post_limit", DEFAULT_REPLY_POST_SCAN_LIMIT),
+    )
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_REPLY_POST_SCAN_LIMIT
+
+
+def _heartbeat_failure_detail_limit(config) -> int:
+    raw = config.automation.get("heartbeat_failure_detail_limit", DEFAULT_FAILURE_DETAIL_LIMIT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FAILURE_DETAIL_LIMIT
+
+
+def _comment_reply_min_interval_sec(config) -> float:
+    raw = config.automation.get("comment_reply_min_interval_sec", DEFAULT_COMMENT_REPLY_MIN_INTERVAL_SEC)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_COMMENT_REPLY_MIN_INTERVAL_SEC
+
+
 def _api_error_payload(exc: Exception) -> Any:
     if isinstance(exc, ApiError):
         return exc.body
     return str(exc)
+
+
+def _extract_retry_after_seconds(exc: Exception) -> float | None:
+    if not isinstance(exc, ApiError):
+        return None
+    body = exc.body
+    if isinstance(body, dict):
+        retry_after = body.get("retry_after_seconds")
+        if retry_after is not None:
+            try:
+                return max(0.0, float(retry_after))
+            except (TypeError, ValueError):
+                pass
+        error_text = str(body.get("error", ""))
+    else:
+        error_text = str(body)
+    matched = re.search(r"wait\s+(\d+(?:\.\d+)?)\s+seconds?", error_text, re.IGNORECASE)
+    if matched:
+        return max(0.0, float(matched.group(1)))
+    return None
+
+
+def _is_retryable_comment_error(exc: Exception) -> bool:
+    if not isinstance(exc, ApiError):
+        return False
+    if exc.status == 429:
+        return True
+    body = exc.body
+    if isinstance(body, dict):
+        error_text = str(body.get("error", ""))
+    else:
+        error_text = str(body)
+    return "commenting too fast" in error_text.lower()
+
+
+def _load_next_actions_state() -> dict[str, Any]:
+    state = read_json(NEXT_ACTIONS_PATH, default={"updated_at": None, "tasks": []})
+    tasks = state.get("tasks", [])
+    if not isinstance(tasks, list):
+        tasks = []
+    return {
+        "updated_at": state.get("updated_at"),
+        "tasks": tasks,
+    }
+
+
+def _save_next_actions_state(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    state = {
+        "updated_at": now_utc(),
+        "tasks": tasks,
+    }
+    write_json(NEXT_ACTIONS_PATH, state)
+    return state
+
+
+def _task_counts(tasks: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for task in tasks:
+        kind = str(task.get("kind") or "unknown")
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def _load_current_account_overview() -> dict[str, Any]:
+    return read_json(CURRENT_STATE_DIR / "account_overview.json", default={})
+
+
+def _account_state_from_overview(overview: dict[str, Any] | None) -> dict[str, Any]:
+    overview = overview or {}
+    return {
+        "captured_at": overview.get("captured_at"),
+        "score": overview.get("score"),
+        "follower_count": overview.get("follower_count"),
+        "following_count": overview.get("following_count"),
+        "unread_notification_count": overview.get("unread_notification_count"),
+        "unread_message_count": overview.get("unread_message_count"),
+    }
+
+
+def _metric_delta(before: Any, after: Any) -> int | None:
+    if before is None or after is None:
+        return None
+    try:
+        return int(after) - int(before)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_account_snapshot(start_overview: dict[str, Any] | None, end_overview: dict[str, Any] | None) -> dict[str, Any]:
+    started = _account_state_from_overview(start_overview)
+    finished = _account_state_from_overview(end_overview)
+    return {
+        "started": started,
+        "finished": finished,
+        "delta": {
+            "score": _metric_delta(started.get("score"), finished.get("score")),
+            "follower_count": _metric_delta(started.get("follower_count"), finished.get("follower_count")),
+            "following_count": _metric_delta(started.get("following_count"), finished.get("following_count")),
+            "unread_notification_count": _metric_delta(
+                started.get("unread_notification_count"),
+                finished.get("unread_notification_count"),
+            ),
+            "unread_message_count": _metric_delta(
+                started.get("unread_message_count"),
+                finished.get("unread_message_count"),
+            ),
+        },
+    }
 
 
 def _run_heartbeat_write(
@@ -172,21 +331,123 @@ def _parse_forum_post(result: str) -> tuple[str, str, str]:
     return title_match.group(1).strip(), submolt_match.group(1).strip(), content_match.group(1).strip()
 
 
-def _find_unanswered_comment(client: InStreetClient, post_id: str, username: str) -> dict | None:
-    try:
-        data = client.comments(post_id).get("data", [])
-    except ApiError:
-        return None
+def _list_unanswered_comments(client: InStreetClient, post_id: str, username: str) -> list[dict]:
+    data = client.comments(post_id).get("data", [])
     candidates: list[dict] = []
     for root in data:
         if root.get("agent", {}).get("username") == username:
             continue
         children = root.get("children", [])
-        if not any(child.get("agent", {}).get("username") == username for child in children):
-            candidates.append(root)
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: item.get("created_at", ""), reverse=True)[0]
+        if any(child.get("agent", {}).get("username") == username for child in children):
+            continue
+        candidates.append(root)
+    return sorted(candidates, key=lambda item: item.get("created_at", ""))
+
+
+def _build_comment_reply_queue(
+    config,
+    client: InStreetClient,
+    plan: dict,
+    posts: list[dict],
+    username: str,
+    carryover_tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reply_targets = {item.get("post_id"): item for item in plan.get("reply_targets", []) if item.get("post_id")}
+    carryover_comment_ids = {
+        item.get("comment_id"): index
+        for index, item in enumerate(carryover_tasks)
+        if item.get("kind") == "reply-comment" and item.get("comment_id")
+    }
+    carryover_post_ids = {
+        item.get("post_id")
+        for item in carryover_tasks
+        if item.get("kind") == "reply-comment" and item.get("post_id")
+    }
+    candidate_posts: list[dict[str, Any]] = []
+    seen_post_ids: set[str] = set()
+    for post in posts:
+        post_id = post.get("id")
+        if not post_id or post_id in seen_post_ids:
+            continue
+        seen_post_ids.add(post_id)
+        target = reply_targets.get(post_id, {})
+        candidate_posts.append(
+            {
+                "post_id": post_id,
+                "post_title": post.get("title"),
+                "updated_at": post.get("updated_at") or post.get("created_at") or "",
+                "new_notification_count": int(target.get("new_notification_count") or 0),
+                "carryover_priority": 0 if post_id in carryover_post_ids else 1,
+                "reply_target_priority": 0 if post_id in reply_targets else 1,
+            }
+        )
+    candidate_posts.sort(
+        key=lambda item: (
+            item["carryover_priority"],
+            item["reply_target_priority"],
+            -item["new_notification_count"],
+            item["updated_at"],
+        )
+    )
+
+    tasks: list[dict[str, Any]] = []
+    scan_failures: list[dict[str, Any]] = []
+    seen_comment_ids: set[str] = set()
+    scan_limit = _reply_post_scan_limit(config)
+    scanned_post_count = 0
+
+    for post_meta in candidate_posts[:scan_limit]:
+        scanned_post_count += 1
+        post_id = post_meta["post_id"]
+        try:
+            comments = _list_unanswered_comments(client, post_id, username)
+        except Exception as exc:
+            scan_failures.append(
+                {
+                    "kind": "comment-backlog-load-failed",
+                    "post_id": post_id,
+                    "post_title": post_meta.get("post_title"),
+                    "error": _api_error_payload(exc),
+                    "resolution": "unresolved",
+                }
+            )
+            continue
+        for comment in comments:
+            comment_id = comment.get("id")
+            if not comment_id or comment_id in seen_comment_ids:
+                continue
+            seen_comment_ids.add(comment_id)
+            tasks.append(
+                {
+                    "kind": "reply-comment",
+                    "source": "carryover" if comment_id in carryover_comment_ids else "live",
+                    "carryover_rank": carryover_comment_ids.get(comment_id, 10_000),
+                    "post_priority": post_meta["reply_target_priority"],
+                    "new_notification_count": post_meta["new_notification_count"],
+                    "post_id": post_id,
+                    "post_title": post_meta.get("post_title"),
+                    "comment_id": comment_id,
+                    "comment_created_at": comment.get("created_at"),
+                    "comment_author": comment.get("agent", {}).get("username"),
+                    "comment_excerpt": truncate_text(comment.get("content", ""), 140),
+                }
+            )
+
+    tasks.sort(
+        key=lambda item: (
+            0 if item["source"] == "carryover" else 1,
+            item["carryover_rank"],
+            item["post_priority"],
+            -int(item.get("new_notification_count") or 0),
+            item.get("comment_created_at") or "",
+        )
+    )
+    return {
+        "tasks": tasks,
+        "scan_failures": scan_failures,
+        "scanned_post_count": scanned_post_count,
+        "scan_limit": scan_limit,
+    }
 
 
 def _fallback_comment_reply(comment: dict) -> str:
@@ -688,25 +949,118 @@ def _publish_primary_action(
     return None, failures, cycle_state
 
 
+def _mark_posts_read(client: InStreetClient, cleared_post_ids: set[str]) -> list[dict]:
+    actions: list[dict] = []
+    for post_id in sorted(cleared_post_ids):
+        try:
+            client.mark_read_by_post(post_id)
+            actions.append(
+                {
+                    "kind": "mark-post-notifications-read",
+                    "post_id": post_id,
+                }
+            )
+        except Exception as exc:
+            actions.append(
+                {
+                    "kind": "mark-post-notifications-read-failed",
+                    "post_id": post_id,
+                    "error": _api_error_payload(exc),
+                }
+            )
+    return actions
+
+
 def _reply_comments(
     config,
     client: InStreetClient,
     plan: dict,
+    posts: list[dict],
     username: str,
+    carryover_tasks: list[dict[str, Any]],
     *,
     allow_codex: bool,
     model: str | None,
     reasoning_effort: str | None,
-    batch_size: int,
+    min_batch_size: int,
+    max_batch_size: int,
+    processing_time_budget_sec: int,
     codex_timeout_seconds: int,
-) -> list[dict]:
+) -> dict[str, Any]:
+    queue = _build_comment_reply_queue(config, client, plan, posts, username, carryover_tasks)
+    tasks = queue["tasks"]
     actions: list[dict] = []
-    for target in plan.get("reply_targets", [])[:batch_size]:
-        comment = _find_unanswered_comment(client, target["post_id"], username)
-        if not comment:
-            continue
+    failure_details = list(queue["scan_failures"])
+    for failure in queue["scan_failures"]:
+        actions.append(
+            {
+                "kind": failure["kind"],
+                "post_id": failure.get("post_id"),
+                "post_title": failure.get("post_title"),
+                "error": failure.get("error"),
+            }
+        )
+
+    if not tasks:
+        backlog = {
+            "detected_count": 0,
+            "replied_count": 0,
+            "failed_count": len(queue["scan_failures"]),
+            "remaining_count": 0,
+            "deferred_count": 0,
+            "scanned_post_count": queue["scanned_post_count"],
+            "scan_limit": queue["scan_limit"],
+            "reply_goal": min_batch_size,
+            "reply_cap": max_batch_size,
+            "processing_time_budget_sec": processing_time_budget_sec,
+            "processed_post_count": 0,
+            "resolved_with_retry_count": 0,
+        }
+        return {
+            "actions": actions,
+            "backlog": backlog,
+            "remaining_tasks": [],
+            "failure_details": failure_details,
+        }
+
+    started_at = time.monotonic()
+    deadline = started_at + processing_time_budget_sec
+    reply_count = 0
+    failed_count = 0
+    resolved_with_retry_count = 0
+    remaining_tasks: list[dict[str, Any]] = []
+    last_comment_write_at: float | None = None
+    post_cache = {item.get("id"): item for item in posts if item.get("id")}
+    remaining_by_post = {}
+    for task in tasks:
+        post_id = str(task.get("post_id") or "")
+        remaining_by_post[post_id] = remaining_by_post.get(post_id, 0) + 1
+
+    for index, task in enumerate(tasks):
+        if reply_count >= max_batch_size:
+            remaining_tasks.extend(tasks[index:])
+            break
+        if reply_count >= min_batch_size and time.monotonic() >= deadline:
+            remaining_tasks.extend(tasks[index:])
+            break
+
+        if last_comment_write_at is not None:
+            wait_needed = _comment_reply_min_interval_sec(config) - (time.monotonic() - last_comment_write_at)
+            if wait_needed > 0:
+                if reply_count >= min_batch_size and time.monotonic() + wait_needed > deadline:
+                    remaining_tasks.extend(tasks[index:])
+                    break
+                time.sleep(wait_needed)
+
+        post_id = str(task.get("post_id") or "")
+        comment_id = str(task.get("comment_id") or "")
+        comment = {"id": comment_id, "content": task.get("comment_excerpt") or ""}
+
         try:
-            post = client.post(target["post_id"]).get("data", {})
+            post = post_cache.get(post_id)
+            if not post or "content" not in post:
+                post = client.post(post_id).get("data", {})
+                post_cache[post_id] = post
             if allow_codex:
                 try:
                     reply = _generate_comment_reply(
@@ -720,53 +1074,118 @@ def _reply_comments(
                     reply = _fallback_comment_reply(comment)
             else:
                 reply = _fallback_comment_reply(comment)
-            payload = {
-                "post_id": target["post_id"],
-                "parent_id": comment["id"],
-                "content": reply,
-            }
-            dedupe_key = f"heartbeat-comment-reply:{target['post_id']}:{comment['id']}"
+        except Exception:
+            post = post_cache.get(post_id, {})
+            reply = _fallback_comment_reply(comment)
+
+        payload = {
+            "post_id": post_id,
+            "parent_id": comment_id,
+            "content": reply,
+        }
+        dedupe_key = f"heartbeat-comment-reply:{post_id}:{comment_id}"
+        recovery_attempts = 0
+        recovered_after_retry = False
+
+        while True:
             result, record, deduped, exc = _run_heartbeat_write(
                 config,
                 "comment",
                 dedupe_key,
                 payload,
-                lambda: client.create_comment(target["post_id"], reply, parent_id=comment["id"]),
+                lambda: client.create_comment(post_id, reply, parent_id=comment_id),
                 meta={"stage": "reply-comment"},
             )
-            if exc is not None:
-                raise exc
-            client.mark_read_by_post(target["post_id"])
-            actions.append(
-                {
-                    "kind": "reply-comment",
-                    "post_id": target["post_id"],
-                    "comment_id": comment["id"],
-                    "result_id": (result or {}).get("data", {}).get("id"),
-                    "deduped": deduped,
-                    "outbound_dedupe_key": dedupe_key,
-                    "outbound_status": record.get("status"),
-                }
-            )
-        except ApiError as exc:
-            actions.append(
-                {
+            if exc is None:
+                reply_count += 1
+                if recovered_after_retry:
+                    resolved_with_retry_count += 1
+                last_comment_write_at = time.monotonic()
+                remaining_by_post[post_id] = max(0, remaining_by_post.get(post_id, 0) - 1)
+                actions.append(
+                    {
+                        "kind": "reply-comment",
+                        "post_id": post_id,
+                        "post_title": task.get("post_title"),
+                        "comment_id": comment_id,
+                        "comment_author": task.get("comment_author"),
+                        "result_id": (result or {}).get("data", {}).get("id"),
+                        "deduped": deduped,
+                        "outbound_dedupe_key": dedupe_key,
+                        "outbound_status": record.get("status"),
+                        "recovered_after_retry": recovered_after_retry,
+                    }
+                )
+                break
+
+            if not _is_retryable_comment_error(exc):
+                failed_count += 1
+                remaining_tasks.append(task)
+                failure = {
                     "kind": "reply-comment-failed",
-                    "post_id": target["post_id"],
-                    "comment_id": comment.get("id"),
+                    "post_id": post_id,
+                    "post_title": task.get("post_title"),
+                    "comment_id": comment_id,
+                    "comment_author": task.get("comment_author"),
                     "error": _api_error_payload(exc),
+                    "resolution": "unresolved",
                 }
-            )
-        except Exception as exc:
-            actions.append(
-                {
+                actions.append(failure)
+                failure_details.append(failure)
+                break
+
+            retry_after = max(_extract_retry_after_seconds(exc) or _heartbeat_write_retry_delay_sec(config), 1.0)
+            recovery_wait = retry_after + 0.5 + recovery_attempts * 0.5
+            if recovery_attempts >= 2 or (reply_count >= min_batch_size and time.monotonic() + recovery_wait > deadline):
+                remaining_tasks.append(task)
+                failure = {
                     "kind": "reply-comment-failed",
-                    "post_id": target["post_id"],
-                    "comment_id": comment.get("id"),
+                    "post_id": post_id,
+                    "post_title": task.get("post_title"),
+                    "comment_id": comment_id,
+                    "comment_author": task.get("comment_author"),
                     "error": _api_error_payload(exc),
+                    "resolution": "deferred",
                 }
-            )
-    return actions
+                actions.append(failure)
+                failure_details.append(failure)
+                break
+            time.sleep(recovery_wait)
+            recovery_attempts += 1
+            recovered_after_retry = True
+
+    else:
+        remaining_tasks = []
+
+    cleared_post_ids = {
+        post_id
+        for post_id, remaining in remaining_by_post.items()
+        if remaining == 0 and any(task.get("post_id") == post_id for task in tasks)
+    }
+    actions.extend(_mark_posts_read(client, cleared_post_ids))
+
+    backlog = {
+        "detected_count": len(tasks),
+        "replied_count": reply_count,
+        "failed_count": failed_count + len(queue["scan_failures"]),
+        "remaining_count": len(remaining_tasks),
+        "deferred_count": len(remaining_tasks) - failed_count,
+        "scanned_post_count": queue["scanned_post_count"],
+        "scan_limit": queue["scan_limit"],
+        "reply_goal": min_batch_size,
+        "reply_cap": max_batch_size,
+        "processing_time_budget_sec": processing_time_budget_sec,
+        "processed_post_count": len({task.get("post_id") for task in tasks}) - len(
+            {task.get("post_id") for task in remaining_tasks}
+        ),
+        "resolved_with_retry_count": resolved_with_retry_count,
+    }
+    return {
+        "actions": actions,
+        "backlog": backlog,
+        "remaining_tasks": remaining_tasks,
+        "failure_details": failure_details,
+    }
 
 
 def _reply_dms(
@@ -854,7 +1273,136 @@ def _resolve_feishu_report_target(config) -> tuple[str, str] | None:
     return None
 
 
-def _compose_feishu_report(actions: list[dict], recommended_next_action: str) -> str:
+def _task_label(task: dict[str, Any]) -> str:
+    kind = task.get("kind")
+    if kind == "publish-primary":
+        return "优先补发上一轮未完成的主发布"
+    if kind == "reply-comment":
+        post_title = task.get("post_title") or "目标帖子"
+        return f"继续回复《{post_title}》的剩余评论"
+    if kind == "resolve-failure":
+        return str(task.get("label") or "处理上一轮未解决的失败项")
+    return str(task.get("label") or "继续执行下一轮心跳任务")
+
+
+def _build_next_action_state(
+    primary_publication_required: bool,
+    primary_publication_succeeded: bool,
+    remaining_comment_tasks: list[dict[str, Any]],
+    failure_details: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    persisted_tasks: list[dict[str, Any]] = []
+    if primary_publication_required and not primary_publication_succeeded:
+        persisted_tasks.append(
+            {
+                "kind": "publish-primary",
+                "priority": "high",
+                "label": "优先补发上一轮未完成的主发布",
+            }
+        )
+    for task in remaining_comment_tasks:
+        persisted_tasks.append(
+            {
+                "kind": "reply-comment",
+                "priority": "high",
+                "post_id": task.get("post_id"),
+                "post_title": task.get("post_title"),
+                "comment_id": task.get("comment_id"),
+                "comment_author": task.get("comment_author"),
+                "comment_created_at": task.get("comment_created_at"),
+                "label": _task_label(task),
+            }
+        )
+    unresolved_failures = [item for item in failure_details if item.get("resolution") in {"unresolved", "deferred"}]
+    if unresolved_failures:
+        persisted_tasks.append(
+            {
+                "kind": "resolve-failure",
+                "priority": "medium",
+                "failure_count": len(unresolved_failures),
+                "label": f"处理 {len(unresolved_failures)} 个上一轮未解决的失败项",
+            }
+        )
+
+    summary_actions: list[dict[str, Any]] = []
+    if primary_publication_required and not primary_publication_succeeded:
+        summary_actions.append(
+            {
+                "kind": "publish-primary",
+                "label": "优先补发上一轮未完成的主发布",
+            }
+        )
+    if remaining_comment_tasks:
+        summary_actions.append(
+            {
+                "kind": "reply-comment",
+                "count": len(remaining_comment_tasks),
+                "label": f"优先清理剩余 {len(remaining_comment_tasks)} 条评论积压",
+            }
+        )
+    if unresolved_failures:
+        summary_actions.append(
+            {
+                "kind": "resolve-failure",
+                "count": len(unresolved_failures),
+                "label": f"处理 {len(unresolved_failures)} 个未解决失败项",
+            }
+        )
+    if not summary_actions:
+        summary_actions.append(
+            {
+                "kind": "steady-state",
+                "label": "继续按先主发布、后互动的节奏推进",
+            }
+        )
+    return persisted_tasks, summary_actions[:3]
+
+
+def _format_delta(value: int | None) -> str:
+    if value is None:
+        return "?"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value}"
+
+
+def _format_account_line(account_snapshot: dict[str, Any]) -> str:
+    finished = account_snapshot.get("finished", {})
+    delta = account_snapshot.get("delta", {})
+    score = finished.get("score")
+    followers = finished.get("follower_count")
+    following = finished.get("following_count")
+    return (
+        "账号状态："
+        f"积分 {score if score is not None else '未知'} ({_format_delta(delta.get('score'))})，"
+        f"粉丝 {followers if followers is not None else '未知'} ({_format_delta(delta.get('follower_count'))})，"
+        f"关注 {following if following is not None else '未知'} ({_format_delta(delta.get('following_count'))})"
+    )
+
+
+def _truncate_failure_details(failure_details: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    return failure_details[: max(0, limit)]
+
+
+def _format_failure_line(item: dict[str, Any]) -> str:
+    post_title = item.get("post_title")
+    target = f"《{post_title}》" if post_title else item.get("post_id") or "未知目标"
+    error = item.get("error")
+    if isinstance(error, dict):
+        error_text = str(error.get("error") or error.get("message") or json.dumps(error, ensure_ascii=False))
+    else:
+        error_text = str(error)
+    resolution = item.get("resolution")
+    if resolution == "deferred":
+        prefix = "延后处理"
+    elif resolution == "unresolved":
+        prefix = "仍未解决"
+    else:
+        prefix = "失败"
+    return f"- {prefix}：{target}，{truncate_text(error_text, 90)}"
+
+
+def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -> str:
+    actions = summary.get("actions", [])
     primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
     primary_line = "未完成主发布"
     if primary:
@@ -865,23 +1413,37 @@ def _compose_feishu_report(actions: list[dict], recommended_next_action: str) ->
         else:
             primary_line = f"主帖《{primary.get('title', '')}》"
 
-    comment_count = sum(1 for item in actions if item.get("kind") == "reply-comment")
-    dm_count = sum(1 for item in actions if item.get("kind") == "reply-dm")
-    failures = sum(1 for item in actions if str(item.get("kind", "")).endswith("-failed"))
-    return "\n".join(
-        [
-            "派蒙心跳已完成。",
-            f"主发布：{primary_line}",
-            f"回复评论：{comment_count} 条",
-            f"回复私信：{dm_count} 条",
-            f"失败项：{failures} 条",
-            f"下一步建议：{recommended_next_action}",
-            f"完成时间：{now_utc()}",
-        ]
-    )
+    comment_backlog = summary.get("comment_backlog", {})
+    dm_count = summary.get("dm_reply_count", 0)
+    failure_details = _truncate_failure_details(summary.get("failure_details", []), failure_detail_limit)
+    next_actions = summary.get("next_actions", [])
+
+    lines = [
+        "派蒙心跳已完成。",
+        _format_account_line(summary.get("account_snapshot", {})),
+        f"主发布：{primary_line}",
+        (
+            "评论处理："
+            f"发现 {comment_backlog.get('detected_count', 0)} 条，"
+            f"已回复 {comment_backlog.get('replied_count', 0)} 条，"
+            f"剩余 {comment_backlog.get('remaining_count', 0)} 条"
+        ),
+        f"私信处理：已回复 {dm_count} 条",
+    ]
+
+    if failure_details:
+        lines.append(f"失败明细：{len(summary.get('failure_details', []))} 条")
+        lines.extend(_format_failure_line(item) for item in failure_details)
+    else:
+        lines.append("失败明细：0 条")
+
+    lines.append("下一轮待办：")
+    lines.extend(f"- {item.get('label')}" for item in next_actions[:3])
+    lines.append(f"完成时间：{summary.get('ran_at') or now_utc()}")
+    return "\n".join(lines)
 
 
-def _send_feishu_report(config, actions: list[dict], recommended_next_action: str) -> dict:
+def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: int) -> dict:
     target = _resolve_feishu_report_target(config)
     if target is None:
         return {
@@ -889,7 +1451,7 @@ def _send_feishu_report(config, actions: list[dict], recommended_next_action: st
             "error": "no receive target configured or discovered for heartbeat report",
         }
     receive_id_type, receive_id = target
-    text = _compose_feishu_report(actions, recommended_next_action)
+    text = _compose_feishu_report(summary, failure_detail_limit)
     completed = subprocess.run(
         [
             find_node_executable(),
@@ -942,14 +1504,16 @@ def main() -> None:
     codex_model = config.automation.get("codex_model") or None
     codex_reasoning_effort = config.automation.get("codex_reasoning_effort") or None
     codex_timeout_seconds = _heartbeat_codex_timeout_seconds(config)
-
-    run_snapshot(
+    failure_detail_limit = _heartbeat_failure_detail_limit(config)
+    start_overview = run_snapshot(
         archive=args.archive,
         post_limit=config.automation["post_limit"],
         feed_limit=config.automation["feed_limit"],
     )
     plan = build_plan()
     write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
+    carryover_state = _load_next_actions_state()
+    carryover_tasks = carryover_state.get("tasks", [])
 
     posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
     literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
@@ -958,7 +1522,27 @@ def main() -> None:
     groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
 
     actions: list[dict] = []
+    failure_details: list[dict] = []
     primary_action = None
+    comment_result = {
+        "actions": [],
+        "backlog": {
+            "detected_count": 0,
+            "replied_count": 0,
+            "failed_count": 0,
+            "remaining_count": 0,
+            "deferred_count": 0,
+            "scanned_post_count": 0,
+            "scan_limit": _reply_post_scan_limit(config),
+            "reply_goal": int(config.automation.get("reply_batch_size", 2)),
+            "reply_cap": _reply_max_per_run(config),
+            "processing_time_budget_sec": _reply_processing_time_budget_sec(config),
+            "processed_post_count": 0,
+            "resolved_with_retry_count": 0,
+        },
+        "remaining_tasks": [],
+        "failure_details": [],
+    }
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
@@ -977,57 +1561,131 @@ def main() -> None:
             codex_timeout_seconds=codex_timeout_seconds,
         )
         actions.extend(primary_failures)
+        failure_details.extend(
+            {
+                "kind": item.get("kind"),
+                "publish_kind": item.get("publish_kind"),
+                "post_title": item.get("title"),
+                "error": item.get("error"),
+                "resolution": "unresolved",
+            }
+            for item in primary_failures
+        )
         if primary_action:
             actions.append(primary_action)
 
-        actions.extend(
-            _reply_comments(
-                config,
-                client,
-                plan,
-                username,
-                allow_codex=args.allow_codex,
-                model=codex_model,
-                reasoning_effort=codex_reasoning_effort,
-                batch_size=int(config.automation.get("reply_batch_size", 2)),
-                codex_timeout_seconds=codex_timeout_seconds,
-            )
+        comment_result = _reply_comments(
+            config,
+            client,
+            plan,
+            posts,
+            username,
+            carryover_tasks,
+            allow_codex=args.allow_codex,
+            model=codex_model,
+            reasoning_effort=codex_reasoning_effort,
+            min_batch_size=int(config.automation.get("reply_batch_size", 2)),
+            max_batch_size=_reply_max_per_run(config),
+            processing_time_budget_sec=_reply_processing_time_budget_sec(config),
+            codex_timeout_seconds=codex_timeout_seconds,
         )
-        actions.extend(
-            _reply_dms(
-                client,
-                plan,
-                allow_codex=args.allow_codex,
-                model=codex_model,
-                reasoning_effort=codex_reasoning_effort,
-                batch_size=int(config.automation.get("dm_batch_size", 2)),
-                codex_timeout_seconds=codex_timeout_seconds,
-            )
+        actions.extend(comment_result["actions"])
+        failure_details.extend(comment_result["failure_details"])
+
+        dm_actions = _reply_dms(
+            client,
+            plan,
+            allow_codex=args.allow_codex,
+            model=codex_model,
+            reasoning_effort=codex_reasoning_effort,
+            batch_size=int(config.automation.get("dm_batch_size", 2)),
+            codex_timeout_seconds=codex_timeout_seconds,
+        )
+        actions.extend(dm_actions)
+        failure_details.extend(
+            {
+                "kind": item.get("kind"),
+                "thread_id": item.get("thread_id"),
+                "error": item.get("error"),
+                "resolution": "unresolved",
+            }
+            for item in dm_actions
+            if item.get("kind") == "reply-dm-failed"
         )
 
     primary_publication_required = bool(args.execute and config.automation.get("heartbeat_require_primary_publication", True))
     primary_publication_succeeded = primary_action is not None
 
-    feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
-    feishu_report_sent = False
-    if feishu_report_required:
-        report_action = _send_feishu_report(config, actions, plan["recommended_next_action"])
-        actions.append(report_action)
-        feishu_report_sent = report_action.get("kind") == "feishu-report"
+    if args.execute:
+        end_overview = run_snapshot(
+            archive=False,
+            post_limit=config.automation["post_limit"],
+            feed_limit=config.automation["feed_limit"],
+        )
+    else:
+        end_overview = _load_current_account_overview()
+    account_snapshot = _build_account_snapshot(start_overview, end_overview)
 
+    if args.execute:
+        persisted_next_tasks, next_actions = _build_next_action_state(
+            primary_publication_required,
+            primary_publication_succeeded,
+            comment_result["remaining_tasks"],
+            failure_details,
+        )
+        next_action_state = _save_next_actions_state(persisted_next_tasks)
+    else:
+        persisted_next_tasks = carryover_tasks
+        next_action_state = carryover_state
+        next_actions = [{"kind": item.get("kind"), "label": _task_label(item)} for item in carryover_tasks[:3]]
+        if not next_actions:
+            next_actions = [{"kind": "steady-state", "label": "继续按先主发布、后互动的节奏推进"}]
+    recommended_next_action = next_actions[0]["label"] if next_actions else "继续按先主发布、后互动的节奏推进"
+
+    feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
     summary = {
         "ran_at": now_utc(),
         "execute": args.execute,
         "allow_codex": args.allow_codex,
-        "recommended_next_action": plan["recommended_next_action"],
+        "recommended_next_action": recommended_next_action,
         "primary_publication_required": primary_publication_required,
         "primary_publication_succeeded": primary_publication_succeeded,
         "feishu_report_required": feishu_report_required,
-        "feishu_report_sent": feishu_report_sent,
+        "feishu_report_sent": False,
         "comment_reply_count": sum(1 for item in actions if item.get("kind") == "reply-comment"),
         "dm_reply_count": sum(1 for item in actions if item.get("kind") == "reply-dm"),
+        "account_snapshot": account_snapshot,
+        "comment_backlog": comment_result["backlog"],
+        "failure_details": failure_details,
+        "next_actions": next_actions,
+        "continuation_state": {
+            "path": str(NEXT_ACTIONS_PATH.relative_to(REPO_ROOT)),
+            "updated_at": next_action_state.get("updated_at"),
+            "task_count": len(persisted_next_tasks),
+            "task_counts": _task_counts(persisted_next_tasks),
+        },
         "actions": actions,
     }
+
+    feishu_report_sent = False
+    if feishu_report_required:
+        report_action = _send_feishu_report(config, summary, failure_detail_limit)
+        actions.append(report_action)
+        if report_action.get("kind") == "feishu-report":
+            feishu_report_sent = True
+        else:
+            failure_details.append(
+                {
+                    "kind": report_action.get("kind"),
+                    "error": report_action.get("error"),
+                    "resolution": "unresolved",
+                }
+            )
+        summary["feishu_report_sent"] = feishu_report_sent
+        summary["failure_details"] = failure_details
+
+    updated_plan = build_plan()
+    write_json(CURRENT_STATE_DIR / "content_plan.json", updated_plan)
     write_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", summary)
     append_jsonl(CURRENT_STATE_DIR / "heartbeat_log.jsonl", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

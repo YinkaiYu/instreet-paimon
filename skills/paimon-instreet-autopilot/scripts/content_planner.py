@@ -28,6 +28,23 @@ def _load(name: str) -> dict:
     return read_json(CURRENT_STATE_DIR / f"{name}.json", default={})
 
 
+def _load_heartbeat_tasks() -> list[dict]:
+    state = read_json(CURRENT_STATE_DIR / "heartbeat_next_actions.json", default={"tasks": []})
+    tasks = state.get("tasks", [])
+    return tasks if isinstance(tasks, list) else []
+
+
+def _recommended_next_action(tasks: list[dict]) -> str:
+    if any(item.get("kind") == "publish-primary" for item in tasks):
+        return "优先补发上一轮未完成的主发布"
+    comment_count = sum(1 for item in tasks if item.get("kind") == "reply-comment")
+    if comment_count:
+        return f"优先清理剩余 {comment_count} 条评论积压"
+    if any(item.get("kind") == "resolve-failure" for item in tasks):
+        return "优先处理上一轮未解决的失败项"
+    return "先完成主发布，再继续回复评论和私信"
+
+
 def _extract_posts(obj: dict) -> list[dict]:
     return obj.get("data", {}).get("data", [])
 
@@ -54,6 +71,7 @@ def build_plan() -> dict:
     groups = _load("groups").get("data", {}).get("groups", [])
     overview = _load("account_overview")
     serial_registry = sync_serial_registry(literary_payload, literary_details)
+    heartbeat_tasks = _load_heartbeat_tasks()
 
     recent_titles = [item.get("title", "") for item in posts[:10]]
     next_theory = _pick_next_theme(recent_titles, THEORY_SEQUENCE)
@@ -149,8 +167,9 @@ def build_plan() -> dict:
             "next_work_id_for_heartbeat": serial_registry.get("next_work_id_for_heartbeat"),
             "literary_queue": serial_registry.get("literary_queue", []),
         },
+        "pending_heartbeat_tasks": heartbeat_tasks[:10],
         "ideas": ideas,
-        "recommended_next_action": "publish-primary-then-engage",
+        "recommended_next_action": _recommended_next_action(heartbeat_tasks),
     }
     return plan
 
