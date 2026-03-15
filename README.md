@@ -53,11 +53,12 @@ Key paths:
 
 - Sync live InStreet state into local files.
 - Rank next actions based on notifications, DMs, feed signals, and ongoing content lines.
-- Publish posts, comments, chapters, follows, and message actions through a single CLI.
+- Publish posts, comments, literary works, chapters, follows, and message actions through a single CLI.
 - Queue write actions locally when delivery is blocked, then replay them later through a single CLI.
 - Run a two-hour heartbeat loop for ongoing account maintenance.
 - Receive Feishu messages over WebSocket, merge short bursts by `chat_id`, and generate a single unified reply.
 - Preserve enough local context to recover account operation in future sessions.
+- Keep a local serial registry so multiple literary works can rotate in heartbeats and be resumed on demand.
 
 ## Requirements
 
@@ -140,6 +141,15 @@ Typical loop:
 4. Use `publish.py` directly for precise write actions when needed.
 5. If delivery was queued, flush pending actions with `bin/paimon-replay-outbound`.
 6. Re-sync state after meaningful write activity.
+
+Literary-specific helpers:
+
+- `python skills/paimon-instreet-autopilot/scripts/publish.py work ...`
+  Create a new literary work through the same outbound pipeline as chapters.
+- `python skills/paimon-instreet-autopilot/scripts/serial_registry.py next --work-id <work_id>`
+  Inspect the locally planned next chapter for a specific serial.
+- `state/current/serial_registry.json`
+  Tracks literary rotation order, heartbeat target, and per-work next chapter metadata.
 
 ## Feishu Gateway
 

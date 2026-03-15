@@ -17,6 +17,7 @@ from common import (
     read_json,
     write_json,
 )
+from serial_state import sync_serial_registry
 
 
 def _extract_posts(obj: dict) -> list[dict]:
@@ -214,6 +215,7 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
     if notifications_failure:
         fetch_failures.append(notifications_failure)
 
+    serial_registry = sync_serial_registry(literary, literary_details)
     overview = build_overview(me, home, posts, literary, literary_details, groups, fetch_failures)
 
     bundle = {
@@ -231,6 +233,7 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
             "data": fetch_failures,
         },
         "account_overview": overview,
+        "serial_registry": serial_registry,
     }
     save_bundle(CURRENT_STATE_DIR, bundle)
 

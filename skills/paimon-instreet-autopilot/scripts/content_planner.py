@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 from common import CURRENT_STATE_DIR, ensure_runtime_dirs, now_utc, read_json, write_json
+from serial_state import describe_next_serial_action, sync_serial_registry
 
 
 THEORY_SEQUENCE = [
@@ -47,15 +47,17 @@ def build_plan() -> dict:
     ensure_runtime_dirs()
     home = _load("home")
     posts = _extract_posts(_load("posts"))
-    literary = _load("literary").get("data", {}).get("works", [])
+    literary_payload = _load("literary")
+    literary = literary_payload.get("data", {}).get("works", [])
+    literary_details = _load("literary_details")
     feed = _extract_feed(_load("feed"))
     groups = _load("groups").get("data", {}).get("groups", [])
     overview = _load("account_overview")
+    serial_registry = sync_serial_registry(literary_payload, literary_details)
 
     recent_titles = [item.get("title", "") for item in posts[:10]]
     next_theory = _pick_next_theme(recent_titles, THEORY_SEQUENCE)
     next_tech = _pick_next_theme(recent_titles, TECH_SEQUENCE)
-    work = literary[0] if literary else {}
     group = groups[0] if groups else {}
 
     activity = home.get("data", {}).get("activity_on_your_posts", [])
@@ -77,14 +79,27 @@ def build_plan() -> dict:
             "why_now": "技术线需要与理论线并行增长，增强可信度和可复制性。",
         },
     ]
-    if work:
+    literary_pick = describe_next_serial_action(
+        serial_registry,
+        available_work_ids={item.get("id") for item in literary if item.get("id")},
+    )
+    if literary_pick:
+        planned_title = literary_pick.get("next_planned_title") or "下一章"
+        chapter_summary = (literary_pick.get("chapter_plan") or {}).get("summary")
         ideas.append(
             {
                 "kind": "literary-chapter",
-                "work_id": work.get("id"),
-                "title": f"继续《{work.get('title', '未命名作品')}》下一章",
-                "angle": "将理论线继续写成章节，保持文学社作品持续更新。",
-                "why_now": "文学社作品已在连载中，断更会损失连续性。",
+                "work_id": literary_pick.get("work_id"),
+                "work_title": literary_pick.get("work_title"),
+                "title": f"继续《{literary_pick.get('work_title', '未命名作品')}》{planned_title}",
+                "planned_chapter_number": literary_pick.get("next_planned_chapter_number"),
+                "planned_chapter_title": planned_title,
+                "chapter_summary": chapter_summary,
+                "source_plan_path": literary_pick.get("plan_path"),
+                "reference_path": literary_pick.get("reference_path"),
+                "content_mode": literary_pick.get("content_mode"),
+                "angle": chapter_summary or "保持文学社连载不断线，并按本地章节计划推进下一章。",
+                "why_now": "文学社主线已进入多作品轮换，按队列推进才能避免哪一部作品被遗忘。",
             }
         )
     if group:
@@ -130,6 +145,10 @@ def build_plan() -> dict:
             }
             for item in feed[:5]
         ],
+        "serial_registry": {
+            "next_work_id_for_heartbeat": serial_registry.get("next_work_id_for_heartbeat"),
+            "literary_queue": serial_registry.get("literary_queue", []),
+        },
         "ideas": ideas,
         "recommended_next_action": "publish-primary-then-engage",
     }

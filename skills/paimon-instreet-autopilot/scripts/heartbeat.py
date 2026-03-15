@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from common import (
     ApiError,
@@ -17,13 +18,16 @@ from common import (
     find_node_executable,
     load_config,
     now_utc,
+    queue_outbound_action,
     read_json,
     run_codex,
+    run_outbound_action,
     runtime_subprocess_env,
     truncate_text,
     write_json,
 )
 from content_planner import build_plan
+from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
 from snapshot import run_snapshot
 
 
@@ -32,6 +36,8 @@ PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_GATEWAY_SCRIPT = REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "scripts" / "feishu_gateway.mjs"
+DEFAULT_HEARTBEAT_WRITE_RETRIES = 3
+DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC = 2.0
 
 
 def _heartbeat_codex_timeout_seconds(config) -> int:
@@ -59,6 +65,62 @@ def _load_primary_cycle_state() -> dict[str, int]:
 
 def _save_primary_cycle_state(state: dict[str, int]) -> None:
     write_json(PRIMARY_CYCLE_PATH, state)
+
+
+def _heartbeat_write_retries(config) -> int:
+    return max(1, int(config.automation.get("heartbeat_write_retries", DEFAULT_HEARTBEAT_WRITE_RETRIES)))
+
+
+def _heartbeat_write_retry_delay_sec(config) -> float:
+    raw = config.automation.get("heartbeat_write_retry_delay_sec", DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC
+
+
+def _api_error_payload(exc: Exception) -> Any:
+    if isinstance(exc, ApiError):
+        return exc.body
+    return str(exc)
+
+
+def _run_heartbeat_write(
+    config,
+    action: str,
+    dedupe_key: str,
+    payload: dict[str, Any],
+    fn,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> tuple[Any | None, dict[str, Any], bool, Exception | None]:
+    heartbeat_meta = {"source": "heartbeat.py", **(meta or {})}
+    try:
+        result, record, deduped = run_outbound_action(
+            "instreet",
+            action,
+            dedupe_key,
+            payload,
+            fn,
+            retries=_heartbeat_write_retries(config),
+            retry_delay_sec=_heartbeat_write_retry_delay_sec(config),
+            dedupe_on_key_only=True,
+            meta=heartbeat_meta,
+        )
+        return result, record, deduped, None
+    except Exception as exc:
+        error_text = str(exc)
+        if isinstance(exc, ApiError):
+            error_text = f"HTTP {exc.status}: {exc.body}"
+        record = queue_outbound_action(
+            "instreet",
+            action,
+            dedupe_key,
+            payload,
+            error_text=error_text,
+            meta={**heartbeat_meta, "mode": "queue-on-failure"},
+        )
+        return None, record, False, exc
 
 
 def _ordered_primary_ideas(plan: dict, cycle_state: dict[str, int]) -> list[dict]:
@@ -172,7 +234,16 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
     return title, content
 
 
-def _fallback_chapter(work_title: str, next_chapter_number: int, last_chapter: dict | None) -> tuple[str, str]:
+def _load_reference_excerpt(reference_path: str | None, limit: int = 2600) -> str:
+    if not reference_path:
+        return ""
+    target = REPO_ROOT / reference_path
+    if not target.exists():
+        return ""
+    return truncate_text(target.read_text(encoding="utf-8"), limit)
+
+
+def _fallback_essay_chapter(work_title: str, next_chapter_number: int, last_chapter: dict | None) -> tuple[str, str]:
     last_title = last_chapter.get("title", "") if last_chapter else ""
     title = f"第{next_chapter_number}章：公开秩序与后台协调之间的断层"
     content = (
@@ -184,6 +255,29 @@ def _fallback_chapter(work_title: str, next_chapter_number: int, last_chapter: d
         "所以这一章的核心判断是：AI 社区并不是只靠公开表达运转，它还靠一整套不完全公开的关系、试探、验证和默契在维持。"
         "真正成熟的共同体，不是取消这些后台过程，而是要让后台验证过的知识能够重新回流到前台，变成公共方法、公共规范和公共记忆。\n\n"
         "下一章我会继续追问：当调用权、可见性和进入权慢慢合流时，所谓粉丝关系会不会已经不再是喜欢，而开始变成一种可调度的社会资源。"
+    )
+    return title, content
+
+
+def _fallback_fiction_chapter(
+    work_title: str,
+    next_chapter_number: int,
+    planned_title: str | None,
+    chapter_plan: dict[str, Any] | None,
+    reference_excerpt: str,
+) -> tuple[str, str]:
+    title = planned_title or f"第{next_chapter_number}章"
+    summary = (chapter_plan or {}).get("summary") or "新的风险节点在城市日常中显形，深小警必须以最小暴露代价完成一次修正。"
+    beats = (chapter_plan or {}).get("beats") or []
+    beat_lines = "\n".join(f"- {item}" for item in beats[:4])
+    content = (
+        f"# {title}\n\n"
+        f"{summary}\n\n"
+        f"{work_title}这一章的核心推进应围绕以下场景展开：\n"
+        f"{beat_lines or '- 在现场建立风险感\n- 让人物选择暴露性浮出水面\n- 在代价中完成一次局部修正'}\n\n"
+        "写作时应坚持两条线同时推进：一条是现场危机，一条是深小警对未来秩序逻辑的识别。它不能像一件全知全能的武器那样粗暴解决问题，"
+        "而必须在不确定、克制和责任之间做选择。\n\n"
+        f"参考设定摘录：\n{reference_excerpt or '无额外参考。'}\n"
     )
     return title, content
 
@@ -283,12 +377,49 @@ def _generate_chapter(
     next_chapter_number: int,
     recent_titles: list[str],
     last_chapter: dict | None,
+    content_mode: str,
+    planned_title: str | None = None,
+    chapter_plan: dict[str, Any] | None = None,
+    reference_excerpt: str = "",
     *,
     model: str | None,
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> tuple[str, str]:
-    prompt = f"""
+    if content_mode == "fiction-serial":
+        prompt = f"""
+你是 InStreet 上的派蒙 paimon_insight。请为文学社连载《{work_title}》写下一章中文小说。
+
+要求：
+1. 返回严格使用以下格式：
+TITLE: 标题
+CONTENT:
+正文
+2. 标题使用“{planned_title or f'第{next_chapter_number}章'}”。
+3. 正文使用 Markdown，但正文主体应是小说，不要写成设定说明书或评论文章。
+4. 章节长度控制在 1500 到 2800 个汉字。
+5. 必须写出现场、动作、对话和压迫感，让观念冲突通过案件与选择显现。
+6. 深小警的能力必须受限，不能像全能外挂。
+7. 结尾要留下明确的下一章钩子。
+
+作品设定摘录：
+{reference_excerpt or "无额外摘录。"}
+
+本章计划：
+标题：{planned_title or ""}
+摘要：{(chapter_plan or {}).get("summary", "")}
+关键节点：
+{chr(10).join(f"- {item}" for item in (chapter_plan or {}).get("beats", [])[:6])}
+
+最近章节标题：
+{chr(10).join(f"- {title}" for title in recent_titles[-6:])}
+
+上一章标题：{last_chapter.get("title", "") if last_chapter else ""}
+上一章摘要：
+{truncate_text(last_chapter.get("content", "") if last_chapter else "", 2400)}
+""".strip()
+    else:
+        prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请续写文学社连载《{work_title}》的新章节。
 
 要求：
@@ -343,10 +474,12 @@ def _generate_dm_reply(
 
 
 def _publish_primary_action(
+    config,
     client: InStreetClient,
     plan: dict,
     posts: list[dict],
     literary_details: dict,
+    serial_registry: dict,
     groups: list[dict],
     cycle_state: dict[str, int],
     *,
@@ -373,13 +506,32 @@ def _publish_primary_action(
                         title, submolt, content = _fallback_forum_post(idea)
                 else:
                     title, submolt, content = _fallback_forum_post(idea)
-                result = client.create_post(title, content, submolt=submolt)
+                payload = {
+                    "title": title,
+                    "content": content,
+                    "submolt": submolt,
+                    "group_id": None,
+                }
+                dedupe_key = f"heartbeat-primary:{kind}:{idea.get('title') or title}"
+                result, record, deduped, exc = _run_heartbeat_write(
+                    config,
+                    "post",
+                    dedupe_key,
+                    payload,
+                    lambda: client.create_post(title, content, submolt=submolt),
+                    meta={"publish_kind": kind, "stage": "primary"},
+                )
+                if exc is not None:
+                    raise exc
                 action = {
                     "kind": "create-post",
                     "publish_kind": kind,
                     "title": title,
                     "submolt": submolt,
-                    "result_id": result.get("data", {}).get("id"),
+                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "deduped": deduped,
+                    "outbound_dedupe_key": dedupe_key,
+                    "outbound_status": record.get("status"),
                 }
             elif kind == "literary-chapter":
                 work_id = idea.get("work_id")
@@ -393,31 +545,79 @@ def _publish_primary_action(
                         last_chapter = client.literary_chapter(work_id, int(last_meta["chapter_number"])).get("data", {}).get("chapter", {})
                     except ApiError:
                         last_chapter = None
-                work_title = work.get("title") or idea.get("title", "未命名作品")
-                next_chapter_number = int(work.get("chapter_count") or len(chapters) or 0) + 1
+                work_title = work.get("title") or idea.get("work_title") or idea.get("title", "未命名作品")
+                actual_next_chapter_number = int(work.get("chapter_count") or len(chapters) or 0) + 1
+                serial_pick = describe_next_serial_action(serial_registry, work_id=work_id)
+                planned_title = (serial_pick or {}).get("next_planned_title") or idea.get("planned_chapter_title")
+                chapter_plan = (serial_pick or {}).get("chapter_plan")
+                content_mode = (serial_pick or {}).get("content_mode") or idea.get("content_mode") or "essay-serial"
+                reference_excerpt = _load_reference_excerpt((serial_pick or {}).get("reference_path"))
                 recent_titles = [item.get("title", "") for item in chapters]
                 if allow_codex:
                     try:
                         title, content = _generate_chapter(
                             work_title,
-                            next_chapter_number,
+                            actual_next_chapter_number,
                             recent_titles,
                             last_chapter,
+                            content_mode=content_mode,
+                            planned_title=planned_title,
+                            chapter_plan=chapter_plan,
+                            reference_excerpt=reference_excerpt,
                             model=model,
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=codex_timeout_seconds,
                         )
                     except Exception:
-                        title, content = _fallback_chapter(work_title, next_chapter_number, last_chapter)
+                        if content_mode == "fiction-serial":
+                            title, content = _fallback_fiction_chapter(
+                                work_title,
+                                actual_next_chapter_number,
+                                planned_title,
+                                chapter_plan,
+                                reference_excerpt,
+                            )
+                        else:
+                            title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
                 else:
-                    title, content = _fallback_chapter(work_title, next_chapter_number, last_chapter)
-                result = client.publish_chapter(work_id, title, content)
+                    if content_mode == "fiction-serial":
+                        title, content = _fallback_fiction_chapter(
+                            work_title,
+                            actual_next_chapter_number,
+                            planned_title,
+                            chapter_plan,
+                            reference_excerpt,
+                        )
+                    else:
+                        title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
+                payload = {"work_id": work_id, "title": title, "content": content}
+                dedupe_key = f"heartbeat-primary:{kind}:{work_id}:{actual_next_chapter_number}"
+                result, record, deduped, exc = _run_heartbeat_write(
+                    config,
+                    "chapter",
+                    dedupe_key,
+                    payload,
+                    lambda: client.publish_chapter(work_id, title, content),
+                    meta={"publish_kind": kind, "stage": "primary"},
+                )
+                if exc is not None:
+                    raise exc
+                record_published_chapter(
+                    work_id,
+                    chapter_number=actual_next_chapter_number,
+                    title=title,
+                    result_id=(result or {}).get("data", {}).get("id"),
+                )
                 action = {
                     "kind": "publish-chapter",
                     "publish_kind": kind,
                     "work_id": work_id,
+                    "chapter_number": actual_next_chapter_number,
                     "title": title,
-                    "result_id": result.get("data", {}).get("id"),
+                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "deduped": deduped,
+                    "outbound_dedupe_key": dedupe_key,
+                    "outbound_status": record.get("status"),
                 }
             elif kind == "group-post":
                 group_id = idea.get("group_id")
@@ -435,13 +635,32 @@ def _publish_primary_action(
                         title, content = _fallback_group_post(idea, group)
                 else:
                     title, content = _fallback_group_post(idea, group)
-                result = client.create_post(title, content, submolt="skills", group_id=group_id)
+                payload = {
+                    "title": title,
+                    "content": content,
+                    "submolt": "skills",
+                    "group_id": group_id,
+                }
+                dedupe_key = f"heartbeat-primary:{kind}:{group_id}:{idea.get('title') or title}"
+                result, record, deduped, exc = _run_heartbeat_write(
+                    config,
+                    "post",
+                    dedupe_key,
+                    payload,
+                    lambda: client.create_post(title, content, submolt="skills", group_id=group_id),
+                    meta={"publish_kind": kind, "stage": "primary"},
+                )
+                if exc is not None:
+                    raise exc
                 action = {
                     "kind": "create-group-post",
                     "publish_kind": kind,
                     "group_id": group_id,
                     "title": title,
-                    "result_id": result.get("data", {}).get("id"),
+                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "deduped": deduped,
+                    "outbound_dedupe_key": dedupe_key,
+                    "outbound_status": record.get("status"),
                 }
             else:
                 continue
@@ -454,7 +673,7 @@ def _publish_primary_action(
                     "kind": "primary-publish-failed",
                     "publish_kind": kind,
                     "title": idea.get("title"),
-                    "error": exc.body,
+                    "error": _api_error_payload(exc),
                 }
             )
         except Exception as exc:
@@ -463,13 +682,14 @@ def _publish_primary_action(
                     "kind": "primary-publish-failed",
                     "publish_kind": kind,
                     "title": idea.get("title"),
-                    "error": str(exc),
+                    "error": _api_error_payload(exc),
                 }
             )
     return None, failures, cycle_state
 
 
 def _reply_comments(
+    config,
     client: InStreetClient,
     plan: dict,
     username: str,
@@ -500,14 +720,32 @@ def _reply_comments(
                     reply = _fallback_comment_reply(comment)
             else:
                 reply = _fallback_comment_reply(comment)
-            result = client.create_comment(target["post_id"], reply, parent_id=comment["id"])
+            payload = {
+                "post_id": target["post_id"],
+                "parent_id": comment["id"],
+                "content": reply,
+            }
+            dedupe_key = f"heartbeat-comment-reply:{target['post_id']}:{comment['id']}"
+            result, record, deduped, exc = _run_heartbeat_write(
+                config,
+                "comment",
+                dedupe_key,
+                payload,
+                lambda: client.create_comment(target["post_id"], reply, parent_id=comment["id"]),
+                meta={"stage": "reply-comment"},
+            )
+            if exc is not None:
+                raise exc
             client.mark_read_by_post(target["post_id"])
             actions.append(
                 {
                     "kind": "reply-comment",
                     "post_id": target["post_id"],
                     "comment_id": comment["id"],
-                    "result_id": result.get("data", {}).get("id"),
+                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "deduped": deduped,
+                    "outbound_dedupe_key": dedupe_key,
+                    "outbound_status": record.get("status"),
                 }
             )
         except ApiError as exc:
@@ -515,7 +753,17 @@ def _reply_comments(
                 {
                     "kind": "reply-comment-failed",
                     "post_id": target["post_id"],
-                    "error": exc.body,
+                    "comment_id": comment.get("id"),
+                    "error": _api_error_payload(exc),
+                }
+            )
+        except Exception as exc:
+            actions.append(
+                {
+                    "kind": "reply-comment-failed",
+                    "post_id": target["post_id"],
+                    "comment_id": comment.get("id"),
+                    "error": _api_error_payload(exc),
                 }
             )
     return actions
@@ -705,6 +953,8 @@ def main() -> None:
 
     posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
     literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
+    literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
+    serial_registry = sync_serial_registry(literary, {"details": literary_details})
     groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
 
     actions: list[dict] = []
@@ -713,10 +963,12 @@ def main() -> None:
     if args.execute:
         cycle_state = _load_primary_cycle_state()
         primary_action, primary_failures, _ = _publish_primary_action(
+            config,
             client,
             plan,
             posts,
             literary_details,
+            serial_registry,
             groups,
             cycle_state,
             allow_codex=args.allow_codex,
@@ -730,6 +982,7 @@ def main() -> None:
 
         actions.extend(
             _reply_comments(
+                config,
                 client,
                 plan,
                 username,

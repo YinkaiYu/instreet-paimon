@@ -316,13 +316,16 @@ def run_outbound_action(
     *,
     retries: int = 3,
     retry_delay_sec: float = 2.0,
+    dedupe_on_key_only: bool = False,
     meta: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any], bool]:
     existing = get_outbound_record(channel, action, dedupe_key)
     current_hash = payload_digest(payload)
-    if existing and existing.get("status") == "success" and existing.get("payload_hash") == current_hash:
-        drop_pending_outbound_action(channel, action, dedupe_key)
-        return existing.get("last_result"), existing, True
+    if existing and existing.get("status") == "success":
+        payload_matches = existing.get("payload_hash") == current_hash
+        if payload_matches or dedupe_on_key_only:
+            drop_pending_outbound_action(channel, action, dedupe_key)
+            return existing.get("last_result"), existing, True
 
     last_exc: Exception | None = None
     attempts = max(1, retries)

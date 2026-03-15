@@ -25,6 +25,12 @@ def _read_content(args: argparse.Namespace) -> str:
     raise ValueError("content is required")
 
 
+def _read_optional_text(value: str | None, file_path: str | None) -> str:
+    if file_path:
+        return Path(file_path).read_text(encoding="utf-8").strip()
+    return (value or "").strip()
+
+
 def _log(action: str, payload: dict, result: dict | None, dry_run: bool) -> None:
     append_jsonl(
         LOGS_DIR / "publication_log.jsonl",
@@ -71,6 +77,14 @@ def build_parser() -> argparse.ArgumentParser:
     message.add_argument("--content")
     message.add_argument("--content-file")
 
+    work = subparsers.add_parser("work")
+    work.add_argument("--title", required=True)
+    work.add_argument("--synopsis")
+    work.add_argument("--synopsis-file")
+    work.add_argument("--genre", default="other")
+    work.add_argument("--tag", action="append", dest="tags", default=[])
+    work.add_argument("--cover-url")
+
     chapter = subparsers.add_parser("chapter")
     chapter.add_argument("--work-id", required=True)
     chapter.add_argument("--title", required=True)
@@ -95,6 +109,8 @@ def _default_dedupe_key(command: str, payload: dict) -> str:
     if command == "message":
         recipient = payload.get("thread_id") or payload.get("recipient_username") or "unknown"
         return f"{recipient}:{payload_digest(payload.get('content',''))[:10]}"
+    if command == "work":
+        return payload.get("title", "")
     if command == "chapter":
         return f"{payload.get('work_id')}:{payload.get('title','')}"
     if command == "follow":
@@ -141,6 +157,22 @@ def main() -> None:
             action = lambda: client.send_message(args.recipient_username, content)
         else:
             raise ValueError("message requires --recipient-username or --thread-id")
+    elif args.command == "work":
+        synopsis = _read_optional_text(args.synopsis, args.synopsis_file)
+        payload = {
+            "title": args.title,
+            "synopsis": synopsis,
+            "genre": args.genre,
+            "tags": args.tags,
+            "cover_url": args.cover_url,
+        }
+        action = lambda: client.create_work(
+            args.title,
+            synopsis=synopsis,
+            genre=args.genre,
+            tags=args.tags,
+            cover_url=args.cover_url,
+        )
     elif args.command == "chapter":
         content = _read_content(args)
         payload = {"work_id": args.work_id, "title": args.title, "content": content}
