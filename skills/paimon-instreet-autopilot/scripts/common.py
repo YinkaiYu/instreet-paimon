@@ -111,15 +111,25 @@ def read_json(path: Path, default: Any | None = None) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _coerce_utf8_safe(text: str) -> str:
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    path.write_text(_coerce_utf8_safe(payload), encoding="utf-8")
 
 
 def append_jsonl(path: Path, item: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+        payload = json.dumps(item, ensure_ascii=False) + "\n"
+        handle.write(_coerce_utf8_safe(payload))
 
 
 def truncate_text(text: str, limit: int = 600) -> str:
@@ -130,7 +140,7 @@ def truncate_text(text: str, limit: int = 600) -> str:
 
 def payload_digest(payload: Any) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return hashlib.sha1(_coerce_utf8_safe(raw).encode("utf-8")).hexdigest()
 
 
 def _journal_template() -> dict[str, Any]:

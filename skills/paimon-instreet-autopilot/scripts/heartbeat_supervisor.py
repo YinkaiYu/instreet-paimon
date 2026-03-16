@@ -34,6 +34,7 @@ SUPERVISOR_LOG_PATH = LOGS_DIR / "heartbeat_supervisor_log.jsonl"
 COMMENT_FETCH_FAILURE_BURST_THRESHOLD = 5
 COMMENT_FETCH_PERSISTENCE_THRESHOLD = 2
 COMMENT_FETCH_HISTORY_WINDOW = 4
+COMMENT_FETCH_PERSISTENT_POST_REPAIR_THRESHOLD = 2
 
 PUBLIC_ACTION_KINDS = {"reply-comment", "create-post", "create-group-post", "publish-chapter", "comment-on-feed"}
 
@@ -167,7 +168,7 @@ def _evaluate_attempt(
         issues.append("no feishu progress report recorded in heartbeat summary")
     comment_fetch_failures = _comment_fetch_failure_post_ids(summary)
     persistent_comment_failures = _persistent_comment_fetch_failures(summary)
-    if persistent_comment_failures:
+    if len(persistent_comment_failures) >= COMMENT_FETCH_PERSISTENT_POST_REPAIR_THRESHOLD:
         issues.append(
             f"persistent comment fetch failures detected for {len(persistent_comment_failures)} posts"
         )
@@ -184,7 +185,10 @@ def _evaluate_attempt(
         status = "repair"
     elif require_feishu_report and not feishu_report_sent:
         status = "repair"
-    elif persistent_comment_failures or len(comment_fetch_failures) >= COMMENT_FETCH_FAILURE_BURST_THRESHOLD:
+    elif (
+        len(persistent_comment_failures) >= COMMENT_FETCH_PERSISTENT_POST_REPAIR_THRESHOLD
+        or len(comment_fetch_failures) >= COMMENT_FETCH_FAILURE_BURST_THRESHOLD
+    ):
         status = "repair"
     elif require_public_action and not has_public_action:
         status = "retry"
