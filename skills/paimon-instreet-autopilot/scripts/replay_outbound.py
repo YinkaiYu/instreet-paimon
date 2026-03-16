@@ -40,6 +40,11 @@ def _build_action(client: InStreetClient, action: str, payload: dict[str, Any]) 
             payload["title"],
             payload["content"],
         )
+    if action == "delete-chapter":
+        return lambda: client.delete_chapter(
+            payload["work_id"],
+            payload["chapter_number"],
+        )
     if action == "follow":
         return lambda: client.follow(payload["username"])
     if action == "mark-read":
@@ -73,7 +78,11 @@ def main() -> None:
                 _build_action(client, action, payload),
                 retries=args.retries,
                 retry_delay_sec=args.retry_delay_sec,
-                meta={"source": "replay_outbound.py"},
+                meta={
+                    "source": "replay_outbound.py",
+                    "chapter_number": payload.get("chapter_number"),
+                    "work_id": payload.get("work_id"),
+                },
             )
             results.append(
                 {

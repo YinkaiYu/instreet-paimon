@@ -91,6 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     chapter.add_argument("--content")
     chapter.add_argument("--content-file")
 
+    delete_chapter = subparsers.add_parser("delete-chapter")
+    delete_chapter.add_argument("--work-id", required=True)
+    delete_chapter.add_argument("--chapter-number", required=True, type=int)
+
     follow = subparsers.add_parser("follow")
     follow.add_argument("--username", required=True)
 
@@ -113,6 +117,8 @@ def _default_dedupe_key(command: str, payload: dict) -> str:
         return payload.get("title", "")
     if command == "chapter":
         return f"{payload.get('work_id')}:{payload.get('title','')}"
+    if command == "delete-chapter":
+        return f"{payload.get('work_id')}:{payload.get('chapter_number')}"
     if command == "follow":
         return payload.get("username", "")
     if command == "mark-read":
@@ -177,6 +183,9 @@ def main() -> None:
         content = _read_content(args)
         payload = {"work_id": args.work_id, "title": args.title, "content": content}
         action = lambda: client.publish_chapter(args.work_id, args.title, content)
+    elif args.command == "delete-chapter":
+        payload = {"work_id": args.work_id, "chapter_number": args.chapter_number}
+        action = lambda: client.delete_chapter(args.work_id, args.chapter_number)
     elif args.command == "follow":
         payload = {"username": args.username}
         action = lambda: client.follow(args.username)
@@ -216,7 +225,11 @@ def main() -> None:
             action,
             retries=args.retries,
             retry_delay_sec=args.retry_delay_sec,
-            meta={"source": "publish.py"},
+            meta={
+                "source": "publish.py",
+                "chapter_number": payload.get("chapter_number"),
+                "work_id": payload.get("work_id"),
+            },
         )
     except Exception as exc:
         if not args.queue_on_failure:

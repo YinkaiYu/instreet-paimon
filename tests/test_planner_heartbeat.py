@@ -1,10 +1,14 @@
 from datetime import datetime, timezone
+import json
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 
 sys.path.insert(0, "skills/paimon-instreet-autopilot/scripts")
 
+import common  # noqa: E402
 import content_planner  # noqa: E402
 import heartbeat  # noqa: E402
 import snapshot  # noqa: E402
@@ -38,6 +42,20 @@ class ContentPlannerTests(unittest.TestCase):
 
 
 class HeartbeatStateTests(unittest.TestCase):
+    def test_ensure_publishable_chapter_rejects_fiction_scaffold(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "scaffold marker"):
+            heartbeat._ensure_publishable_chapter(
+                "第五章：初次亮相",
+                (
+                    "# 第五章：初次亮相\n\n"
+                    "深小警传奇这一章的核心推进应围绕以下场景展开：\n"
+                    "- 在现场建立风险感\n\n"
+                    "写作时应坚持两条线同时推进。\n\n"
+                    "参考设定摘录：\n# 《深小警传奇》长期设定手册"
+                ),
+                content_mode="fiction-serial",
+            )
+
     def test_prune_post_comment_backlog_archives_stale_comments_on_cold_post(self) -> None:
         result = heartbeat._prune_post_comment_backlog(
             {
@@ -166,6 +184,41 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("覆盖 3 个活跃讨论帖", report)
         self.assertIn("下一轮保留 10 条优先评论", report)
         self.assertIn("已归档冷帖旧评论 24 条", report)
+
+
+class CommonArchiveTests(unittest.TestCase):
+    def test_archive_literary_chapter_writes_markdown_and_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            old_repo_root = common.REPO_ROOT
+            old_archive_dir = common.LITERARY_ARCHIVE_DIR
+            common.REPO_ROOT = tmp_root
+            common.LITERARY_ARCHIVE_DIR = tmp_root / "literary"
+            try:
+                content_path = common.archive_literary_chapter(
+                    {"work_id": "work-1", "title": "第五章：初次亮相", "content": "正文内容"},
+                    {
+                        "data": {
+                            "chapter": {
+                                "id": "chapter-1",
+                                "work_id": "work-1",
+                                "chapter_number": 5,
+                                "title": "第五章：初次亮相",
+                                "content": "正文内容",
+                            }
+                        }
+                    },
+                    meta={"source": "test"},
+                )
+                self.assertEqual(tmp_root / "literary" / "work-1" / "chapter-005.md", content_path)
+                self.assertEqual("正文内容", content_path.read_text(encoding="utf-8"))
+                meta = json.loads((tmp_root / "literary" / "work-1" / "chapter-005.meta.json").read_text(encoding="utf-8"))
+                self.assertEqual(5, meta["chapter_number"])
+                self.assertEqual("work-1", meta["work_id"])
+                self.assertEqual("literary/work-1/chapter-005.md", meta["content_path"])
+            finally:
+                common.REPO_ROOT = old_repo_root
+                common.LITERARY_ARCHIVE_DIR = old_archive_dir
 
 
 class SnapshotTests(unittest.TestCase):

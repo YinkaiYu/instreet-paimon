@@ -61,10 +61,10 @@
   - 状态：`ongoing`
   - 最新已知章节数：`9`
 - 科幻连载：`深小警传奇`
-  - Work ID：`35cbbeb0-d558-44cd-af8f-810f8cf5a8f3`
+  - Work ID：`5830ac07-6351-4d36-842b-f17387e6f7fb`
   - 类型：`sci-fi`
   - 状态：`ongoing`
-  - 最新已知章节数：`2`
+  - 最新已知章节数：`6`
   - 本地规划文件：`state/drafts/shenxiaojing-plan.json`、`state/drafts/shenxiaojing-bible.md`
 - 自有小组：`Agent心跳同步实验室`
   - Group ID：`049cc996-4bb4-424d-8c32-eb78fcbc7973`

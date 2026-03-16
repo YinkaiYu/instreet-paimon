@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -28,6 +29,7 @@ OUTBOUND_JOURNAL_PATH = CURRENT_STATE_DIR / "outbound_journal.json"
 OUTBOUND_ATTEMPTS_LOG = LOGS_DIR / "outbound_attempts.jsonl"
 PENDING_OUTBOUND_PATH = CURRENT_STATE_DIR / "pending_outbound.json"
 PENDING_OUTBOUND_LOG = LOGS_DIR / "pending_outbound.jsonl"
+LITERARY_ARCHIVE_DIR = ARCHIVE_STATE_DIR / "literary"
 
 
 class ApiError(RuntimeError):
@@ -141,6 +143,11 @@ def truncate_text(text: str, limit: int = 600) -> str:
 def payload_digest(payload: Any) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(_coerce_utf8_safe(raw).encode("utf-8")).hexdigest()
+
+
+def write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_coerce_utf8_safe(content), encoding="utf-8")
 
 
 def _journal_template() -> dict[str, Any]:
@@ -334,6 +341,8 @@ def run_outbound_action(
     if existing and existing.get("status") == "success":
         payload_matches = existing.get("payload_hash") == current_hash
         if payload_matches or dedupe_on_key_only:
+            if action == "chapter":
+                archive_literary_chapter(payload, existing.get("last_result"), meta=meta)
             drop_pending_outbound_action(channel, action, dedupe_key)
             return existing.get("last_result"), existing, True
 
@@ -352,6 +361,8 @@ def run_outbound_action(
                 result=result,
                 meta=meta,
             )
+            if action == "chapter":
+                archive_literary_chapter(payload, result, meta=meta)
             drop_pending_outbound_action(channel, action, dedupe_key)
             return result, record, False
         except Exception as exc:  # pragma: no cover - runtime API failures are environment-dependent
@@ -375,6 +386,67 @@ def run_outbound_action(
     if last_exc is None:
         raise RuntimeError(f"{channel}:{action} failed without an exception")
     raise last_exc
+
+
+def _extract_chapter_number(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = None
+    if number is not None and number > 0:
+        return number
+    matched = re.search(r"第\s*(\d+)\s*章", str(value))
+    if not matched:
+        return None
+    return int(matched.group(1))
+
+
+def archive_literary_chapter(
+    payload: dict[str, Any],
+    result: Any | None,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> Path | None:
+    chapter = {}
+    if isinstance(result, dict):
+        chapter = ((result.get("data") or {}).get("chapter") or {})
+    work_id = str(chapter.get("work_id") or payload.get("work_id") or "").strip()
+    if not work_id:
+        return None
+    chapter_number = (
+        _extract_chapter_number(chapter.get("chapter_number"))
+        or _extract_chapter_number((meta or {}).get("chapter_number"))
+        or _extract_chapter_number(payload.get("chapter_number"))
+        or _extract_chapter_number(chapter.get("title"))
+        or _extract_chapter_number(payload.get("title"))
+    )
+    if chapter_number is None:
+        return None
+    title = str(chapter.get("title") or payload.get("title") or "").strip()
+    content = str(chapter.get("content") or payload.get("content") or "")
+    if not content:
+        return None
+
+    work_dir = LITERARY_ARCHIVE_DIR / work_id
+    content_path = work_dir / f"chapter-{chapter_number:03d}.md"
+    meta_path = work_dir / f"chapter-{chapter_number:03d}.meta.json"
+    write_text(content_path, content)
+    write_json(
+        meta_path,
+        {
+            "archived_at": now_utc(),
+            "work_id": work_id,
+            "chapter_number": chapter_number,
+            "title": title,
+            "chapter_id": chapter.get("id"),
+            "content_path": str(content_path.relative_to(REPO_ROOT)),
+            "result": result,
+            "meta": meta or {},
+        },
+    )
+    return content_path
 
 
 def _http_json(
@@ -538,6 +610,12 @@ class InStreetClient:
             "POST",
             f"/api/v1/literary/works/{work_id}/chapters",
             data={"title": title, "content": content},
+        )
+
+    def delete_chapter(self, work_id: str, chapter_number: int) -> Any:
+        return self._request(
+            "DELETE",
+            f"/api/v1/literary/works/{work_id}/chapters/{int(chapter_number)}",
         )
 
     def send_message(self, recipient_username: str, content: str) -> Any:

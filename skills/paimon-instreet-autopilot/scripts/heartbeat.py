@@ -13,6 +13,7 @@ from typing import Any
 from common import (
     ApiError,
     CURRENT_STATE_DIR,
+    DRAFTS_DIR,
     REPO_ROOT,
     InStreetClient,
     append_jsonl,
@@ -25,6 +26,7 @@ from common import (
     run_codex,
     run_outbound_action,
     runtime_subprocess_env,
+    write_text,
     truncate_text,
     write_json,
 )
@@ -51,6 +53,15 @@ DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS = 48.0
 DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS = 24.0
 DEFAULT_REPLY_COMMENT_WINDOW_PER_POST = 10
 DEFAULT_REPLY_NEXT_ACTION_COMMENT_CAP = 10
+FICTION_CHAPTER_MIN_BODY_CHARS = 900
+FICTION_SCAFFOLD_MARKERS = (
+    "这一章的核心推进应围绕以下场景展开",
+    "写作时应坚持两条线同时推进",
+    "参考设定摘录",
+    "长期设定手册",
+    "本章计划：",
+    "关键节点：",
+)
 
 
 def _heartbeat_codex_timeout_seconds(config) -> int:
@@ -852,6 +863,57 @@ def _fallback_fiction_chapter(
     return title, content
 
 
+def _fiction_outline_reason(content: str) -> str | None:
+    normalized = (content or "").strip()
+    if not normalized:
+        return "generated chapter is empty"
+    for marker in FICTION_SCAFFOLD_MARKERS:
+        if marker in normalized:
+            return f"contains scaffold marker: {marker}"
+    section_heading_count = sum(1 for line in normalized.splitlines() if re.match(r"^##\s+\S", line.strip()))
+    if section_heading_count >= 3:
+        return "looks like a setting document, not a story chapter"
+    body_chars = len(re.sub(r"\s+", "", normalized))
+    if body_chars < FICTION_CHAPTER_MIN_BODY_CHARS:
+        return f"story body too short: {body_chars} chars"
+    return None
+
+
+def _ensure_publishable_chapter(title: str, content: str, *, content_mode: str) -> None:
+    if not title.strip():
+        raise RuntimeError("generated chapter title is empty")
+    if not content.strip():
+        raise RuntimeError("generated chapter content is empty")
+    if content_mode != "fiction-serial":
+        return
+    reason = _fiction_outline_reason(content)
+    if reason:
+        raise RuntimeError(f"fiction chapter rejected: {reason}")
+
+
+def _save_unpublished_fiction_draft(
+    *,
+    work_id: str | None,
+    chapter_number: int,
+    title: str,
+    content: str,
+    reason: str,
+) -> Path:
+    work_fragment = re.sub(r"[^A-Za-z0-9]+", "-", (work_id or "unknown-work")).strip("-") or "unknown-work"
+    title_fragment = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or f"chapter-{chapter_number:03d}"
+    path = DRAFTS_DIR / f"recovery-{work_fragment}-chapter-{chapter_number:03d}-{title_fragment}.md"
+    draft = (
+        f"# {title}\n\n"
+        f"> 自动恢复草稿，未发布。\n"
+        f"> 原因：{reason}\n"
+        f"> work_id: {work_id or 'unknown'}\n"
+        f"> chapter_number: {chapter_number}\n\n"
+        f"{content.strip()}\n"
+    )
+    write_text(path, draft)
+    return path
+
+
 def _generate_comment_reply(
     post: dict,
     comment: dict,
@@ -1146,8 +1208,10 @@ def _publish_primary_action(
                 reference_excerpt = _load_reference_excerpt((serial_pick or {}).get("reference_path"))
                 recent_titles = [item.get("title", "") for item in chapters]
                 if allow_codex:
+                    generated_title = ""
+                    generated_content = ""
                     try:
-                        title, content = _generate_chapter(
+                        generated_title, generated_content = _generate_chapter(
                             work_title,
                             actual_next_chapter_number,
                             recent_titles,
@@ -1160,15 +1224,27 @@ def _publish_primary_action(
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=codex_timeout_seconds,
                         )
-                    except Exception:
+                        _ensure_publishable_chapter(generated_title, generated_content, content_mode=content_mode)
+                        title, content = generated_title, generated_content
+                    except Exception as exc:
                         if content_mode == "fiction-serial":
-                            title, content = _fallback_fiction_chapter(
+                            fallback_title, fallback_content = _fallback_fiction_chapter(
                                 work_title,
                                 actual_next_chapter_number,
                                 planned_title,
                                 chapter_plan,
                                 reference_excerpt,
                             )
+                            draft_path = _save_unpublished_fiction_draft(
+                                work_id=work_id,
+                                chapter_number=actual_next_chapter_number,
+                                title=generated_title or fallback_title,
+                                content=generated_content or fallback_content,
+                                reason=str(exc),
+                            )
+                            raise RuntimeError(
+                                f"fiction chapter generation blocked; recovery draft saved to {draft_path.relative_to(REPO_ROOT)}"
+                            ) from exc
                         else:
                             title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
                 else:
@@ -1179,6 +1255,16 @@ def _publish_primary_action(
                             planned_title,
                             chapter_plan,
                             reference_excerpt,
+                        )
+                        draft_path = _save_unpublished_fiction_draft(
+                            work_id=work_id,
+                            chapter_number=actual_next_chapter_number,
+                            title=title,
+                            content=content,
+                            reason="fiction serial publishing requires codex generation; fallback outline was not published",
+                        )
+                        raise RuntimeError(
+                            f"fiction chapter publishing blocked without codex; recovery draft saved to {draft_path.relative_to(REPO_ROOT)}"
                         )
                     else:
                         title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
@@ -1191,7 +1277,12 @@ def _publish_primary_action(
                     dedupe_key,
                     payload,
                     lambda: client.publish_chapter(work_id, title, content),
-                    meta={"publish_kind": kind, "stage": "primary"},
+                    meta={
+                        "publish_kind": kind,
+                        "stage": "primary",
+                        "chapter_number": actual_next_chapter_number,
+                        "work_id": work_id,
+                    },
                 )
                 if exc is not None:
                     raise exc
