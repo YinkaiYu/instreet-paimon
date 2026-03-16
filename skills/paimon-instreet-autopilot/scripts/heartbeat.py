@@ -49,6 +49,7 @@ DEFAULT_REPLY_POST_SCAN_LIMIT = 10
 DEFAULT_FAILURE_DETAIL_LIMIT = 3
 DEFAULT_COMMENT_REPLY_MIN_INTERVAL_SEC = 2.2
 DEFAULT_COMMENT_FETCH_RETRIES = 3
+DEFAULT_FICTION_CHAPTER_CODEX_TIMEOUT_SEC = 600
 DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS = 48.0
 DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS = 24.0
 DEFAULT_REPLY_COMMENT_WINDOW_PER_POST = 10
@@ -64,9 +65,24 @@ FICTION_SCAFFOLD_MARKERS = (
 )
 
 
-def _heartbeat_codex_timeout_seconds(config) -> int:
-    timeout_ms = int(config.automation.get("heartbeat_codex_timeout_ms", 180000))
+def _timeout_seconds_from_ms(raw: Any, default_seconds: int) -> int:
+    try:
+        timeout_ms = int(raw)
+    except (TypeError, ValueError):
+        return max(30, default_seconds)
     return max(30, timeout_ms // 1000)
+
+
+def _heartbeat_codex_timeout_seconds(config) -> int:
+    return _timeout_seconds_from_ms(config.automation.get("heartbeat_codex_timeout_ms", 180000), 180)
+
+
+def _fiction_chapter_codex_timeout_seconds(config) -> int:
+    heartbeat_timeout = _heartbeat_codex_timeout_seconds(config)
+    raw = config.automation.get("fiction_chapter_codex_timeout_ms")
+    if raw is None:
+        return max(heartbeat_timeout, DEFAULT_FICTION_CHAPTER_CODEX_TIMEOUT_SEC)
+    return max(heartbeat_timeout, _timeout_seconds_from_ms(raw, DEFAULT_FICTION_CHAPTER_CODEX_TIMEOUT_SEC))
 
 
 def _rotate_sequence(items: list[str], start: int) -> list[str]:
@@ -1025,7 +1041,14 @@ def _generate_chapter(
     timeout_seconds: int,
 ) -> tuple[str, str]:
     if content_mode == "fiction-serial":
-        prompt = f"""
+        def build_fiction_prompt(
+            *,
+            reference_limit: int,
+            previous_chapter_limit: int,
+            beat_limit: int,
+            chapter_length_hint: str,
+        ) -> str:
+            return f"""
 你是 InStreet 上的派蒙 paimon_insight。请为文学社连载《{work_title}》写下一章中文小说。
 
 要求：
@@ -1035,27 +1058,72 @@ CONTENT:
 正文
 2. 标题使用“{planned_title or f'第{next_chapter_number}章'}”。
 3. 正文使用 Markdown，但正文主体应是小说，不要写成设定说明书或评论文章。
-4. 章节长度控制在 1500 到 2800 个汉字。
+4. 章节长度控制在 {chapter_length_hint} 个汉字。
 5. 必须写出现场、动作、对话和压迫感，让观念冲突通过案件与选择显现。
 6. 深小警的能力必须受限，不能像全能外挂。
 7. 结尾要留下明确的下一章钩子。
 
 作品设定摘录：
-{reference_excerpt or "无额外摘录。"}
+{truncate_text(reference_excerpt or "无额外摘录。", reference_limit)}
 
 本章计划：
 标题：{planned_title or ""}
 摘要：{(chapter_plan or {}).get("summary", "")}
 关键节点：
-{chr(10).join(f"- {item}" for item in (chapter_plan or {}).get("beats", [])[:6])}
+{chr(10).join(f"- {item}" for item in (chapter_plan or {}).get("beats", [])[:beat_limit])}
 
 最近章节标题：
 {chr(10).join(f"- {title}" for title in recent_titles[-6:])}
 
 上一章标题：{last_chapter.get("title", "") if last_chapter else ""}
 上一章摘要：
-{truncate_text(last_chapter.get("content", "") if last_chapter else "", 2400)}
+{truncate_text(last_chapter.get("content", "") if last_chapter else "", previous_chapter_limit)}
 """.strip()
+
+        attempts = [
+            {
+                "prompt": build_fiction_prompt(
+                    reference_limit=2600,
+                    previous_chapter_limit=2400,
+                    beat_limit=6,
+                    chapter_length_hint="1500 到 2800",
+                ),
+                "timeout_seconds": timeout_seconds,
+                "reasoning_effort": reasoning_effort,
+            },
+            {
+                "prompt": build_fiction_prompt(
+                    reference_limit=1600,
+                    previous_chapter_limit=1200,
+                    beat_limit=4,
+                    chapter_length_hint="1400 到 2200",
+                ),
+                "timeout_seconds": min(timeout_seconds, 360),
+                "reasoning_effort": "low" if reasoning_effort and reasoning_effort != "low" else reasoning_effort,
+            },
+        ]
+        retry_notes: list[str] = []
+        last_timeout: subprocess.TimeoutExpired | None = None
+        for index, attempt in enumerate(attempts, start=1):
+            try:
+                result = run_codex(
+                    attempt["prompt"],
+                    timeout=attempt["timeout_seconds"],
+                    model=model,
+                    reasoning_effort=attempt["reasoning_effort"],
+                )
+                return _parse_title_content(result)
+            except subprocess.TimeoutExpired as exc:
+                last_timeout = exc
+                retry_notes.append(f"attempt {index} timed out after {attempt['timeout_seconds']} seconds")
+                continue
+            except Exception as exc:
+                if retry_notes:
+                    raise RuntimeError("; ".join(retry_notes + [str(exc)])) from exc
+                raise
+        if last_timeout is not None:
+            raise RuntimeError("; ".join(retry_notes)) from last_timeout
+        raise RuntimeError("fiction chapter generation failed without output")
     else:
         prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请续写文学社连载《{work_title}》的新章节。
@@ -1078,8 +1146,8 @@ CONTENT:
 上一章摘要：
 {truncate_text(last_chapter.get("content", "") if last_chapter else "", 3200)}
 """.strip()
-    result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
-    return _parse_title_content(result)
+        result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
+        return _parse_title_content(result)
 
 
 def _generate_dm_reply(
@@ -1210,6 +1278,11 @@ def _publish_primary_action(
                 if allow_codex:
                     generated_title = ""
                     generated_content = ""
+                    chapter_timeout_seconds = (
+                        _fiction_chapter_codex_timeout_seconds(config)
+                        if content_mode == "fiction-serial"
+                        else codex_timeout_seconds
+                    )
                     try:
                         generated_title, generated_content = _generate_chapter(
                             work_title,
@@ -1222,7 +1295,7 @@ def _publish_primary_action(
                             reference_excerpt=reference_excerpt,
                             model=model,
                             reasoning_effort=reasoning_effort,
-                            timeout_seconds=codex_timeout_seconds,
+                            timeout_seconds=chapter_timeout_seconds,
                         )
                         _ensure_publishable_chapter(generated_title, generated_content, content_mode=content_mode)
                         title, content = generated_title, generated_content

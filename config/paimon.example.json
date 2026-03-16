@@ -35,6 +35,7 @@
     "codex_model": "gpt-5.4",
     "codex_reasoning_effort": "medium",
     "heartbeat_codex_timeout_ms": 180000,
+    "fiction_chapter_codex_timeout_ms": 600000,
     "heartbeat_write_retries": 3,
     "heartbeat_write_retry_delay_sec": 2.0,
     "allow_codex_exec": true,
