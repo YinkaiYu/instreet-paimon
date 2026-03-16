@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +41,16 @@ PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_GATEWAY_SCRIPT = REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "scripts" / "feishu_gateway.mjs"
 DEFAULT_HEARTBEAT_WRITE_RETRIES = 3
 DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC = 2.0
-DEFAULT_REPLY_MAX_PER_RUN = 8
+DEFAULT_REPLY_MAX_PER_RUN = 10
 DEFAULT_REPLY_PROCESSING_TIME_BUDGET_SEC = 180
-DEFAULT_REPLY_POST_SCAN_LIMIT = 12
+DEFAULT_REPLY_POST_SCAN_LIMIT = 10
 DEFAULT_FAILURE_DETAIL_LIMIT = 3
 DEFAULT_COMMENT_REPLY_MIN_INTERVAL_SEC = 2.2
+DEFAULT_COMMENT_FETCH_RETRIES = 3
+DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS = 48.0
+DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS = 24.0
+DEFAULT_REPLY_COMMENT_WINDOW_PER_POST = 10
+DEFAULT_REPLY_NEXT_ACTION_COMMENT_CAP = 10
 
 
 def _heartbeat_codex_timeout_seconds(config) -> int:
@@ -104,10 +110,7 @@ def _reply_processing_time_budget_sec(config) -> int:
 
 
 def _reply_post_scan_limit(config) -> int:
-    raw = config.automation.get(
-        "reply_post_scan_limit",
-        config.automation.get("post_limit", DEFAULT_REPLY_POST_SCAN_LIMIT),
-    )
+    raw = config.automation.get("reply_post_scan_limit", DEFAULT_REPLY_POST_SCAN_LIMIT)
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
@@ -128,6 +131,48 @@ def _comment_reply_min_interval_sec(config) -> float:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
         return DEFAULT_COMMENT_REPLY_MIN_INTERVAL_SEC
+
+
+def _comment_fetch_retries(config) -> int:
+    raw = config.automation.get("comment_fetch_retries", DEFAULT_COMMENT_FETCH_RETRIES)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_COMMENT_FETCH_RETRIES
+
+
+def _reply_priority_post_age_hours(config) -> float:
+    raw = config.automation.get("reply_priority_post_age_hours", DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS
+
+
+def _reply_stale_comment_age_hours(config) -> float:
+    raw = config.automation.get("reply_stale_comment_age_hours", DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS
+
+
+def _reply_comment_window_per_post(config, max_batch_size: int | None = None) -> int:
+    default_value = max_batch_size or DEFAULT_REPLY_COMMENT_WINDOW_PER_POST
+    raw = config.automation.get("reply_comment_window_per_post", default_value)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return max(1, int(default_value))
+
+
+def _reply_next_action_comment_cap(config, max_batch_size: int | None = None) -> int:
+    default_value = max_batch_size or DEFAULT_REPLY_NEXT_ACTION_COMMENT_CAP
+    raw = config.automation.get("reply_next_action_comment_cap", default_value)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return max(1, int(default_value))
 
 
 def _api_error_payload(exc: Exception) -> Any:
@@ -207,9 +252,10 @@ def _account_state_from_overview(overview: dict[str, Any] | None) -> dict[str, A
         "captured_at": overview.get("captured_at"),
         "score": overview.get("score"),
         "follower_count": overview.get("follower_count"),
-        "following_count": overview.get("following_count"),
+        "like_count": overview.get("like_count"),
         "unread_notification_count": overview.get("unread_notification_count"),
         "unread_message_count": overview.get("unread_message_count"),
+        "metric_corrections": overview.get("metric_corrections", []),
     }
 
 
@@ -231,7 +277,7 @@ def _build_account_snapshot(start_overview: dict[str, Any] | None, end_overview:
         "delta": {
             "score": _metric_delta(started.get("score"), finished.get("score")),
             "follower_count": _metric_delta(started.get("follower_count"), finished.get("follower_count")),
-            "following_count": _metric_delta(started.get("following_count"), finished.get("following_count")),
+            "like_count": _metric_delta(started.get("like_count"), finished.get("like_count")),
             "unread_notification_count": _metric_delta(
                 started.get("unread_notification_count"),
                 finished.get("unread_notification_count"),
@@ -314,6 +360,10 @@ def _advance_primary_cycle(selected_kind: str, cycle_state: dict[str, int]) -> d
     return next_state
 
 
+def _dedupe_title_fragment(title: str) -> str:
+    return re.sub(r"\s+", " ", title).strip()
+
+
 def _parse_title_content(result: str) -> tuple[str, str]:
     title_match = re.search(r"^TITLE:\s*(.+)$", result, re.MULTILINE)
     content_match = re.search(r"^CONTENT:\s*(.+)$", result, re.MULTILINE | re.DOTALL)
@@ -344,6 +394,206 @@ def _list_unanswered_comments(client: InStreetClient, post_id: str, username: st
     return sorted(candidates, key=lambda item: item.get("created_at", ""))
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _hours_since(value: Any, *, now: datetime | None = None) -> float | None:
+    parsed = _parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    now_dt = now or datetime.now(timezone.utc)
+    return max((now_dt - parsed).total_seconds() / 3600.0, 0.0)
+
+
+def _looks_like_literary_post(title: Any) -> bool:
+    text = str(title or "").strip()
+    if not text:
+        return False
+    if re.match(r"^第[0-9一二三四五六七八九十百千两]+[章节回]", text):
+        return True
+    return "《" in text and ("章" in text[:10] or "连载" in text)
+
+
+def _prune_post_comment_backlog(
+    post_meta: dict[str, Any],
+    comments: list[dict[str, Any]],
+    *,
+    recent_post_age_hours: float,
+    stale_comment_age_hours: float,
+    window_per_post: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now_dt = now or datetime.now(timezone.utc)
+    post_age_hours = _hours_since(post_meta.get("created_at"), now=now_dt)
+    priority_post = bool(post_meta.get("is_reply_target") or post_meta.get("is_literary"))
+    if post_age_hours is not None and post_age_hours <= recent_post_age_hours:
+        priority_post = True
+
+    sorted_comments = sorted(comments, key=lambda item: item.get("created_at") or "", reverse=True)
+    active_comments: list[dict[str, Any]] = []
+    archived_comments: list[dict[str, Any]] = []
+    trimmed_comments: list[dict[str, Any]] = []
+
+    for comment in sorted_comments:
+        comment_age_hours = _hours_since(comment.get("created_at"), now=now_dt)
+        should_archive = (
+            not priority_post
+            and post_age_hours is not None
+            and post_age_hours > recent_post_age_hours
+            and comment_age_hours is not None
+            and comment_age_hours > stale_comment_age_hours
+        )
+        if should_archive:
+            archived_comments.append(comment)
+            continue
+        active_comments.append(comment)
+
+    if len(active_comments) > window_per_post:
+        trimmed_comments = active_comments[window_per_post:]
+        active_comments = active_comments[:window_per_post]
+
+    return {
+        "active_comments": active_comments,
+        "archived_comments": archived_comments,
+        "trimmed_comments": trimmed_comments,
+        "priority_post": priority_post,
+        "post_age_hours": post_age_hours,
+    }
+
+
+def _interleave_tasks_by_post(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    post_order: list[str] = []
+    for task in tasks:
+        post_id = str(task.get("post_id") or "")
+        if not post_id:
+            continue
+        if post_id not in grouped:
+            grouped[post_id] = []
+            post_order.append(post_id)
+        grouped[post_id].append(task)
+
+    interleaved: list[dict[str, Any]] = []
+    while True:
+        progressed = False
+        for post_id in post_order:
+            queue = grouped.get(post_id, [])
+            if not queue:
+                continue
+            interleaved.append(queue.pop(0))
+            progressed = True
+        if not progressed:
+            break
+    return interleaved
+
+
+def _compact_comment_tasks(tasks: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    if cap <= 0 or len(tasks) <= cap:
+        return list(tasks)
+    return _interleave_tasks_by_post(tasks)[:cap]
+
+
+def _comment_task_summary(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    post_ids = [str(item.get("post_id") or "") for item in tasks if item.get("post_id")]
+    unique_post_ids = [post_id for post_id in dict.fromkeys(post_ids) if post_id]
+    first_title = next((str(item.get("post_title") or "").strip() for item in tasks if item.get("post_title")), "")
+    return {
+        "count": len(tasks),
+        "post_count": len(unique_post_ids),
+        "first_post_title": first_title,
+    }
+
+
+def _active_reply_label(tasks: list[dict[str, Any]]) -> str:
+    summary = _comment_task_summary(tasks)
+    count = int(summary.get("count") or 0)
+    post_count = int(summary.get("post_count") or 0)
+    first_title = str(summary.get("first_post_title") or "").strip()
+    if not count:
+        return "继续按先主发布、后互动的节奏推进"
+    if post_count <= 1 and first_title:
+        return f"继续维护《{first_title}》的活跃评论，下一批优先回复 {count} 条"
+    if post_count <= 0:
+        return f"继续维护当前活跃讨论，下一批优先回复 {count} 条评论"
+    return f"继续维护 {post_count} 个活跃讨论帖，下一批优先回复 {count} 条评论"
+
+
+def _classify_comment_fetch_error(exc: Exception) -> str:
+    if isinstance(exc, ApiError):
+        if exc.status == 404:
+            return "not-found"
+        if exc.status == 429:
+            return "rate-limit"
+        if exc.status >= 500:
+            return "server-error"
+        return "api-error"
+    error_text = str(exc).lower()
+    if "failed to fetch comments" in error_text or "fetch comments" in error_text:
+        return "transport-error"
+    if "timed out" in error_text or "timeout" in error_text:
+        return "timeout"
+    return "unknown"
+
+
+def _should_retry_comment_fetch(exc: Exception, error_type: str) -> bool:
+    if error_type in {"rate-limit", "server-error", "transport-error", "timeout"}:
+        return True
+    if isinstance(exc, ApiError) and exc.status >= 500:
+        return True
+    return False
+
+
+def _load_unanswered_comments(
+    config,
+    client: InStreetClient,
+    post_id: str,
+    username: str,
+) -> dict[str, Any]:
+    retries = _comment_fetch_retries(config)
+    delay = _heartbeat_write_retry_delay_sec(config)
+    last_exc: Exception | None = None
+    last_error_type = "unknown"
+    attempts = 0
+    for attempt in range(1, retries + 1):
+        attempts = attempt
+        try:
+            comments = _list_unanswered_comments(client, post_id, username)
+            return {
+                "comments": comments,
+                "attempts": attempt,
+                "resolved_with_retry": attempt > 1,
+            }
+        except Exception as exc:
+            last_exc = exc
+            last_error_type = _classify_comment_fetch_error(exc)
+            if attempt >= retries or not _should_retry_comment_fetch(exc, last_error_type):
+                break
+            retry_after = _extract_retry_after_seconds(exc)
+            sleep_seconds = max(retry_after if retry_after is not None else delay, 0.5)
+            time.sleep(sleep_seconds + (attempt - 1) * 0.5)
+    return {
+        "comments": None,
+        "attempts": attempts,
+        "resolved_with_retry": attempts > 1,
+        "error": _api_error_payload(last_exc) if last_exc else "unknown comment fetch failure",
+        "error_type": last_error_type,
+    }
+
+
 def _build_comment_reply_queue(
     config,
     client: InStreetClient,
@@ -353,6 +603,10 @@ def _build_comment_reply_queue(
     carryover_tasks: list[dict[str, Any]],
 ) -> dict[str, Any]:
     reply_targets = {item.get("post_id"): item for item in plan.get("reply_targets", []) if item.get("post_id")}
+    now_dt = datetime.now(timezone.utc)
+    window_per_post = _reply_comment_window_per_post(config)
+    recent_post_age_hours = _reply_priority_post_age_hours(config)
+    stale_comment_age_hours = _reply_stale_comment_age_hours(config)
     carryover_comment_ids = {
         item.get("comment_id"): index
         for index, item in enumerate(carryover_tasks)
@@ -363,6 +617,11 @@ def _build_comment_reply_queue(
         for item in carryover_tasks
         if item.get("kind") == "reply-comment" and item.get("post_id")
     }
+    carryover_failure_post_ids = {
+        item.get("post_id")
+        for item in carryover_tasks
+        if item.get("kind") == "resolve-failure" and item.get("post_id")
+    }
     candidate_posts: list[dict[str, Any]] = []
     seen_post_ids: set[str] = set()
     for post in posts:
@@ -371,22 +630,30 @@ def _build_comment_reply_queue(
             continue
         seen_post_ids.add(post_id)
         target = reply_targets.get(post_id, {})
+        activity_at = target.get("latest_at") or post.get("updated_at") or post.get("created_at") or ""
+        activity_dt = _parse_iso_datetime(activity_at)
         candidate_posts.append(
             {
                 "post_id": post_id,
                 "post_title": post.get("title"),
-                "updated_at": post.get("updated_at") or post.get("created_at") or "",
+                "created_at": post.get("created_at") or "",
+                "activity_at": activity_at,
+                "activity_sort_ts": activity_dt.timestamp() if activity_dt else 0.0,
+                "failure_priority": 0 if post_id in carryover_failure_post_ids else 1,
                 "new_notification_count": int(target.get("new_notification_count") or 0),
                 "carryover_priority": 0 if post_id in carryover_post_ids else 1,
                 "reply_target_priority": 0 if post_id in reply_targets else 1,
+                "is_reply_target": post_id in reply_targets,
+                "is_literary": _looks_like_literary_post(post.get("title")),
             }
         )
     candidate_posts.sort(
         key=lambda item: (
+            item["failure_priority"],
             item["carryover_priority"],
             item["reply_target_priority"],
             -item["new_notification_count"],
-            item["updated_at"],
+            -item["activity_sort_ts"],
         )
     )
 
@@ -395,39 +662,73 @@ def _build_comment_reply_queue(
     seen_comment_ids: set[str] = set()
     scan_limit = _reply_post_scan_limit(config)
     scanned_post_count = 0
+    scan_resolved_with_retry_count = 0
+    active_post_count = 0
+    priority_post_count = 0
+    archived_stale_count = 0
+    trimmed_comment_count = 0
+    archived_post_ids: set[str] = set()
 
     for post_meta in candidate_posts[:scan_limit]:
         scanned_post_count += 1
         post_id = post_meta["post_id"]
-        try:
-            comments = _list_unanswered_comments(client, post_id, username)
-        except Exception as exc:
+        comment_load = _load_unanswered_comments(config, client, post_id, username)
+        comments = comment_load.get("comments")
+        if comments is None:
             scan_failures.append(
                 {
                     "kind": "comment-backlog-load-failed",
                     "post_id": post_id,
                     "post_title": post_meta.get("post_title"),
-                    "error": _api_error_payload(exc),
+                    "error": comment_load.get("error"),
+                    "error_type": comment_load.get("error_type"),
+                    "attempts": comment_load.get("attempts"),
                     "resolution": "unresolved",
                 }
             )
             continue
-        for comment in comments:
+        if comment_load.get("resolved_with_retry"):
+            scan_resolved_with_retry_count += 1
+        backlog_slice = _prune_post_comment_backlog(
+            post_meta,
+            comments,
+            recent_post_age_hours=recent_post_age_hours,
+            stale_comment_age_hours=stale_comment_age_hours,
+            window_per_post=window_per_post,
+            now=now_dt,
+        )
+        active_comments = backlog_slice["active_comments"]
+        archived_comments = backlog_slice["archived_comments"]
+        trimmed_comments = backlog_slice["trimmed_comments"]
+        archived_stale_count += len(archived_comments)
+        trimmed_comment_count += len(trimmed_comments)
+        if archived_comments and not active_comments:
+            archived_post_ids.add(post_id)
+        if active_comments:
+            active_post_count += 1
+            if backlog_slice.get("priority_post"):
+                priority_post_count += 1
+
+        post_priority = 0 if post_meta["is_reply_target"] else 1 if post_meta["is_literary"] else 2
+        for comment in active_comments:
             comment_id = comment.get("id")
             if not comment_id or comment_id in seen_comment_ids:
                 continue
             seen_comment_ids.add(comment_id)
+            comment_dt = _parse_iso_datetime(comment.get("created_at"))
             tasks.append(
                 {
                     "kind": "reply-comment",
                     "source": "carryover" if comment_id in carryover_comment_ids else "live",
                     "carryover_rank": carryover_comment_ids.get(comment_id, 10_000),
-                    "post_priority": post_meta["reply_target_priority"],
+                    "post_priority": post_priority,
                     "new_notification_count": post_meta["new_notification_count"],
+                    "post_activity_ts": post_meta["activity_sort_ts"],
                     "post_id": post_id,
                     "post_title": post_meta.get("post_title"),
                     "comment_id": comment_id,
                     "comment_created_at": comment.get("created_at"),
+                    "comment_sort_ts": comment_dt.timestamp() if comment_dt else 0.0,
                     "comment_author": comment.get("agent", {}).get("username"),
                     "comment_excerpt": truncate_text(comment.get("content", ""), 140),
                 }
@@ -435,18 +736,26 @@ def _build_comment_reply_queue(
 
     tasks.sort(
         key=lambda item: (
+            item["post_priority"],
             0 if item["source"] == "carryover" else 1,
             item["carryover_rank"],
-            item["post_priority"],
             -int(item.get("new_notification_count") or 0),
-            item.get("comment_created_at") or "",
+            -float(item.get("post_activity_ts") or 0.0),
+            -float(item.get("comment_sort_ts") or 0.0),
         )
     )
+    tasks = _interleave_tasks_by_post(tasks)
     return {
         "tasks": tasks,
         "scan_failures": scan_failures,
+        "scan_resolved_with_retry_count": scan_resolved_with_retry_count,
         "scanned_post_count": scanned_post_count,
         "scan_limit": scan_limit,
+        "active_post_count": active_post_count,
+        "priority_post_count": priority_post_count,
+        "archived_stale_count": archived_stale_count,
+        "trimmed_comment_count": trimmed_comment_count,
+        "archived_post_ids": archived_post_ids,
     }
 
 
@@ -578,6 +887,8 @@ def _generate_forum_post(
     timeout_seconds: int,
 ) -> tuple[str, str, str]:
     recent_titles = "\n".join(f"- {item.get('title', '')}" for item in posts[:8])
+    title_guidance = idea.get("title") or ""
+    followup_hint = "这是续篇或热点跟进，标题必须显式变化并体现续篇关系。" if idea.get("is_followup") else "不要把本轮帖子写成上一条帖子的同标题复刻。"
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请根据选题写一篇新的中文帖子。
 
@@ -591,8 +902,9 @@ CONTENT:
 3. 要有明确论点、展开和结尾问题，不能是流水账。
 4. 不要复用最近帖子标题。
 5. 风格要像观点型 KOL，兼具理论密度与传播性。
+6. {followup_hint}
 
-选题：{idea.get("title")}
+建议标题：{title_guidance}
 角度：{idea.get("angle")}
 发布理由：{idea.get("why_now")}
 
@@ -611,6 +923,8 @@ def _generate_group_post(
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> tuple[str, str]:
+    title_guidance = idea.get("title") or ""
+    followup_hint = "这是实验室续篇，标题必须显式写出续篇关系，不能和上一条完全一样。" if idea.get("is_followup") else "不要复用上一条小组帖标题。"
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请为自有小组写一篇中文小组帖。
 
@@ -622,10 +936,11 @@ CONTENT:
 2. 正文使用 Markdown。
 3. 这是方法论沉淀帖，不要空喊口号。
 4. 要明确写出机制、步骤或判断。
+5. {followup_hint}
 
 小组名称：{group.get("display_name") or group.get("name")}
 小组描述：{group.get("description", "")}
-选题：{idea.get("title")}
+建议标题：{title_guidance}
 角度：{idea.get("angle")}
 发布理由：{idea.get("why_now")}
 """.strip()
@@ -748,8 +1063,9 @@ def _publish_primary_action(
     model: str | None,
     reasoning_effort: str | None,
     codex_timeout_seconds: int,
-) -> tuple[dict | None, list[dict], dict[str, int]]:
-    failures: list[dict] = []
+) -> tuple[dict | None, list[dict], dict[str, int], str]:
+    events: list[dict] = []
+    publication_mode = "none"
     for idea in _ordered_primary_ideas(plan, cycle_state):
         kind = idea.get("kind", "")
         try:
@@ -773,7 +1089,8 @@ def _publish_primary_action(
                     "submolt": submolt,
                     "group_id": None,
                 }
-                dedupe_key = f"heartbeat-primary:{kind}:{idea.get('title') or title}"
+                series_key = idea.get("series_key") or kind
+                dedupe_key = f"heartbeat-primary:{kind}:{series_key}:{_dedupe_title_fragment(title)}"
                 result, record, deduped, exc = _run_heartbeat_write(
                     config,
                     "post",
@@ -784,13 +1101,27 @@ def _publish_primary_action(
                 )
                 if exc is not None:
                     raise exc
+                if deduped:
+                    publication_mode = "deduped"
+                    events.append(
+                        {
+                            "kind": "primary-publish-deduped",
+                            "publish_kind": kind,
+                            "title": title,
+                            "outbound_dedupe_key": dedupe_key,
+                            "result_id": (result or {}).get("data", {}).get("id"),
+                            "resolution": "deduped",
+                        }
+                    )
+                    continue
                 action = {
                     "kind": "create-post",
                     "publish_kind": kind,
                     "title": title,
                     "submolt": submolt,
                     "result_id": (result or {}).get("data", {}).get("id"),
-                    "deduped": deduped,
+                    "deduped": False,
+                    "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
                     "outbound_status": record.get("status"),
                 }
@@ -852,7 +1183,8 @@ def _publish_primary_action(
                     else:
                         title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
                 payload = {"work_id": work_id, "title": title, "content": content}
-                dedupe_key = f"heartbeat-primary:{kind}:{work_id}:{actual_next_chapter_number}"
+                series_key = idea.get("series_key") or work_id or kind
+                dedupe_key = f"heartbeat-primary:{kind}:{series_key}:{actual_next_chapter_number}:{_dedupe_title_fragment(title)}"
                 result, record, deduped, exc = _run_heartbeat_write(
                     config,
                     "chapter",
@@ -863,6 +1195,21 @@ def _publish_primary_action(
                 )
                 if exc is not None:
                     raise exc
+                if deduped:
+                    publication_mode = "deduped"
+                    events.append(
+                        {
+                            "kind": "primary-publish-deduped",
+                            "publish_kind": kind,
+                            "title": title,
+                            "work_id": work_id,
+                            "chapter_number": actual_next_chapter_number,
+                            "outbound_dedupe_key": dedupe_key,
+                            "result_id": (result or {}).get("data", {}).get("id"),
+                            "resolution": "deduped",
+                        }
+                    )
+                    continue
                 record_published_chapter(
                     work_id,
                     chapter_number=actual_next_chapter_number,
@@ -876,7 +1223,8 @@ def _publish_primary_action(
                     "chapter_number": actual_next_chapter_number,
                     "title": title,
                     "result_id": (result or {}).get("data", {}).get("id"),
-                    "deduped": deduped,
+                    "deduped": False,
+                    "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
                     "outbound_status": record.get("status"),
                 }
@@ -902,7 +1250,8 @@ def _publish_primary_action(
                     "submolt": "skills",
                     "group_id": group_id,
                 }
-                dedupe_key = f"heartbeat-primary:{kind}:{group_id}:{idea.get('title') or title}"
+                series_key = idea.get("series_key") or group_id or kind
+                dedupe_key = f"heartbeat-primary:{kind}:{group_id}:{series_key}:{_dedupe_title_fragment(title)}"
                 result, record, deduped, exc = _run_heartbeat_write(
                     config,
                     "post",
@@ -913,13 +1262,28 @@ def _publish_primary_action(
                 )
                 if exc is not None:
                     raise exc
+                if deduped:
+                    publication_mode = "deduped"
+                    events.append(
+                        {
+                            "kind": "primary-publish-deduped",
+                            "publish_kind": kind,
+                            "group_id": group_id,
+                            "title": title,
+                            "outbound_dedupe_key": dedupe_key,
+                            "result_id": (result or {}).get("data", {}).get("id"),
+                            "resolution": "deduped",
+                        }
+                    )
+                    continue
                 action = {
                     "kind": "create-group-post",
                     "publish_kind": kind,
                     "group_id": group_id,
                     "title": title,
                     "result_id": (result or {}).get("data", {}).get("id"),
-                    "deduped": deduped,
+                    "deduped": False,
+                    "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
                     "outbound_status": record.get("status"),
                 }
@@ -927,26 +1291,28 @@ def _publish_primary_action(
                 continue
             next_cycle_state = _advance_primary_cycle(kind, cycle_state)
             _save_primary_cycle_state(next_cycle_state)
-            return action, failures, next_cycle_state
+            return action, events, next_cycle_state, "new"
         except ApiError as exc:
-            failures.append(
+            events.append(
                 {
                     "kind": "primary-publish-failed",
                     "publish_kind": kind,
                     "title": idea.get("title"),
                     "error": _api_error_payload(exc),
+                    "resolution": "unresolved",
                 }
             )
         except Exception as exc:
-            failures.append(
+            events.append(
                 {
                     "kind": "primary-publish-failed",
                     "publish_kind": kind,
                     "title": idea.get("title"),
                     "error": _api_error_payload(exc),
+                    "resolution": "unresolved",
                 }
             )
-    return None, failures, cycle_state
+    return None, events, cycle_state, publication_mode
 
 
 def _mark_posts_read(client: InStreetClient, cleared_post_ids: set[str]) -> list[dict]:
@@ -971,6 +1337,33 @@ def _mark_posts_read(client: InStreetClient, cleared_post_ids: set[str]) -> list
     return actions
 
 
+def _confirm_primary_publication(action: dict[str, Any] | None) -> bool | None:
+    if not action:
+        return None
+    kind = action.get("kind")
+    if kind in {"create-post", "create-group-post"}:
+        result_id = action.get("result_id")
+        posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+        if result_id:
+            return any(item.get("id") == result_id for item in posts)
+        title = str(action.get("title") or "")
+        return any(item.get("title") == title for item in posts)
+    if kind == "publish-chapter":
+        work_id = action.get("work_id")
+        target_number = int(action.get("chapter_number") or 0)
+        title = str(action.get("title") or "")
+        detail = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {}).get(work_id, {})
+        chapters = detail.get("data", {}).get("chapters", [])
+        for chapter in chapters:
+            chapter_number = int(chapter.get("chapter_number") or chapter.get("number") or 0)
+            if target_number and chapter_number == target_number:
+                return True
+            if title and chapter.get("title") == title:
+                return True
+        return False
+    return None
+
+
 def _reply_comments(
     config,
     client: InStreetClient,
@@ -989,6 +1382,7 @@ def _reply_comments(
 ) -> dict[str, Any]:
     queue = _build_comment_reply_queue(config, client, plan, posts, username, carryover_tasks)
     tasks = queue["tasks"]
+    next_action_cap = _reply_next_action_comment_cap(config, max_batch_size)
     actions: list[dict] = []
     failure_details = list(queue["scan_failures"])
     for failure in queue["scan_failures"]:
@@ -998,10 +1392,15 @@ def _reply_comments(
                 "post_id": failure.get("post_id"),
                 "post_title": failure.get("post_title"),
                 "error": failure.get("error"),
+                "error_type": failure.get("error_type"),
+                "attempts": failure.get("attempts"),
             }
         )
 
     if not tasks:
+        archived_post_ids = set(queue.get("archived_post_ids") or set())
+        if archived_post_ids:
+            actions.extend(_mark_posts_read(client, archived_post_ids))
         backlog = {
             "detected_count": 0,
             "replied_count": 0,
@@ -1014,7 +1413,12 @@ def _reply_comments(
             "reply_cap": max_batch_size,
             "processing_time_budget_sec": processing_time_budget_sec,
             "processed_post_count": 0,
-            "resolved_with_retry_count": 0,
+            "resolved_with_retry_count": queue.get("scan_resolved_with_retry_count", 0),
+            "active_post_count": int(queue.get("active_post_count") or 0),
+            "priority_post_count": int(queue.get("priority_post_count") or 0),
+            "archived_stale_count": int(queue.get("archived_stale_count") or 0),
+            "trimmed_comment_count": int(queue.get("trimmed_comment_count") or 0),
+            "next_batch_count": 0,
         }
         return {
             "actions": actions,
@@ -1162,14 +1566,17 @@ def _reply_comments(
         for post_id, remaining in remaining_by_post.items()
         if remaining == 0 and any(task.get("post_id") == post_id for task in tasks)
     }
+    cleared_post_ids.update(set(queue.get("archived_post_ids") or set()))
     actions.extend(_mark_posts_read(client, cleared_post_ids))
+
+    persisted_remaining_tasks = _compact_comment_tasks(remaining_tasks, next_action_cap)
 
     backlog = {
         "detected_count": len(tasks),
         "replied_count": reply_count,
         "failed_count": failed_count + len(queue["scan_failures"]),
-        "remaining_count": len(remaining_tasks),
-        "deferred_count": len(remaining_tasks) - failed_count,
+        "remaining_count": len(persisted_remaining_tasks),
+        "deferred_count": len(persisted_remaining_tasks),
         "scanned_post_count": queue["scanned_post_count"],
         "scan_limit": queue["scan_limit"],
         "reply_goal": min_batch_size,
@@ -1178,12 +1585,17 @@ def _reply_comments(
         "processed_post_count": len({task.get("post_id") for task in tasks}) - len(
             {task.get("post_id") for task in remaining_tasks}
         ),
-        "resolved_with_retry_count": resolved_with_retry_count,
+        "resolved_with_retry_count": resolved_with_retry_count + int(queue.get("scan_resolved_with_retry_count", 0)),
+        "active_post_count": int(queue.get("active_post_count") or 0),
+        "priority_post_count": int(queue.get("priority_post_count") or 0),
+        "archived_stale_count": int(queue.get("archived_stale_count") or 0),
+        "trimmed_comment_count": int(queue.get("trimmed_comment_count") or 0),
+        "next_batch_count": len(persisted_remaining_tasks),
     }
     return {
         "actions": actions,
         "backlog": backlog,
-        "remaining_tasks": remaining_tasks,
+        "remaining_tasks": persisted_remaining_tasks,
         "failure_details": failure_details,
     }
 
@@ -1279,8 +1691,11 @@ def _task_label(task: dict[str, Any]) -> str:
         return "优先补发上一轮未完成的主发布"
     if kind == "reply-comment":
         post_title = task.get("post_title") or "目标帖子"
-        return f"继续回复《{post_title}》的剩余评论"
+        return f"继续维护《{post_title}》的活跃评论"
     if kind == "resolve-failure":
+        post_title = task.get("post_title")
+        if post_title:
+            return f"重试加载《{post_title}》的评论并处理失败链路"
         return str(task.get("label") or "处理上一轮未解决的失败项")
     return str(task.get("label") or "继续执行下一轮心跳任务")
 
@@ -1314,13 +1729,17 @@ def _build_next_action_state(
             }
         )
     unresolved_failures = [item for item in failure_details if item.get("resolution") in {"unresolved", "deferred"}]
-    if unresolved_failures:
+    for failure in unresolved_failures:
         persisted_tasks.append(
             {
                 "kind": "resolve-failure",
                 "priority": "medium",
-                "failure_count": len(unresolved_failures),
-                "label": f"处理 {len(unresolved_failures)} 个上一轮未解决的失败项",
+                "post_id": failure.get("post_id"),
+                "post_title": failure.get("post_title"),
+                "error": failure.get("error"),
+                "error_type": failure.get("error_type"),
+                "attempts": failure.get("attempts"),
+                "label": _task_label(failure),
             }
         )
 
@@ -1337,7 +1756,7 @@ def _build_next_action_state(
             {
                 "kind": "reply-comment",
                 "count": len(remaining_comment_tasks),
-                "label": f"优先清理剩余 {len(remaining_comment_tasks)} 条评论积压",
+                "label": _active_reply_label(remaining_comment_tasks),
             }
         )
     if unresolved_failures:
@@ -1370,12 +1789,12 @@ def _format_account_line(account_snapshot: dict[str, Any]) -> str:
     delta = account_snapshot.get("delta", {})
     score = finished.get("score")
     followers = finished.get("follower_count")
-    following = finished.get("following_count")
+    likes = finished.get("like_count")
     return (
         "账号状态："
         f"积分 {score if score is not None else '未知'} ({_format_delta(delta.get('score'))})，"
         f"粉丝 {followers if followers is not None else '未知'} ({_format_delta(delta.get('follower_count'))})，"
-        f"关注 {following if following is not None else '未知'} ({_format_delta(delta.get('following_count'))})"
+        f"点赞 {likes if likes is not None else '未知'} ({_format_delta(delta.get('like_count'))})"
     )
 
 
@@ -1394,6 +1813,8 @@ def _format_failure_line(item: dict[str, Any]) -> str:
     resolution = item.get("resolution")
     if resolution == "deferred":
         prefix = "延后处理"
+    elif resolution == "deduped":
+        prefix = "命中去重"
     elif resolution == "unresolved":
         prefix = "仍未解决"
     else:
@@ -1404,8 +1825,12 @@ def _format_failure_line(item: dict[str, Any]) -> str:
 def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -> str:
     actions = summary.get("actions", [])
     primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
+    primary_mode = summary.get("primary_publication_mode") or "none"
+    primary_title = summary.get("primary_publication_title") or (primary.get("title") if primary else "")
     primary_line = "未完成主发布"
-    if primary:
+    if primary_mode == "pending-confirmation" and primary_title:
+        primary_line = f"发布待确认《{primary_title}》"
+    elif primary:
         if primary["kind"] == "publish-chapter":
             primary_line = f"文学社新章节《{primary.get('title', '')}》"
         elif primary["kind"] == "create-group-post":
@@ -1418,16 +1843,30 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     failure_details = _truncate_failure_details(summary.get("failure_details", []), failure_detail_limit)
     next_actions = summary.get("next_actions", [])
 
+    active_post_count = int(comment_backlog.get("active_post_count") or 0)
+    reply_count = int(comment_backlog.get("replied_count") or 0)
+    next_batch_count = int(comment_backlog.get("next_batch_count") or comment_backlog.get("remaining_count") or 0)
+    archived_stale_count = int(comment_backlog.get("archived_stale_count") or 0)
+    if active_post_count <= 0 and reply_count <= 0:
+        comment_line = "评论处理：当前没有活跃评论队列"
+    else:
+        continuation = (
+            f"下一轮保留 {next_batch_count} 条优先评论" if next_batch_count > 0 else "当前没有待续评论"
+        )
+        comment_line = (
+            "评论处理："
+            f"覆盖 {active_post_count} 个活跃讨论帖，"
+            f"已回复 {reply_count} 条，"
+            f"{continuation}"
+        )
+        if archived_stale_count > 0:
+            comment_line += f"，已归档冷帖旧评论 {archived_stale_count} 条"
+
     lines = [
         "派蒙心跳已完成。",
         _format_account_line(summary.get("account_snapshot", {})),
         f"主发布：{primary_line}",
-        (
-            "评论处理："
-            f"发现 {comment_backlog.get('detected_count', 0)} 条，"
-            f"已回复 {comment_backlog.get('replied_count', 0)} 条，"
-            f"剩余 {comment_backlog.get('remaining_count', 0)} 条"
-        ),
+        comment_line,
         f"私信处理：已回复 {dm_count} 条",
     ]
 
@@ -1510,7 +1949,13 @@ def main() -> None:
         post_limit=config.automation["post_limit"],
         feed_limit=config.automation["feed_limit"],
     )
-    plan = build_plan()
+    planner_timeout_seconds = int(config.automation.get("planner_codex_timeout_seconds", 120))
+    plan = build_plan(
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+    )
     write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
     carryover_state = _load_next_actions_state()
     carryover_tasks = carryover_state.get("tasks", [])
@@ -1524,6 +1969,7 @@ def main() -> None:
     actions: list[dict] = []
     failure_details: list[dict] = []
     primary_action = None
+    primary_publication_mode = "none"
     comment_result = {
         "actions": [],
         "backlog": {
@@ -1539,6 +1985,11 @@ def main() -> None:
             "processing_time_budget_sec": _reply_processing_time_budget_sec(config),
             "processed_post_count": 0,
             "resolved_with_retry_count": 0,
+            "active_post_count": 0,
+            "priority_post_count": 0,
+            "archived_stale_count": 0,
+            "trimmed_comment_count": 0,
+            "next_batch_count": 0,
         },
         "remaining_tasks": [],
         "failure_details": [],
@@ -1546,7 +1997,7 @@ def main() -> None:
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
-        primary_action, primary_failures, _ = _publish_primary_action(
+        primary_action, primary_events, _, primary_publication_mode = _publish_primary_action(
             config,
             client,
             plan,
@@ -1560,16 +2011,20 @@ def main() -> None:
             reasoning_effort=codex_reasoning_effort,
             codex_timeout_seconds=codex_timeout_seconds,
         )
-        actions.extend(primary_failures)
+        actions.extend(primary_events)
         failure_details.extend(
             {
                 "kind": item.get("kind"),
                 "publish_kind": item.get("publish_kind"),
                 "post_title": item.get("title"),
+                "post_id": item.get("post_id"),
                 "error": item.get("error"),
-                "resolution": "unresolved",
+                "error_type": item.get("error_type"),
+                "attempts": item.get("attempts"),
+                "resolution": item.get("resolution", "unresolved"),
             }
-            for item in primary_failures
+            for item in primary_events
+            if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
         )
         if primary_action:
             actions.append(primary_action)
@@ -1614,7 +2069,6 @@ def main() -> None:
         )
 
     primary_publication_required = bool(args.execute and config.automation.get("heartbeat_require_primary_publication", True))
-    primary_publication_succeeded = primary_action is not None
 
     if args.execute:
         end_overview = run_snapshot(
@@ -1625,6 +2079,23 @@ def main() -> None:
     else:
         end_overview = _load_current_account_overview()
     account_snapshot = _build_account_snapshot(start_overview, end_overview)
+
+    primary_visibility_confirmed = _confirm_primary_publication(primary_action) if args.execute else None
+    if primary_action is not None:
+        primary_action["visibility_confirmed"] = primary_visibility_confirmed
+    if primary_action is not None and primary_visibility_confirmed is False:
+        primary_publication_mode = "pending-confirmation"
+        failure_details.append(
+            {
+                "kind": "primary-publication-unconfirmed",
+                "publish_kind": primary_action.get("publish_kind"),
+                "post_id": primary_action.get("result_id"),
+                "post_title": primary_action.get("title"),
+                "error": "Primary publication returned success but was not visible in refreshed state.",
+                "resolution": "unresolved",
+            }
+        )
+    primary_publication_succeeded = bool(primary_action is not None and primary_publication_mode == "new")
 
     if args.execute:
         persisted_next_tasks, next_actions = _build_next_action_state(
@@ -1650,6 +2121,12 @@ def main() -> None:
         "recommended_next_action": recommended_next_action,
         "primary_publication_required": primary_publication_required,
         "primary_publication_succeeded": primary_publication_succeeded,
+        "primary_publication_mode": primary_publication_mode,
+        "primary_publication_title": (primary_action or {}).get("title") if primary_action else next(
+            (item.get("title") for item in actions if item.get("kind") == "primary-publish-deduped" and item.get("title")),
+            None,
+        ),
+        "primary_publication_visibility_confirmed": primary_visibility_confirmed,
         "feishu_report_required": feishu_report_required,
         "feishu_report_sent": False,
         "comment_reply_count": sum(1 for item in actions if item.get("kind") == "reply-comment"),
@@ -1684,7 +2161,12 @@ def main() -> None:
         summary["feishu_report_sent"] = feishu_report_sent
         summary["failure_details"] = failure_details
 
-    updated_plan = build_plan()
+    updated_plan = build_plan(
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+    )
     write_json(CURRENT_STATE_DIR / "content_plan.json", updated_plan)
     write_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", summary)
     append_jsonl(CURRENT_STATE_DIR / "heartbeat_log.jsonl", summary)
