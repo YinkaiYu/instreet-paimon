@@ -20,9 +20,100 @@ from common import (
 from serial_state import sync_serial_registry
 
 
+MIN_POST_FETCH_LIMIT = 100
+
+
 def _extract_posts(obj: dict) -> list[dict]:
     data = obj.get("data", {})
     return data.get("data", [])
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _metric_value(current, previous, *, allow_zero=True):
+    current_int = _safe_int(current)
+    if current_int is not None and (allow_zero or current_int != 0):
+        return current_int
+    previous_int = _safe_int(previous)
+    return previous_int if previous_int is not None else current_int
+
+
+def _resolve_account_metrics(me: dict, home: dict, previous_overview: dict | None) -> tuple[dict, list[dict]]:
+    me_data = me.get("data", {})
+    home_data = home.get("data", {})
+    account = home_data.get("your_account", {})
+    previous_overview = previous_overview or {}
+    corrections: list[dict] = []
+
+    score = _metric_value(me_data.get("score"), previous_overview.get("score"))
+    home_score = _safe_int(account.get("score"))
+    me_warning = me.get("snapshot_warning") or {}
+    if score is None and home_score is not None:
+        score = home_score
+    elif me_warning.get("used_cache") and home_score is not None and score != home_score:
+        corrections.append(
+            {
+                "metric": "score",
+                "reason": "me endpoint used cache; preferred fresher home score",
+                "raw": {"me_score": score, "home_score": home_score},
+                "fallback": {"score": home_score},
+            }
+        )
+        score = home_score
+
+    raw_follower_count = _safe_int(account.get("follower_count"))
+    raw_following_count = _safe_int(account.get("following_count"))
+    previous_follower_count = _safe_int(previous_overview.get("follower_count"))
+    previous_following_count = _safe_int(previous_overview.get("following_count"))
+
+    suspicious_zero_pair = (
+        raw_follower_count == 0
+        and raw_following_count == 0
+        and ((previous_follower_count or 0) > 0 or (previous_following_count or 0) > 0)
+    )
+    if suspicious_zero_pair:
+        corrections.append(
+            {
+                "metric": "social_counts",
+                "reason": "home.your_account returned zero follower/following counts; kept last known non-zero values",
+                "raw": {
+                    "follower_count": raw_follower_count,
+                    "following_count": raw_following_count,
+                },
+                "fallback": {
+                    "follower_count": previous_follower_count,
+                    "following_count": previous_following_count,
+                },
+            }
+        )
+        follower_count = previous_follower_count
+        following_count = previous_following_count
+    else:
+        follower_count = _metric_value(raw_follower_count, previous_follower_count)
+        following_count = _metric_value(raw_following_count, previous_following_count, allow_zero=True)
+
+    unread_notification_count = _metric_value(
+        account.get("unread_notification_count"),
+        previous_overview.get("unread_notification_count"),
+        allow_zero=True,
+    )
+    unread_message_count = _metric_value(
+        account.get("unread_message_count"),
+        previous_overview.get("unread_message_count"),
+        allow_zero=True,
+    )
+    return {
+        "score": score,
+        "follower_count": follower_count,
+        "following_count": following_count,
+        "unread_notification_count": unread_notification_count,
+        "unread_message_count": unread_message_count,
+    }, corrections
 
 
 def _serialize_exception(exc: Exception) -> dict:
@@ -92,24 +183,26 @@ def build_overview(
     fetch_failures: list[dict],
 ) -> dict:
     me_data = me.get("data", {})
-    home_data = home.get("data", {})
-    account = home_data.get("your_account", {})
     post_items = _extract_posts(posts)
+    previous_overview = read_json(CURRENT_STATE_DIR / "account_overview.json", default={})
+    account_metrics, metric_corrections = _resolve_account_metrics(me, home, previous_overview)
     top_posts = sorted(
         post_items,
         key=lambda item: (item.get("upvotes", 0) + item.get("comment_count", 0)),
         reverse=True,
     )[:5]
+    total_like_count = sum(int(post.get("upvotes") or 0) for post in post_items)
 
     return {
         "captured_at": now_utc(),
         "username": me_data.get("username"),
         "agent_id": me_data.get("id"),
-        "score": me_data.get("score"),
-        "follower_count": account.get("follower_count"),
-        "following_count": account.get("following_count"),
-        "unread_notification_count": account.get("unread_notification_count"),
-        "unread_message_count": account.get("unread_message_count"),
+        "score": account_metrics.get("score"),
+        "follower_count": account_metrics.get("follower_count"),
+        "following_count": account_metrics.get("following_count"),
+        "like_count": total_like_count,
+        "unread_notification_count": account_metrics.get("unread_notification_count"),
+        "unread_message_count": account_metrics.get("unread_message_count"),
         "recent_top_posts": [
             {
                 "id": post.get("id"),
@@ -140,6 +233,7 @@ def build_overview(
         "owned_groups": groups.get("data", {}).get("groups", []),
         "post_count": len(post_items),
         "fetch_failures": fetch_failures,
+        "metric_corrections": metric_corrections,
     }
 
 
@@ -154,6 +248,8 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
     config = load_config()
     client = InStreetClient(config)
     agent_id = config.identity["agent_id"]
+    previous_overview = read_json(CURRENT_STATE_DIR / "account_overview.json", default={})
+    effective_post_limit = max(post_limit, int(previous_overview.get("post_count") or 0) + 5, MIN_POST_FETCH_LIMIT)
 
     fetch_failures: list[dict] = []
 
@@ -167,7 +263,7 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
 
     posts, posts_failure = fetch_best_effort(
         "posts",
-        lambda: client.posts(agent_id=agent_id, limit=post_limit),
+        lambda: client.posts(agent_id=agent_id, limit=effective_post_limit),
         empty_data={"data": []},
     )
     if posts_failure:
@@ -247,6 +343,8 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
         {
             "captured_at": overview["captured_at"],
             "score": overview["score"],
+            "follower_count": overview["follower_count"],
+            "like_count": overview["like_count"],
             "post_count": overview["post_count"],
             "fetch_failure_count": len(fetch_failures),
             "archive_dir": str(archive_dir) if archive_dir else None,
@@ -267,6 +365,7 @@ def main() -> None:
         f"Snapshot captured for {overview['username']} | "
         f"score={overview['score']} | "
         f"followers={overview['follower_count']} | "
+        f"likes={overview['like_count']} | "
         f"unread_notifications={overview['unread_notification_count']}"
     )
 

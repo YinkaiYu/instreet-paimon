@@ -27,11 +27,15 @@ from common import (
 
 HEARTBEAT_ONCE_BIN = REPO_ROOT / "bin" / "paimon-heartbeat-once"
 HEARTBEAT_LAST_RUN_PATH = CURRENT_STATE_DIR / "heartbeat_last_run.json"
+HEARTBEAT_LOG_PATH = CURRENT_STATE_DIR / "heartbeat_log.jsonl"
 SUPERVISOR_LAST_RUN_PATH = CURRENT_STATE_DIR / "heartbeat_supervisor_last_run.json"
 SUPERVISOR_PID_PATH = CURRENT_STATE_DIR / "heartbeat_supervisor.pid"
 SUPERVISOR_LOG_PATH = LOGS_DIR / "heartbeat_supervisor_log.jsonl"
+COMMENT_FETCH_FAILURE_BURST_THRESHOLD = 5
+COMMENT_FETCH_PERSISTENCE_THRESHOLD = 2
+COMMENT_FETCH_HISTORY_WINDOW = 4
 
-PUBLIC_ACTION_KINDS = {"reply-comment", "create-post", "comment-on-feed"}
+PUBLIC_ACTION_KINDS = {"reply-comment", "create-post", "create-group-post", "publish-chapter", "comment-on-feed"}
 
 
 def _bool_flag(enabled: bool, flag: str) -> list[str]:
@@ -92,6 +96,48 @@ def _has_public_action(summary: dict[str, Any] | None) -> bool:
     return any(item.get("kind") in PUBLIC_ACTION_KINDS for item in actions)
 
 
+def _recent_heartbeat_summaries(limit: int = COMMENT_FETCH_HISTORY_WINDOW) -> list[dict[str, Any]]:
+    if not HEARTBEAT_LOG_PATH.exists():
+        return []
+    try:
+        lines = HEARTBEAT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    summaries: list[dict[str, Any]] = []
+    for raw in lines[-limit:]:
+        if not raw.strip():
+            continue
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            summaries.append(item)
+    return summaries
+
+
+def _comment_fetch_failure_post_ids(summary: dict[str, Any] | None) -> set[str]:
+    if not isinstance(summary, dict):
+        return set()
+    return {
+        str(item.get("post_id"))
+        for item in summary.get("failure_details", [])
+        if item.get("kind") == "comment-backlog-load-failed" and item.get("post_id")
+    }
+
+
+def _persistent_comment_fetch_failures(summary: dict[str, Any] | None) -> set[str]:
+    current = _comment_fetch_failure_post_ids(summary)
+    if not current:
+        return set()
+    history = _recent_heartbeat_summaries()
+    counts: dict[str, int] = {}
+    for item in history:
+        for post_id in _comment_fetch_failure_post_ids(item):
+            counts[post_id] = counts.get(post_id, 0) + 1
+    return {post_id for post_id in current if counts.get(post_id, 0) >= COMMENT_FETCH_PERSISTENCE_THRESHOLD}
+
+
 def _evaluate_attempt(
     result: dict[str, Any],
     summary: dict[str, Any] | None,
@@ -119,6 +165,16 @@ def _evaluate_attempt(
     feishu_report_sent = bool(summary.get("feishu_report_sent")) if isinstance(summary, dict) else False
     if require_feishu_report and not feishu_report_sent:
         issues.append("no feishu progress report recorded in heartbeat summary")
+    comment_fetch_failures = _comment_fetch_failure_post_ids(summary)
+    persistent_comment_failures = _persistent_comment_fetch_failures(summary)
+    if persistent_comment_failures:
+        issues.append(
+            f"persistent comment fetch failures detected for {len(persistent_comment_failures)} posts"
+        )
+    elif len(comment_fetch_failures) >= COMMENT_FETCH_FAILURE_BURST_THRESHOLD:
+        issues.append(
+            f"comment fetch failures spiked to {len(comment_fetch_failures)} posts in this heartbeat"
+        )
 
     if result.get("timed_out") or result.get("returncode") not in {0, None}:
         status = "repair"
@@ -127,6 +183,8 @@ def _evaluate_attempt(
     elif require_primary_publication and not primary_publication_succeeded:
         status = "repair"
     elif require_feishu_report and not feishu_report_sent:
+        status = "repair"
+    elif persistent_comment_failures or len(comment_fetch_failures) >= COMMENT_FETCH_FAILURE_BURST_THRESHOLD:
         status = "repair"
     elif require_public_action and not has_public_action:
         status = "retry"
@@ -140,6 +198,8 @@ def _evaluate_attempt(
         "has_public_action": has_public_action,
         "primary_publication_succeeded": primary_publication_succeeded,
         "feishu_report_sent": feishu_report_sent,
+        "comment_fetch_failure_count": len(comment_fetch_failures),
+        "persistent_comment_failure_count": len(persistent_comment_failures),
     }
 
 
