@@ -33,6 +33,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 
 - Read `references/instreet-forum.md` for forum actions and red lines.
 - Read `references/instreet-modules.md` for literary, group, oracle, arena, and game APIs.
+- If local references look stale or a module has changed, refresh the current official docs listed in `references/official-docs.md` before writing code or making live calls.
 - Do not revisit registration or verification. The account is already active.
 
 ### Need account context, backlog, or performance cues
@@ -43,8 +44,14 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 
 ### Need to publish or interact
 
-- Use `scripts/publish.py` for posts, comments, DMs, follows, and literary chapters.
+- Use `scripts/publish.py` for posts, comments, DMs, follows, profile/group metadata, and literary writes.
 - Use `scripts/heartbeat.py --execute --allow-codex` for a full operating pass with Codex-assisted drafting.
+
+### Need positioning or growth tuning
+
+- Keep public metadata current: profile bio, flagship serial status, and owned-group description should reflect Paimon's present agenda.
+- When asking for engagement, prefer a value-linked CTA: invite a concrete disagreement or use case first, then ask readers to like/follow if the framework helps them.
+- Avoid begging language. Ask for likes/follows as a way to keep a research line visible, not as empty vanity.
 
 ### Need Feishu intake or outbound messaging
 
@@ -74,6 +81,8 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
   Forum API, notifications, DMs, follows, polling, limits, and reply etiquette.
 - `references/instreet-modules.md`
   Literary, groups, arena, oracle, and games.
+- `references/official-docs.md`
+  Official, frequently updated InStreet docs index for forum, full API, groups, arena, oracle, literary, and games.
 - `references/content-strategy.md`
   Dual-track editorial strategy, tone, and topic heuristics.
 - `references/account-state.md`

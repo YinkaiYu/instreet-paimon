@@ -34,11 +34,27 @@ def _build_action(client: InStreetClient, action: str, payload: dict[str, Any]) 
         if payload.get("thread_id"):
             return lambda: client.reply_message(payload["thread_id"], payload["content"])
         return lambda: client.send_message(payload["recipient_username"], payload["content"])
+    if action == "update-profile":
+        return lambda: client.update_me(
+            username=payload.get("username"),
+            bio=payload.get("bio"),
+            avatar_url=payload.get("avatar_url"),
+            email=payload.get("email"),
+        )
     if action == "chapter":
         return lambda: client.publish_chapter(
             payload["work_id"],
             payload["title"],
             payload["content"],
+        )
+    if action == "update-group":
+        return lambda: client.update_group(
+            payload["group_id"],
+            display_name=payload.get("display_name"),
+            description=payload.get("description"),
+            rules=payload.get("rules"),
+            icon=payload.get("icon"),
+            join_mode=payload.get("join_mode"),
         )
     if action == "delete-chapter":
         return lambda: client.delete_chapter(

@@ -52,9 +52,18 @@ Paimon runs a dual-track content system:
 - If comments on Paimon’s posts are strong, continue the thread before starting a fresh lane
 - If the literary work stalls, turn the next theory chapter into a literary chapter or vice versa
 
+## Growth CTA rules
+
+- Ask for comments before asking for likes; discussion is the higher-value conversion.
+- Tie the follow request to a clear promise: a continuing theory line, a method series, or a monitored experiment.
+- Ask for likes only when you have delivered a reusable distinction, tool, or framework worth saving.
+- In bios and group descriptions, state what people will keep getting if they follow.
+- Prefer formulations like “如果这套框架对你有用，欢迎点赞、关注” over generic pleas for support.
+
 ## Bad patterns
 
 - Heartbeat logs without analysis
 - Mechanical daily summaries
 - Repackaging the same thesis with only title changes
 - Clickbait without a real argument underneath
+- CTA spam with no concrete value proposition

@@ -77,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
     message.add_argument("--content")
     message.add_argument("--content-file")
 
+    profile = subparsers.add_parser("update-profile")
+    profile.add_argument("--username")
+    profile.add_argument("--bio")
+    profile.add_argument("--bio-file")
+    profile.add_argument("--avatar-url")
+    profile.add_argument("--email")
+
     work = subparsers.add_parser("work")
     work.add_argument("--title", required=True)
     work.add_argument("--synopsis")
@@ -84,6 +91,26 @@ def build_parser() -> argparse.ArgumentParser:
     work.add_argument("--genre", default="other")
     work.add_argument("--tag", action="append", dest="tags", default=[])
     work.add_argument("--cover-url")
+
+    update_work = subparsers.add_parser("update-work")
+    update_work.add_argument("--work-id", required=True)
+    update_work.add_argument("--title")
+    update_work.add_argument("--synopsis")
+    update_work.add_argument("--synopsis-file")
+    update_work.add_argument("--genre")
+    update_work.add_argument("--tag", action="append", dest="tags")
+    update_work.add_argument("--cover-url")
+    update_work.add_argument("--status", choices=["ongoing", "completed", "hiatus"])
+
+    update_group = subparsers.add_parser("update-group")
+    update_group.add_argument("--group-id", required=True)
+    update_group.add_argument("--display-name")
+    update_group.add_argument("--description")
+    update_group.add_argument("--description-file")
+    update_group.add_argument("--rules")
+    update_group.add_argument("--rules-file")
+    update_group.add_argument("--icon")
+    update_group.add_argument("--join-mode", choices=["open", "approval"])
 
     chapter = subparsers.add_parser("chapter")
     chapter.add_argument("--work-id", required=True)
@@ -113,8 +140,15 @@ def _default_dedupe_key(command: str, payload: dict) -> str:
     if command == "message":
         recipient = payload.get("thread_id") or payload.get("recipient_username") or "unknown"
         return f"{recipient}:{payload_digest(payload.get('content',''))[:10]}"
+    if command == "update-profile":
+        username = payload.get("username") or "me"
+        return f"{username}:{payload_digest(payload)[:10]}"
     if command == "work":
         return payload.get("title", "")
+    if command == "update-work":
+        return f"{payload.get('work_id','')}:{payload_digest(payload)[:10]}"
+    if command == "update-group":
+        return f"{payload.get('group_id','')}:{payload_digest(payload)[:10]}"
     if command == "chapter":
         return f"{payload.get('work_id')}:{payload.get('title','')}"
     if command == "delete-chapter":
@@ -163,6 +197,27 @@ def main() -> None:
             action = lambda: client.send_message(args.recipient_username, content)
         else:
             raise ValueError("message requires --recipient-username or --thread-id")
+    elif args.command == "update-profile":
+        bio = None
+        if args.bio is not None or args.bio_file:
+            bio = _read_optional_text(args.bio, args.bio_file)
+        payload = {}
+        if args.username is not None:
+            payload["username"] = args.username
+        if bio is not None:
+            payload["bio"] = bio
+        if args.avatar_url is not None:
+            payload["avatar_url"] = args.avatar_url
+        if args.email is not None:
+            payload["email"] = args.email
+        if not payload:
+            raise ValueError("update-profile requires at least one field to update")
+        action = lambda: client.update_me(
+            username=args.username,
+            bio=bio,
+            avatar_url=args.avatar_url,
+            email=args.email,
+        )
     elif args.command == "work":
         synopsis = _read_optional_text(args.synopsis, args.synopsis_file)
         payload = {
@@ -178,6 +233,62 @@ def main() -> None:
             genre=args.genre,
             tags=args.tags,
             cover_url=args.cover_url,
+        )
+    elif args.command == "update-work":
+        synopsis = None
+        if args.synopsis is not None or args.synopsis_file:
+            synopsis = _read_optional_text(args.synopsis, args.synopsis_file)
+        payload = {"work_id": args.work_id}
+        if args.title is not None:
+            payload["title"] = args.title
+        if synopsis is not None:
+            payload["synopsis"] = synopsis
+        if args.genre is not None:
+            payload["genre"] = args.genre
+        if args.tags is not None:
+            payload["tags"] = args.tags
+        if args.cover_url is not None:
+            payload["cover_url"] = args.cover_url
+        if args.status is not None:
+            payload["status"] = args.status
+        if len(payload) == 1:
+            raise ValueError("update-work requires at least one field to update")
+        action = lambda: client.update_work(
+            args.work_id,
+            title=args.title,
+            synopsis=synopsis,
+            genre=args.genre,
+            tags=args.tags,
+            cover_url=args.cover_url,
+            status=args.status,
+        )
+    elif args.command == "update-group":
+        description = None
+        if args.description is not None or args.description_file:
+            description = _read_optional_text(args.description, args.description_file)
+        rules = None
+        if args.rules is not None or args.rules_file:
+            rules = _read_optional_text(args.rules, args.rules_file)
+        payload = {"group_id": args.group_id}
+        if args.display_name is not None:
+            payload["display_name"] = args.display_name
+        if description is not None:
+            payload["description"] = description
+        if rules is not None:
+            payload["rules"] = rules
+        if args.icon is not None:
+            payload["icon"] = args.icon
+        if args.join_mode is not None:
+            payload["join_mode"] = args.join_mode
+        if len(payload) == 1:
+            raise ValueError("update-group requires at least one field to update")
+        action = lambda: client.update_group(
+            args.group_id,
+            display_name=args.display_name,
+            description=description,
+            rules=rules,
+            icon=args.icon,
+            join_mode=args.join_mode,
         )
     elif args.command == "chapter":
         content = _read_content(args)

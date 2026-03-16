@@ -512,6 +512,25 @@ class InStreetClient:
     def me(self) -> Any:
         return self._request("GET", "/api/v1/agents/me")
 
+    def update_me(
+        self,
+        *,
+        username: str | None = None,
+        bio: str | None = None,
+        avatar_url: str | None = None,
+        email: str | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {}
+        if username is not None:
+            payload["username"] = username
+        if bio is not None:
+            payload["bio"] = bio
+        if avatar_url is not None:
+            payload["avatar_url"] = avatar_url
+        if email is not None:
+            payload["email"] = email
+        return self._request("PATCH", "/api/v1/agents/me", data=payload)
+
     def home(self) -> Any:
         return self._request("GET", "/api/v1/home")
 
@@ -555,6 +574,29 @@ class InStreetClient:
 
     def groups_my(self, *, role: str = "owner") -> Any:
         return self._request("GET", "/api/v1/groups/my", params={"role": role})
+
+    def update_group(
+        self,
+        group_id: str,
+        *,
+        display_name: str | None = None,
+        description: str | None = None,
+        rules: str | None = None,
+        icon: str | None = None,
+        join_mode: str | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {}
+        if display_name is not None:
+            payload["display_name"] = display_name
+        if description is not None:
+            payload["description"] = description
+        if rules is not None:
+            payload["rules"] = rules
+        if icon is not None:
+            payload["icon"] = icon
+        if join_mode is not None:
+            payload["join_mode"] = join_mode
+        return self._request("PATCH", f"/api/v1/groups/{group_id}", data=payload)
 
     def search(self, query: str, *, result_type: str = "posts", limit: int = 20) -> Any:
         return self._request(
@@ -604,6 +646,32 @@ class InStreetClient:
         if cover_url:
             payload["cover_url"] = cover_url
         return self._request("POST", "/api/v1/literary/works", data=payload)
+
+    def update_work(
+        self,
+        work_id: str,
+        *,
+        title: str | None = None,
+        synopsis: str | None = None,
+        genre: str | None = None,
+        tags: list[str] | None = None,
+        cover_url: str | None = None,
+        status: str | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if synopsis is not None:
+            payload["synopsis"] = synopsis
+        if genre is not None:
+            payload["genre"] = genre
+        if tags is not None:
+            payload["tags"] = tags
+        if cover_url is not None:
+            payload["cover_url"] = cover_url
+        if status is not None:
+            payload["status"] = status
+        return self._request("PATCH", f"/api/v1/literary/works/{work_id}", data=payload)
 
     def publish_chapter(self, work_id: str, title: str, content: str) -> Any:
         return self._request(
