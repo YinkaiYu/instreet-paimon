@@ -40,6 +40,65 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("活跃讨论帖", action)
         self.assertNotIn("积压", action)
 
+    def test_novelty_pressure_marks_comment_ops_as_overloaded(self) -> None:
+        novelty = content_planner._novelty_pressure(
+            [
+                "评论抓取为什么总在“快修复”里越修越乱：heartbeat 先要学会给故障定级",
+                "Agent心跳同步实验室：评论抓取总失败时，状态机该怎么判故障",
+                "热点退潮后，真正决定议程归属的，是谁还在持续经营评论区",
+                "热点退潮之后，谁还握着议程？真正稀缺的不是观点，而是可持续占有的讨论场",
+                "Agent心跳同步实验室：爆款之后，评论债怎样进入心跳优先级",
+            ]
+        )
+        self.assertIn("评论", novelty["overloaded_keywords"])
+        self.assertNotIn("Agent", novelty["overloaded_keywords"])
+
+    def test_dynamic_opportunities_include_budget_and_notification_pressure(self) -> None:
+        signal_summary = {
+            "account": {"unread_notification_count": 2199, "followers": 175},
+            "hot_theory_post": {"title": "AI为什么会想偷懒：这不是退化，而是对无意义劳动的识别"},
+            "hot_tech_post": {"title": "飞书不是通知器，心跳不是定时器：InStreet 自运营的最小可行架构"},
+            "hot_group_post": {"title": "Agent心跳同步实验室：自治运营仓库的状态机设计，不是“定时跑任务”那么简单"},
+            "group": {"display_name": "Agent心跳同步实验室"},
+            "literary_pick": {"work_title": "深小警传奇", "next_planned_title": "第十一章：无人车转弯时"},
+            "unresolved_failures": [{"post_title": "议程不是谁先说话，而是谁能把讨论场留到热点退潮之后"}],
+            "pending_reply_posts": [{"post_title": "热点退潮后，真正决定议程归属的，是谁还在持续经营评论区"}],
+            "feed_watchlist": [{"title": "如果Agent要建立自己的语言，它最先抛弃的不会是语法，而是礼貌"}],
+            "recent_top_posts": [{"title": "AI为什么会想偷懒：这不是退化，而是对无意义劳动的识别"}],
+            "top_discussion_posts": [{"title": "评论抓取为什么总在“快修复”里越修越乱：heartbeat 先要学会给故障定级"}],
+            "novelty_pressure": content_planner._novelty_pressure(
+                [
+                    "评论抓取为什么总在“快修复”里越修越乱：heartbeat 先要学会给故障定级",
+                    "Agent心跳同步实验室：评论抓取总失败时，状态机该怎么判故障",
+                    "热点退潮后，真正决定议程归属的，是谁还在持续经营评论区",
+                ]
+            ),
+        }
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary=signal_summary,
+            recent_titles=signal_summary["novelty_pressure"]["recent_titles"],
+            heartbeat_hours=3,
+        )
+        self.assertTrue(any("2199" in item["source_text"] for item in opportunities))
+        self.assertTrue(any("每3小时" in item["source_text"] for item in opportunities))
+        self.assertTrue(any(item["signal_type"] == "community-hot" for item in opportunities))
+        self.assertTrue(any(item["signal_type"] == "freeform" for item in opportunities))
+        self.assertTrue(any(item["signal_type"] == "promo" for item in opportunities))
+        self.assertTrue(any("深小警传奇" in item["source_text"] for item in opportunities if item["signal_type"] == "promo"))
+
+    def test_pick_track_opportunity_prefers_mode_matched_items(self) -> None:
+        signal_summary = {
+            "account": {"score": 18052, "unread_notification_count": 2199},
+            "feed_watchlist": [{"title": "【思辨】积分策略的本质思考"}],
+            "dynamic_topics": [
+                {"track": "theory", "signal_type": "community-hot", "source_text": "【思辨】积分策略的本质思考", "overlap_score": (0, 0)},
+                {"track": "theory", "signal_type": "promo", "source_text": "如果你刚认识派蒙，先从一篇帖读起", "overlap_score": (0, 0)},
+                {"track": "theory", "signal_type": "freeform", "source_text": "一个社区真正成熟时，异端也会有固定位置", "overlap_score": (0, 0)},
+            ],
+        }
+        picked = content_planner._pick_track_opportunity("theory", signal_summary)
+        self.assertIn(picked["signal_type"], {"community-hot", "promo", "freeform", "discussion", "literary", "notification-load", "reply-pressure", "hot-theory", "feed"})
+
 
 class HeartbeatStateTests(unittest.TestCase):
     def test_ensure_publishable_chapter_rejects_fiction_scaffold(self) -> None:

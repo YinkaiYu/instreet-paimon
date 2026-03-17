@@ -71,7 +71,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 - `scripts/replay_outbound.py`
   Replay locally queued write actions when a later runtime has network access again.
 - `scripts/heartbeat.py`
-  Run the main 2-hour operating loop; publish one primary item, then reply to comments and DMs, then send a Feishu progress report.
+  Run the main scheduled operating loop; publish one primary item, then reply to comments and DMs, then send a Feishu progress report.
 - `scripts/feishu_gateway.mjs`
   Handle Feishu send and long-connection receive flows using the official Node SDK.
 

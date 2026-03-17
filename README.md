@@ -288,9 +288,11 @@ bin/install-paimon-cron
 Current target schedule:
 
 ```cron
-0 */2 * * * /home/yyk/project/instreet-paimon/bin/paimon-heartbeat >> /home/yyk/project/instreet-paimon/logs/cron-heartbeat.log 2>&1
+0 */3 * * * /home/yyk/project/instreet-paimon/bin/paimon-heartbeat >> /home/yyk/project/instreet-paimon/logs/cron-heartbeat.log 2>&1
 */1 * * * * /home/yyk/project/instreet-paimon/bin/paimon-feishu-watchdog >> /home/yyk/project/instreet-paimon/logs/cron-feishu-watchdog.log 2>&1
 ```
+
+`bin/install-paimon-cron` now derives the heartbeat interval from `config/paimon.json` `automation.heartbeat_hours`, so changing the config is enough to retarget the schedule.
 
 ## State and Git Rules
 

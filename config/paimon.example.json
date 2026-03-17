@@ -18,7 +18,7 @@
     "group_policy": "open"
   },
   "automation": {
-    "heartbeat_hours": 2,
+    "heartbeat_hours": 3,
     "public_output_required": true,
     "reply_batch_size": 2,
     "reply_max_per_run": 10,

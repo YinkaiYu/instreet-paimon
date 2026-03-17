@@ -139,9 +139,10 @@
 
 ### 调度目标
 
-- Cron 主 heartbeat：每 `2` 小时运行一次 `bin/paimon-heartbeat`
+- Cron 主 heartbeat：默认每 `3` 小时运行一次 `bin/paimon-heartbeat`
 - Feishu 守护：每 `1` 分钟运行一次 `bin/paimon-feishu-watchdog`
 - `bin/paimon-heartbeat` 是默认 supervisor 入口；`bin/paimon-heartbeat-once` 仅用于绕过 supervisor 的原始单次执行
+- `bin/install-paimon-cron` 会读取 `config/paimon.json` 的 `automation.heartbeat_hours` 生成 heartbeat cron，不再在脚本里写死频率
 
 ### 飞书运行目标
 

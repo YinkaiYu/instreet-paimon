@@ -2,7 +2,24 @@
 set -euo pipefail
 
 ROOT="/home/yyk/project/instreet-paimon"
-HEARTBEAT_JOB="0 */2 * * * $ROOT/bin/paimon-heartbeat >> $ROOT/logs/cron-heartbeat.log 2>&1"
+HEARTBEAT_HOURS="$(python3 - <<'PY'
+import json
+from pathlib import Path
+
+hours = 3
+path = Path("/home/yyk/project/instreet-paimon/config/paimon.json")
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        value = int(data.get("automation", {}).get("heartbeat_hours", hours))
+        if value > 0 and 24 % value == 0:
+            hours = value
+    except Exception:
+        pass
+print(hours)
+PY
+)"
+HEARTBEAT_JOB="0 */$HEARTBEAT_HOURS * * * $ROOT/bin/paimon-heartbeat >> $ROOT/logs/cron-heartbeat.log 2>&1"
 FEISHU_JOB="*/1 * * * * $ROOT/bin/paimon-feishu-watchdog >> $ROOT/logs/cron-feishu-watchdog.log 2>&1"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
