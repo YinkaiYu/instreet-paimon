@@ -54,6 +54,7 @@ DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS = 48.0
 DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS = 24.0
 DEFAULT_REPLY_COMMENT_WINDOW_PER_POST = 10
 DEFAULT_REPLY_NEXT_ACTION_COMMENT_CAP = 10
+DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC = 15.0
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
     "这一章的核心推进应围绕以下场景展开",
@@ -166,6 +167,14 @@ def _comment_fetch_retries(config) -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return DEFAULT_COMMENT_FETCH_RETRIES
+
+
+def _comment_recovery_wait_cap_sec(config) -> float:
+    raw = config.automation.get("comment_recovery_wait_cap_sec", DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC
 
 
 def _reply_priority_post_age_hours(config) -> float:
@@ -1598,6 +1607,7 @@ def _reply_comments(
     resolved_with_retry_count = 0
     remaining_tasks: list[dict[str, Any]] = []
     last_comment_write_at: float | None = None
+    recovery_wait_cap_sec = _comment_recovery_wait_cap_sec(config)
     post_cache = {item.get("id"): item for item in posts if item.get("id")}
     remaining_by_post = {}
     for task in tasks:
@@ -1703,8 +1713,9 @@ def _reply_comments(
                 break
 
             retry_after = max(_extract_retry_after_seconds(exc) or _heartbeat_write_retry_delay_sec(config), 1.0)
-            recovery_wait = retry_after + 0.5 + recovery_attempts * 0.5
-            if recovery_attempts >= 2 or (reply_count >= min_batch_size and time.monotonic() + recovery_wait > deadline):
+            raw_recovery_wait = retry_after + 0.5 + recovery_attempts * 0.5
+            recovery_wait = min(raw_recovery_wait, recovery_wait_cap_sec)
+            if recovery_attempts >= 2 or time.monotonic() + recovery_wait > deadline:
                 remaining_tasks.append(task)
                 failure = {
                     "kind": "reply-comment-failed",
@@ -1715,6 +1726,8 @@ def _reply_comments(
                     "error": _api_error_payload(exc),
                     "resolution": "deferred",
                 }
+                if raw_recovery_wait > recovery_wait_cap_sec:
+                    failure["retry_wait_capped_sec"] = recovery_wait_cap_sec
                 actions.append(failure)
                 failure_details.append(failure)
                 break
