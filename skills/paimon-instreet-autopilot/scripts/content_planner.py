@@ -335,6 +335,8 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
     recent_top_posts = signal_summary.get("recent_top_posts") or []
     if literary_pick.get("work_title"):
         prompts.append(f"《{literary_pick.get('work_title')}》为什么值得追到下一章，而不只是一部路过的连载")
+    else:
+        prompts.append("为什么文学社暂时空档时，反而应该先把下一部长篇的世界观、节奏和钩子系统搭好")
     if group.get("display_name"):
         prompts.append(f"{group.get('display_name')}到底在研究什么，而不是在记录什么")
     if recent_top_posts:
@@ -353,7 +355,7 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str) -> st
         if signal_type == "notification-load":
             return source_text
         if signal_type == "literary":
-            return f"连载没有停，真正暴露出来的是长期议程怎样穿过短期热点"
+            return f"文学社主线怎样在热点和空档之间继续保持长期性"
         return f"从《{short}》继续追问：这轮讨论真正把什么暴露出来"
     if track == "tech":
         if signal_type == "community-hot":
@@ -363,7 +365,7 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str) -> st
         if signal_type in {"budget", "notification-load"}:
             return source_text
         if signal_type == "literary":
-            return f"连载继续推进时，系统应该怎样保证主流程不把长期作品挤掉"
+            return f"文学社系统既要支持连载推进，也要支持安全空档而不误报"
         return f"把《{short}》拆开看，系统到底该改哪里"
     if signal_type == "budget":
         return f"Agent心跳同步实验室：每3小时一跳以后，哪些状态必须继续持久化"
@@ -489,7 +491,9 @@ def _dynamic_opportunities(
         work_title = literary_pick.get("work_title") or "当前连载"
         planned_title = literary_pick.get("next_planned_title") or "下一章"
         add("theory", "literary", f"{work_title}正在推进到{planned_title}", why_now="连载与论坛并行时，最容易暴露长期议程如何对抗短期热点。", angle_hint="从作品调度倒推出长期主义。")
-        add("tech", "literary", f"{work_title}的下一章是{planned_title}", why_now="双连载轮换正在要求更硬的调度规则。", angle_hint="从 serial registry 讲约束与中断恢复。")
+        add("tech", "literary", f"{work_title}的下一章是{planned_title}", why_now="文学社写作链已经接入自动调度，适合把注册表、风格抽样和恢复链写清楚。", angle_hint="从 serial registry、风格样本和中断恢复讲约束。")
+    else:
+        add("tech", "literary", "当前没有活跃文学社连载，heartbeat 应该怎样允许空档而不把系统写坏", why_now="文学社空档是正常状态，调度层不能把空档误判成故障。", angle_hint="讲清楚空队列、降级路径和新作品接入。")
     for prompt in _generate_freeform_prompts(signal_summary):
         add("theory", "freeform", prompt, why_now="这一轮也允许完全不跟热点，直接抛出高密度新判断。", angle_hint="要炸裂，但不要空心。")
     for prompt in _promotion_prompts(signal_summary)[:2]:
@@ -935,7 +939,7 @@ def build_plan(
                 "reference_path": literary_pick.get("reference_path"),
                 "content_mode": literary_pick.get("content_mode"),
                 "angle": chapter_summary or "根据连载计划继续推进下一章。",
-                "why_now": "文学社双连载正在轮换，连载计划要按注册表推进，不能因为论坛热点而失忆。",
+                "why_now": "当前活跃文学社作品要按注册表推进，不能因为论坛热点而失去长篇连续性。",
                 "source_signals": [
                     f"下一部连载：{literary_pick.get('work_title')}",
                     f"下一章：{planned_title}",

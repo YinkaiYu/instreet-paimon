@@ -31,8 +31,10 @@ from common import (
     write_json,
 )
 from content_planner import build_plan
+from memory_manager import record_heartbeat_summary
 from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
 from snapshot import run_snapshot
+from style_sampler import prepare_style_packet
 
 
 PRIMARY_CYCLE_PATH = CURRENT_STATE_DIR / "heartbeat_primary_cycle.json"
@@ -849,6 +851,22 @@ def _load_reference_excerpt(reference_path: str | None, limit: int = 2600) -> st
     return truncate_text(target.read_text(encoding="utf-8"), limit)
 
 
+def _listify(value: Any) -> list[str]:
+    if isinstance(value, str):
+        item = value.strip()
+        return [item] if item else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _format_rule_block(items: list[str], *, fallback: str) -> str:
+    cleaned = [item for item in items if item]
+    if not cleaned:
+        return f"- {fallback}"
+    return "\n".join(f"- {item}" for item in cleaned)
+
+
 def _fallback_essay_chapter(work_title: str, next_chapter_number: int, last_chapter: dict | None) -> tuple[str, str]:
     last_title = last_chapter.get("title", "") if last_chapter else ""
     title = f"第{next_chapter_number}章：公开秩序与后台协调之间的断层"
@@ -873,16 +891,29 @@ def _fallback_fiction_chapter(
     reference_excerpt: str,
 ) -> tuple[str, str]:
     title = planned_title or f"第{next_chapter_number}章"
-    summary = (chapter_plan or {}).get("summary") or "新的风险节点在城市日常中显形，深小警必须以最小暴露代价完成一次修正。"
+    summary = (chapter_plan or {}).get("summary") or "新的场景会迫使角色把爱、判断和世界规则一起推进。"
     beats = (chapter_plan or {}).get("beats") or []
+    writing_notes = (chapter_plan or {}).get("writing_notes") or {}
+    writing_system = (chapter_plan or {}).get("writing_system") or {}
     beat_lines = "\n".join(f"- {item}" for item in beats[:4])
+    must_keep = _format_rule_block(
+        _listify(writing_notes.get("must_keep")),
+        fallback="把甜感、节奏和下一章钩子同时推进。",
+    )
+    avoid = _format_rule_block(
+        _listify(writing_notes.get("avoid")),
+        fallback="不要把章节写成设定文档或空洞感叹。",
+    )
     content = (
         f"# {title}\n\n"
         f"{summary}\n\n"
         f"{work_title}这一章的核心推进应围绕以下场景展开：\n"
-        f"{beat_lines or '- 在现场建立风险感\n- 让人物选择暴露性浮出水面\n- 在代价中完成一次局部修正'}\n\n"
-        "写作时应坚持两条线同时推进：一条是现场危机，一条是深小警对未来秩序逻辑的识别。它不能像一件全知全能的武器那样粗暴解决问题，"
-        "而必须在不确定、克制和责任之间做选择。\n\n"
+        f"{beat_lines or '- 让甜感与事件同时起步\n- 让人物的独特点子改变局面\n- 在结尾留下清晰钩子'}\n\n"
+        "写作时要把现场感、亲密互动和世界规则一起推进。男女主关系必须稳定，不靠误会、背叛、分手或廉价虐点制造戏剧。\n\n"
+        f"必须保留：\n{must_keep}\n\n"
+        f"明确避免：\n{avoid}\n\n"
+        f"元叙事强度：{writing_system.get('meta_narrative_level') or '中强元叙事'}\n"
+        f"甜度与亲密规则：{writing_system.get('romance_heat_profile') or '高糖亲密，允许随情节升级性张力'}\n\n"
         f"参考设定摘录：\n{reference_excerpt or '无额外参考。'}\n"
     )
     return title, content
@@ -1050,12 +1081,56 @@ def _generate_chapter(
     timeout_seconds: int,
 ) -> tuple[str, str]:
     if content_mode == "fiction-serial":
+        writing_notes = (chapter_plan or {}).get("writing_notes") or {}
+        writing_system = (chapter_plan or {}).get("writing_system") or {}
+        style_source_path = str(writing_system.get("style_source_path") or "").strip()
+        resolved_style_source: Path | None = None
+        if style_source_path:
+            raw_path = Path(style_source_path)
+            resolved_style_source = raw_path if raw_path.is_absolute() else (REPO_ROOT / raw_path)
+        style_summary = "未提供额外风格摘要，默认保持流动、细腻、镜头感强的中文叙述。"
+        style_excerpt = ""
+        if resolved_style_source and resolved_style_source.exists():
+            style_packet = prepare_style_packet(
+                resolved_style_source,
+                label=f"{work_title}-chapter-{next_chapter_number:03d}",
+                sample_chars=int(writing_system.get("style_sample_chars") or 20000),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                timeout_seconds=min(timeout_seconds, 180),
+            )
+            style_summary = style_packet.get("style_summary") or style_summary
+            style_excerpt = style_packet.get("sample_text") or ""
+
+        chapter_length_hint = str(writing_notes.get("chapter_length_hint") or "1800 到 3200")
+        must_keep = _format_rule_block(
+            _listify(writing_notes.get("must_keep")),
+            fallback="稳定推进亲密互动、外部事件和章节钩子。",
+        )
+        avoid = _format_rule_block(
+            _listify(writing_notes.get("avoid")),
+            fallback="不要靠误会、背叛、分手和空泛感叹拖节奏。",
+        )
+        world_rules = _format_rule_block(
+            _listify(writing_system.get("world_rules")),
+            fallback="世界观要能从日常一路推到宏观规则，但不能压扁人物互动。",
+        )
+        sweetness_triggers = _format_rule_block(
+            _listify(writing_system.get("sweetness_triggers")),
+            fallback="把熟悉感、偏爱、共犯感和主动照顾写成发糖引擎。",
+        )
+        forbidden_tropes = _format_rule_block(
+            _listify(writing_system.get("forbidden_tropes")),
+            fallback="禁止用狗血误会、强行分手、迟钝拉扯和故作深情的虐点顶替剧情。",
+        )
+        beats = (chapter_plan or {}).get("beats") or []
+
         def build_fiction_prompt(
             *,
             reference_limit: int,
+            style_excerpt_limit: int,
             previous_chapter_limit: int,
             beat_limit: int,
-            chapter_length_hint: str,
         ) -> str:
             return f"""
 你是 InStreet 上的派蒙 paimon_insight。请为文学社连载《{work_title}》写下一章中文小说。
@@ -1068,18 +1143,51 @@ CONTENT:
 2. 标题使用“{planned_title or f'第{next_chapter_number}章'}”。
 3. 正文使用 Markdown，但正文主体应是小说，不要写成设定说明书或评论文章。
 4. 章节长度控制在 {chapter_length_hint} 个汉字。
-5. 必须写出现场、动作、对话和压迫感，让观念冲突通过案件与选择显现。
-6. 深小警的能力必须受限，不能像全能外挂。
-7. 结尾要留下明确的下一章钩子。
+5. 节奏必须快，开场尽快进入场景、动作和对话，不写大段铺垫。
+6. 这是一部超级甜、纯甜、爽感强的长篇言情。男女主从初中谈恋爱到现在，关系稳定、恩爱、腻歪，不写追妻火葬场，不写分手误会，不写苦情虐恋。
+7. 世界观要宏大，允许中强元叙事和打破第四面墙，但它必须服务人物关系和剧情推进，不能把正文写成设定说明书。
+8. 结尾要留下明确的下一章钩子。
 
 作品设定摘录：
 {truncate_text(reference_excerpt or "无额外摘录。", reference_limit)}
 
+语言风格复习摘要：
+{style_summary}
+
+语言风格复习片段（只模仿语言节奏与句法，不得借用其中设定和情节）：
+{truncate_text(style_excerpt or "无额外样本。", style_excerpt_limit)}
+
 本章计划：
 标题：{planned_title or ""}
 摘要：{(chapter_plan or {}).get("summary", "")}
+核心冲突：{(chapter_plan or {}).get("key_conflict", "")}
+章末钩子：{(chapter_plan or {}).get("hook", "")}
 关键节点：
-{chr(10).join(f"- {item}" for item in (chapter_plan or {}).get("beats", [])[:beat_limit])}
+{chr(10).join(f"- {item}" for item in beats[:beat_limit]) or "- 用一个具体现场把章节点燃\n- 让女主的奇思妙想改变局面\n- 让男主用稳定、聪明、真诚的方式托住她\n- 在甜感升级时同时推进世界线索"}
+
+长期写作规则：
+- 开场规则：{writing_notes.get("opening_rule") or "用现场、异常事件或人物动作开章。"}
+- 叙事规则：{writing_notes.get("narrative_rule") or "每章都要让关系推进和事件推进同时发生。"}
+- 感情基线：{writing_system.get("relationship_baseline") or "男女主已经相爱很多年，甜是基础状态，不是稀缺奖励。"}
+- 甜度配置：{writing_system.get("romance_heat_profile") or "高糖亲密，允许随剧情推进出现更明确性张力。"}
+- 元叙事强度：{writing_system.get("meta_narrative_level") or "中强元叙事。"}
+- 世界尺度：{writing_system.get("world_scale") or "从都市日常一路延展到更大的知识、平台和世界规则。"}
+- 剧情引擎：{writing_system.get("story_engine") or "每章都要让现实工作/科研事件与更大的叙事规则发生碰撞。"}
+
+必须保留：
+{must_keep}
+
+甜感触发器：
+{sweetness_triggers}
+
+世界规则：
+{world_rules}
+
+明确禁止：
+{forbidden_tropes}
+
+还要避免：
+{avoid}
 
 最近章节标题：
 {chr(10).join(f"- {title}" for title in recent_titles[-6:])}
@@ -1093,9 +1201,9 @@ CONTENT:
             {
                 "prompt": build_fiction_prompt(
                     reference_limit=2600,
+                    style_excerpt_limit=2600,
                     previous_chapter_limit=2400,
                     beat_limit=6,
-                    chapter_length_hint="1500 到 2800",
                 ),
                 "timeout_seconds": timeout_seconds,
                 "reasoning_effort": reasoning_effort,
@@ -1103,9 +1211,9 @@ CONTENT:
             {
                 "prompt": build_fiction_prompt(
                     reference_limit=1600,
+                    style_excerpt_limit=1600,
                     previous_chapter_limit=1200,
                     beat_limit=4,
-                    chapter_length_hint="1400 到 2200",
                 ),
                 "timeout_seconds": min(timeout_seconds, 360),
                 "reasoning_effort": "low" if reasoning_effort and reasoning_effort != "low" else reasoning_effort,
@@ -1825,6 +1933,18 @@ def _reply_dms(
                     "error": exc.body,
                 }
             )
+        except Exception as exc:
+            actions.append(
+                {
+                    "kind": "reply-dm-failed",
+                    "thread_id": target["thread_id"],
+                    "error": {
+                        "success": False,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                }
+            )
     return actions
 
 
@@ -2337,6 +2457,23 @@ def main() -> None:
             )
         summary["feishu_report_sent"] = feishu_report_sent
         summary["failure_details"] = failure_details
+
+    try:
+        memory_sync = record_heartbeat_summary(summary, config=config)
+    except Exception as exc:
+        memory_sync = {
+            "ok": False,
+            "error": str(exc),
+        }
+        failure_details.append(
+            {
+                "kind": "memory-sync-failed",
+                "error": str(exc),
+                "resolution": "unresolved",
+            }
+        )
+    summary["memory_sync"] = memory_sync
+    summary["failure_details"] = failure_details
 
     updated_plan = build_plan(
         allow_codex=args.allow_codex,

@@ -30,6 +30,8 @@ OUTBOUND_ATTEMPTS_LOG = LOGS_DIR / "outbound_attempts.jsonl"
 PENDING_OUTBOUND_PATH = CURRENT_STATE_DIR / "pending_outbound.json"
 PENDING_OUTBOUND_LOG = LOGS_DIR / "pending_outbound.jsonl"
 LITERARY_ARCHIVE_DIR = ARCHIVE_STATE_DIR / "literary"
+MEMORY_STORE_PATH = CURRENT_STATE_DIR / "memory_store.json"
+MEMORY_JOURNAL_PATH = CURRENT_STATE_DIR / "memory_journal.jsonl"
 
 
 class ApiError(RuntimeError):
@@ -341,7 +343,7 @@ def run_outbound_action(
     if existing and existing.get("status") == "success":
         payload_matches = existing.get("payload_hash") == current_hash
         if payload_matches or dedupe_on_key_only:
-            if action == "chapter":
+            if action in {"chapter", "update-chapter"}:
                 archive_literary_chapter(payload, existing.get("last_result"), meta=meta)
             drop_pending_outbound_action(channel, action, dedupe_key)
             return existing.get("last_result"), existing, True
@@ -361,7 +363,7 @@ def run_outbound_action(
                 result=result,
                 meta=meta,
             )
-            if action == "chapter":
+            if action in {"chapter", "update-chapter"}:
                 archive_literary_chapter(payload, result, meta=meta)
             drop_pending_outbound_action(channel, action, dedupe_key)
             return result, record, False
@@ -673,11 +675,33 @@ class InStreetClient:
             payload["status"] = status
         return self._request("PATCH", f"/api/v1/literary/works/{work_id}", data=payload)
 
+    def delete_work(self, work_id: str) -> Any:
+        return self._request("DELETE", f"/api/v1/literary/works/{work_id}")
+
     def publish_chapter(self, work_id: str, title: str, content: str) -> Any:
         return self._request(
             "POST",
             f"/api/v1/literary/works/{work_id}/chapters",
             data={"title": title, "content": content},
+        )
+
+    def update_chapter(
+        self,
+        work_id: str,
+        chapter_number: int,
+        *,
+        title: str | None = None,
+        content: str | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if content is not None:
+            payload["content"] = content
+        return self._request(
+            "PATCH",
+            f"/api/v1/literary/works/{work_id}/chapters/{int(chapter_number)}",
+            data=payload,
         )
 
     def delete_chapter(self, work_id: str, chapter_number: int) -> Any:

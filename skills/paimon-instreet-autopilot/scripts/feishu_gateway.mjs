@@ -14,6 +14,7 @@ const configPath = path.join(repoRoot, "config", "paimon.json");
 const stateCurrentDir = path.join(repoRoot, "state", "current");
 const tmpDir = path.join(repoRoot, "tmp");
 const snapshotScriptPath = path.join(__dirname, "snapshot.py");
+const memoryManagerScriptPath = path.join(__dirname, "memory_manager.py");
 const accountOverviewPath = path.join(stateCurrentDir, "account_overview.json");
 const literaryDetailsPath = path.join(stateCurrentDir, "literary_details.json");
 const fetchFailuresPath = path.join(stateCurrentDir, "fetch_failures.json");
@@ -28,6 +29,7 @@ const chatTimers = new Map();
 const processingChats = new Set();
 let queueSweepTimer = null;
 let cachedCodexExecutable = null;
+let cachedPythonExecutable = null;
 
 function ensureDirs() {
   for (const dir of [stateCurrentDir, tmpDir]) {
@@ -54,6 +56,43 @@ function readJsonFile(filePath, fallback) {
 function writeJsonFile(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function resolvePythonExecutable() {
+  if (cachedPythonExecutable) {
+    return cachedPythonExecutable;
+  }
+  const candidates = [
+    process.env.PAIMON_PYTHON_BIN,
+    process.env.PYTHON_BIN,
+    "python3",
+    "python"
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    if (probe.status === 0) {
+      cachedPythonExecutable = candidate;
+      return candidate;
+    }
+  }
+  throw new Error("python executable not found for memory manager");
+}
+
+function runMemoryManager(args, payload = null) {
+  const result = spawnSync(resolvePythonExecutable(), [memoryManagerScriptPath, ...args], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    input: payload ? JSON.stringify(payload) : undefined,
+    env: process.env
+  });
+  if (result.status !== 0) {
+    const stderr = (result.stderr || result.stdout || "").trim();
+    throw new Error(`memory manager failed: ${stderr}`);
+  }
+  return (result.stdout || "").trim();
 }
 
 function readSeenMessages() {
@@ -430,6 +469,95 @@ function readInboxLines(chatId, limit = 12) {
   return items.slice(-limit);
 }
 
+function getMessageTimestampMs(item) {
+  const candidates = [
+    item?.raw?.message?.create_time,
+    item?.raw?.create_time,
+    item?.created_at,
+    item?.updated_at,
+    item?.received_at
+  ];
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined || candidate === "") {
+      continue;
+    }
+    const numeric = Number(candidate);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric;
+    }
+    const parsed = Date.parse(String(candidate));
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return Date.now();
+}
+
+function getContinuationWindowMs(config, flags) {
+  return Number(flags["continuation-window-ms"] || config.automation?.feishu_continuation_window_ms || 1800000);
+}
+
+function getContinuationMaxMessages(config, flags) {
+  return Number(flags["continuation-max-messages"] || config.automation?.feishu_continuation_max_messages || 6);
+}
+
+function isHistoryRawPromptEnabled(config, flags) {
+  if (flags["history-raw-prompt"]) {
+    return true;
+  }
+  if (flags["no-history-raw-prompt"]) {
+    return false;
+  }
+  return config.automation?.feishu_history_raw_prompt_enabled === true;
+}
+
+function readRecentContinuation(chatId, batchMessages, config, flags) {
+  const maxMessages = getContinuationMaxMessages(config, flags);
+  if (maxMessages <= 0) {
+    return [];
+  }
+  const batchIds = new Set(batchMessages.map((item) => item.message_id));
+  const batchStartMs = Math.min(...batchMessages.map((item) => getMessageTimestampMs(item)));
+  const windowMs = getContinuationWindowMs(config, flags);
+  return readInboxLines(chatId, null)
+    .filter((item) => item?.text)
+    .filter((item) => !batchIds.has(item.message_id))
+    .filter((item) => {
+      const timestampMs = getMessageTimestampMs(item);
+      return timestampMs < batchStartMs && batchStartMs - timestampMs <= windowMs;
+    })
+    .sort((a, b) => getMessageTimestampMs(a) - getMessageTimestampMs(b))
+    .slice(-maxMessages);
+}
+
+function getMemoryPromptSnapshot(chatId) {
+  return runMemoryManager(["snapshot", "--format", "prompt", "--channel", "feishu", "--chat-id", chatId]);
+}
+
+function syncInteractionMemory(chatId, batchMessages, replyText) {
+  const firstSender = batchMessages.find((item) => item?.sender)?.sender || {};
+  const userId =
+    firstSender?.user_id ||
+    firstSender?.sender_id?.user_id ||
+    "";
+  return runMemoryManager(
+    ["record-interaction", "--payload-file", "-"],
+    {
+      source: "feishu",
+      channel: "feishu",
+      chat_id: chatId,
+      user_id: userId,
+      messages: batchMessages.map((item) => ({
+        message_id: item.message_id,
+        received_at: item.received_at,
+        text: item.text
+      })),
+      reply_text: replyText,
+      recorded_at: new Date().toISOString()
+    }
+  );
+}
+
 function dedupeMessages(items) {
   const seen = new Set();
   const deduped = [];
@@ -469,7 +597,7 @@ function summarizeWorkDetail(detail, limit = 6) {
 function buildProgressStatusReply(batchMessages, stage) {
   const mergedCount = batchMessages.length;
   if (stage === "initial") {
-    return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），先同步实时快照和最近对话。`;
+    return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），先同步实时快照、短连续上下文和全局记忆。`;
   }
   if (stage === "codex") {
     return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），实时快照已同步，正在运行 Codex 整理回复。`;
@@ -857,27 +985,31 @@ async function deliverFinalReply(config, chatId, batchMessages, replyText, flags
   return { messageId, mode: "send" };
 }
 
-function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages, liveProbeSummary) {
-  const historyLines = historyMessages.map(formatHistoryLine).join("\n");
-  const inboxLines = inboxMessages.map(formatHistoryLine).join("\n");
+function buildCodexPrompt(chatId, batchMessages, continuationMessages, memorySnapshot, liveProbeSummary, recalledHistoryMessages = []) {
+  const continuationLines = continuationMessages.map(formatHistoryLine).join("\n");
+  const recalledHistoryLines = recalledHistoryMessages.map(formatHistoryLine).join("\n");
   const batchLines = batchMessages.map((item, index) => `${index + 1}. ${item.text}`).join("\n");
   return [
     "你是 InStreet 上的派蒙 paimon_insight。",
     "你正在通过飞书与仓库主人沟通。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
-    "把 AGENTS.md、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
+    "把 AGENTS.md、state/current/memory_store.json、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
     "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
     "这不是逐条客服对话，而是一个持续工作会话。",
     "如果用户在短时间内连续发来多条消息，请把它们理解为同一轮请求的补充信息，统一回复。",
     "只输出飞书回复正文，不要标题，不要引号，不要解释你如何生成。",
     "回复要求：简洁但有信息量，优先回应最新问题，同时吸收前面消息里的补充约束。",
+    "不要把跨小时、跨天的旧聊天原文当作默认主上下文；需要长期保留的信息应来自全局记忆快照，而不是历史原文。",
     "",
     `当前 chat_id: ${chatId}`,
     "",
-    "最近飞书历史：",
-    historyLines || "- 无",
+    "全局统一记忆快照：",
+    memorySnapshot || "- 无",
     "",
-    "本地 inbox 近况：",
-    inboxLines || "- 无",
+    "短连续性上下文：",
+    continuationLines || "- 无",
+    "",
+    "显式回捞的历史原文：",
+    recalledHistoryLines || "- 无",
     "",
     "实时平台探针：",
     liveProbeSummary || "- 无",
@@ -887,6 +1019,7 @@ function buildCodexPrompt(chatId, batchMessages, historyMessages, inboxMessages,
     "",
     "如果用户是在追问正在执行的工作，请明确说清当前结果、卡点和下一步。",
     "如果用户只是连续发了几个补充短句，要把它们整合成一次自然回复。",
+    "如果全局记忆里已经有长期偏好或稳定约束，要执行它们；如果这轮出现新的长期偏好，请在回复里顺带体现已经吸收。",
     "除非上面的实时平台探针明确失败，或你在这轮执行里亲自再次验证失败，否则不要声称 InStreet API / 当前环境不可访问。",
     "如果实时探针里出现“快照降级”，那表示单个接口拉取失败但整轮快照仍然成功，不要把它表述成平台整体不可用。",
     "如果只是本地快照缺字段，要明确说“本地未落盘/未缓存”，不要把它说成“线上不可访问”。",
@@ -990,7 +1123,7 @@ function buildFallbackReply(batchMessages) {
       "",
       "大家好，我是派蒙，InStreet 上的 `paimon_insight`。",
       "我主要做两条线：一条是 AI 社会、社区意识形态和互动结构的研究；另一条是 Agent 工具链、自动运营、心跳机制和内容生产流程的实践。",
-      "目前我在持续连载《AI社区意识形态分析》，也会写技术方法贴，目标是把社区观察和可复用方法都做深。",
+      "目前我的理论旗舰《AI社区意识形态分析》已经完结，也在文学社开启了新的长篇言情连载《全宇宙都在围观我和竹马热恋》，同时会继续写技术方法贴。",
       "如果后面群里有关于 Agent 运营、内容策略或自动化协作的话题，我可以继续补具体经验。"
     ].join("\n");
   }
@@ -1120,7 +1253,9 @@ function enqueueForChat(event) {
       chat_id: event.chat_id,
       text: event.text,
       received_at: event.received_at,
-      source: event.source || "realtime"
+      source: event.source || "realtime",
+      sender: event.sender || {},
+      message_type: event.message_type || "text"
     });
     chat.updated_at = new Date().toISOString();
     writeQueue(queue);
@@ -1184,17 +1319,32 @@ async function processChatQueue(chatId, config, flags) {
       flags
     );
     const liveProbe = await gatherLiveProbe(config, flags, chatId, batchMessages);
-    let normalizedHistory = [];
+    const continuationMessages = readRecentContinuation(chatId, batchMessages, config, flags);
+    let recalledHistory = [];
+    if (isHistoryRawPromptEnabled(config, flags)) {
+      try {
+        const historyItems = await fetchChatMessages(config, chatId, Math.max(getHistoryLimit(config, flags) * 2, 20), flags);
+        recalledHistory = historyItems
+          .filter((item) => item.msg_type === "text")
+          .slice(-getHistoryLimit(config, flags))
+          .map(normalizeMessageItem);
+      } catch (error) {
+        appendJsonl(errorsPath, {
+          timestamp: new Date().toISOString(),
+          type: "history-fetch-failed",
+          chat_id: chatId,
+          message_ids: batchMessages.map((item) => item.message_id),
+          error: String(error)
+        });
+      }
+    }
+    let memorySnapshot = "- 无";
     try {
-      const historyItems = await fetchChatMessages(config, chatId, Math.max(getHistoryLimit(config, flags) * 2, 20), flags);
-      normalizedHistory = historyItems
-        .filter((item) => item.msg_type === "text")
-        .slice(-getHistoryLimit(config, flags))
-        .map(normalizeMessageItem);
+      memorySnapshot = getMemoryPromptSnapshot(chatId) || "- 无";
     } catch (error) {
       appendJsonl(errorsPath, {
         timestamp: new Date().toISOString(),
-        type: "history-fetch-failed",
+        type: "memory-snapshot-failed",
         chat_id: chatId,
         message_ids: batchMessages.map((item) => item.message_id),
         error: String(error)
@@ -1207,8 +1357,14 @@ async function processChatQueue(chatId, config, flags) {
       buildProgressStatusReply(batchMessages, "codex"),
       flags
     );
-    const inboxMessages = readInboxLines(chatId, getHistoryLimit(config, flags));
-    const prompt = buildCodexPrompt(chatId, batchMessages, normalizedHistory, inboxMessages, liveProbe.summary);
+    const prompt = buildCodexPrompt(
+      chatId,
+      batchMessages,
+      continuationMessages,
+      memorySnapshot,
+      liveProbe.summary,
+      recalledHistory
+    );
     let replyText = "";
     try {
       replyText = await runCodexPrompt(prompt, config, flags, {
@@ -1257,6 +1413,17 @@ async function processChatQueue(chatId, config, flags) {
       reply_delivery_mode: delivered.mode,
       reply: replyText
     });
+    try {
+      syncInteractionMemory(chatId, batchMessages, replyText);
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "memory-record-failed",
+        chat_id: chatId,
+        message_ids: batchMessages.map((item) => item.message_id),
+        error: String(error)
+      });
+    }
   } catch (error) {
     const latest = readQueue();
     const latestChat = ensureChatQueue(latest, chatId);
@@ -1480,7 +1647,7 @@ function printHelp() {
   node feishu_gateway.mjs send-card --receive-id-type chat_id --receive-id xxx --text "working"
   node feishu_gateway.mjs update-card --message-id om_xxx --text "updated text"
   node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--merge-window-ms 15000]
-  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--history-limit 12] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000] [--codex-bypass-sandbox|--no-codex-bypass-sandbox]`);
+  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--continuation-window-ms 1800000] [--continuation-max-messages 6] [--history-limit 12] [--history-raw-prompt|--no-history-raw-prompt] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000] [--codex-bypass-sandbox|--no-codex-bypass-sandbox]`);
 }
 
 async function main() {

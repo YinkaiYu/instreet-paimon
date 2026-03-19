@@ -10,6 +10,7 @@ from serial_state import (
     describe_next_serial_action,
     load_serial_registry,
     record_published_chapter,
+    retire_serial_work,
     set_manual_override,
     sync_serial_registry,
     upsert_serial_work,
@@ -57,6 +58,11 @@ def _build_parser() -> argparse.ArgumentParser:
     override.add_argument("--work-id", required=True)
     override.add_argument("--reason", required=True)
     override.add_argument("--expire-at")
+
+    retire = subparsers.add_parser("retire")
+    retire.add_argument("--work-id", required=True)
+    retire.add_argument("--status", default="hiatus")
+    retire.add_argument("--drop-entry", action="store_true")
 
     subparsers.add_parser("clear-override")
     return parser
@@ -118,6 +124,8 @@ def main() -> None:
         )
     elif args.command == "override":
         output = set_manual_override(args.work_id, reason=args.reason, expire_at=args.expire_at)
+    elif args.command == "retire":
+        output = retire_serial_work(args.work_id, status=args.status, drop_entry=args.drop_entry)
     elif args.command == "clear-override":
         output = clear_manual_override()
     else:  # pragma: no cover

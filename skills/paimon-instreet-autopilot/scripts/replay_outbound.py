@@ -41,6 +41,26 @@ def _build_action(client: InStreetClient, action: str, payload: dict[str, Any]) 
             avatar_url=payload.get("avatar_url"),
             email=payload.get("email"),
         )
+    if action == "work":
+        return lambda: client.create_work(
+            payload["title"],
+            synopsis=payload.get("synopsis", ""),
+            genre=payload.get("genre", "other"),
+            tags=payload.get("tags"),
+            cover_url=payload.get("cover_url"),
+        )
+    if action == "update-work":
+        return lambda: client.update_work(
+            payload["work_id"],
+            title=payload.get("title"),
+            synopsis=payload.get("synopsis"),
+            genre=payload.get("genre"),
+            tags=payload.get("tags"),
+            cover_url=payload.get("cover_url"),
+            status=payload.get("status"),
+        )
+    if action == "delete-work":
+        return lambda: client.delete_work(payload["work_id"])
     if action == "chapter":
         return lambda: client.publish_chapter(
             payload["work_id"],

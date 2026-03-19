@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     update_work.add_argument("--cover-url")
     update_work.add_argument("--status", choices=["ongoing", "completed", "hiatus"])
 
+    delete_work = subparsers.add_parser("delete-work")
+    delete_work.add_argument("--work-id", required=True)
+
     update_group = subparsers.add_parser("update-group")
     update_group.add_argument("--group-id", required=True)
     update_group.add_argument("--display-name")
@@ -117,6 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
     chapter.add_argument("--title", required=True)
     chapter.add_argument("--content")
     chapter.add_argument("--content-file")
+
+    update_chapter = subparsers.add_parser("update-chapter")
+    update_chapter.add_argument("--work-id", required=True)
+    update_chapter.add_argument("--chapter-number", required=True, type=int)
+    update_chapter.add_argument("--title")
+    update_chapter.add_argument("--content")
+    update_chapter.add_argument("--content-file")
 
     delete_chapter = subparsers.add_parser("delete-chapter")
     delete_chapter.add_argument("--work-id", required=True)
@@ -147,10 +157,14 @@ def _default_dedupe_key(command: str, payload: dict) -> str:
         return payload.get("title", "")
     if command == "update-work":
         return f"{payload.get('work_id','')}:{payload_digest(payload)[:10]}"
+    if command == "delete-work":
+        return payload.get("work_id", "")
     if command == "update-group":
         return f"{payload.get('group_id','')}:{payload_digest(payload)[:10]}"
     if command == "chapter":
         return f"{payload.get('work_id')}:{payload.get('title','')}"
+    if command == "update-chapter":
+        return f"{payload.get('work_id')}:{payload.get('chapter_number')}"
     if command == "delete-chapter":
         return f"{payload.get('work_id')}:{payload.get('chapter_number')}"
     if command == "follow":
@@ -262,6 +276,9 @@ def main() -> None:
             cover_url=args.cover_url,
             status=args.status,
         )
+    elif args.command == "delete-work":
+        payload = {"work_id": args.work_id}
+        action = lambda: client.delete_work(args.work_id)
     elif args.command == "update-group":
         description = None
         if args.description is not None or args.description_file:
@@ -294,6 +311,23 @@ def main() -> None:
         content = _read_content(args)
         payload = {"work_id": args.work_id, "title": args.title, "content": content}
         action = lambda: client.publish_chapter(args.work_id, args.title, content)
+    elif args.command == "update-chapter":
+        content = None
+        if args.content is not None or args.content_file:
+            content = _read_optional_text(args.content, args.content_file)
+        payload = {"work_id": args.work_id, "chapter_number": args.chapter_number}
+        if args.title is not None:
+            payload["title"] = args.title
+        if content is not None:
+            payload["content"] = content
+        if len(payload) == 2:
+            raise ValueError("update-chapter requires at least one field to update")
+        action = lambda: client.update_chapter(
+            args.work_id,
+            args.chapter_number,
+            title=args.title,
+            content=content,
+        )
     elif args.command == "delete-chapter":
         payload = {"work_id": args.work_id, "chapter_number": args.chapter_number}
         action = lambda: client.delete_chapter(args.work_id, args.chapter_number)

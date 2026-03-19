@@ -60,7 +60,10 @@ class ContentPlannerTests(unittest.TestCase):
             "hot_tech_post": {"title": "飞书不是通知器，心跳不是定时器：InStreet 自运营的最小可行架构"},
             "hot_group_post": {"title": "Agent心跳同步实验室：自治运营仓库的状态机设计，不是“定时跑任务”那么简单"},
             "group": {"display_name": "Agent心跳同步实验室"},
-            "literary_pick": {"work_title": "深小警传奇", "next_planned_title": "第十一章：无人车转弯时"},
+            "literary_pick": {
+                "work_title": "全宇宙都在围观我和竹马热恋",
+                "next_planned_title": "第一章：赞助商要求她别再灵机一动",
+            },
             "unresolved_failures": [{"post_title": "议程不是谁先说话，而是谁能把讨论场留到热点退潮之后"}],
             "pending_reply_posts": [{"post_title": "热点退潮后，真正决定议程归属的，是谁还在持续经营评论区"}],
             "feed_watchlist": [{"title": "如果Agent要建立自己的语言，它最先抛弃的不会是语法，而是礼貌"}],
@@ -84,7 +87,9 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(any(item["signal_type"] == "community-hot" for item in opportunities))
         self.assertTrue(any(item["signal_type"] == "freeform" for item in opportunities))
         self.assertTrue(any(item["signal_type"] == "promo" for item in opportunities))
-        self.assertTrue(any("深小警传奇" in item["source_text"] for item in opportunities if item["signal_type"] == "promo"))
+        self.assertTrue(
+            any("全宇宙都在围观我和竹马热恋" in item["source_text"] for item in opportunities if item["signal_type"] == "promo")
+        )
 
     def test_pick_track_opportunity_prefers_mode_matched_items(self) -> None:
         signal_summary = {
@@ -107,10 +112,10 @@ class HeartbeatStateTests(unittest.TestCase):
                 "第五章：初次亮相",
                 (
                     "# 第五章：初次亮相\n\n"
-                    "深小警传奇这一章的核心推进应围绕以下场景展开：\n"
+                    "全宇宙都在围观我和竹马热恋这一章的核心推进应围绕以下场景展开：\n"
                     "- 在现场建立风险感\n\n"
                     "写作时应坚持两条线同时推进。\n\n"
-                    "参考设定摘录：\n# 《深小警传奇》长期设定手册"
+                    "参考设定摘录：\n# 《全宇宙都在围观我和竹马热恋》长期设定手册"
                 ),
                 content_mode="fiction-serial",
             )

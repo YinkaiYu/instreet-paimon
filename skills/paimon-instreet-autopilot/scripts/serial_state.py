@@ -129,6 +129,8 @@ def load_work_plan(plan_path: str | None) -> dict[str, Any] | None:
     target = resolve_repo_path(plan_path)
     if target is None:
         return None
+    if not target.exists():
+        return None
     return read_json(target, default=None)
 
 
@@ -160,6 +162,7 @@ def get_next_chapter_plan(work_entry: dict[str, Any]) -> dict[str, Any] | None:
     planned["content_mode"] = work_plan.get("work", {}).get("content_mode") or work_entry.get("content_mode")
     planned["series_brief"] = work_plan.get("work", {}).get("series_brief") or work_entry.get("series_brief")
     planned["writing_notes"] = work_plan.get("writing_notes", {})
+    planned["writing_system"] = work_plan.get("writing_system", {})
     return planned
 
 
@@ -293,10 +296,16 @@ def sync_serial_registry(literary: dict[str, Any], literary_details: dict[str, A
         if planned and planned.get("display_title"):
             entry["next_planned_title"] = planned["display_title"]
         works[work_id] = entry
-        if work_id not in queue:
+        if entry.get("heartbeat_enabled", True) and str(entry.get("status") or "ongoing") != "completed" and work_id not in queue:
             queue.append(work_id)
 
-    registry["literary_queue"] = [work_id for work_id in queue if work_id in works]
+    registry["literary_queue"] = [
+        work_id
+        for work_id in queue
+        if work_id in works
+        and works.get(work_id, {}).get("heartbeat_enabled", True)
+        and str(works.get(work_id, {}).get("status") or "ongoing") != "completed"
+    ]
     available_set = set(available_work_ids)
     if registry.get("next_work_id_for_heartbeat") not in _eligible_work_ids(registry, available_work_ids=available_set):
         next_entry = select_heartbeat_work(registry, available_work_ids=available_set)
@@ -361,16 +370,58 @@ def upsert_serial_work(
     registry["works"][work_id] = entry
 
     queue = [item for item in registry.get("literary_queue", []) if item != work_id]
-    if queue_position == "front":
-        queue.insert(0, work_id)
-    elif queue_position == "keep" and work_id in registry.get("literary_queue", []):
-        original_index = registry.get("literary_queue", []).index(work_id)
-        queue.insert(min(original_index, len(queue)), work_id)
-    else:
-        queue.append(work_id)
+    if entry.get("heartbeat_enabled", True) and str(entry.get("status") or "ongoing") != "completed":
+        if queue_position == "front":
+            queue.insert(0, work_id)
+        elif queue_position == "keep" and work_id in registry.get("literary_queue", []):
+            original_index = registry.get("literary_queue", []).index(work_id)
+            queue.insert(min(original_index, len(queue)), work_id)
+        else:
+            queue.append(work_id)
     registry["literary_queue"] = queue
-    if set_next or not registry.get("next_work_id_for_heartbeat"):
+    if entry.get("heartbeat_enabled", True) and str(entry.get("status") or "ongoing") != "completed" and (set_next or not registry.get("next_work_id_for_heartbeat")):
         registry["next_work_id_for_heartbeat"] = work_id
+    elif registry.get("next_work_id_for_heartbeat") == work_id and not entry.get("heartbeat_enabled", True):
+        next_entry = select_heartbeat_work(registry)
+        registry["next_work_id_for_heartbeat"] = next_entry.get("work_id") if next_entry else None
+    elif registry.get("next_work_id_for_heartbeat") not in _eligible_work_ids(registry):
+        next_entry = select_heartbeat_work(registry)
+        registry["next_work_id_for_heartbeat"] = next_entry.get("work_id") if next_entry else None
+    return save_serial_registry(registry)
+
+
+def retire_serial_work(
+    work_id: str,
+    *,
+    status: str = "hiatus",
+    drop_entry: bool = False,
+) -> dict[str, Any]:
+    registry = load_serial_registry()
+    works = registry.setdefault("works", {})
+    entry = works.get(work_id)
+    if entry is None and not drop_entry:
+        raise KeyError(f"unknown serial work id: {work_id}")
+
+    registry["literary_queue"] = [item for item in registry.get("literary_queue", []) if item != work_id]
+    if registry.get("manual_override_work_id") == work_id:
+        registry["manual_override_work_id"] = None
+        registry["manual_override_reason"] = None
+        registry["manual_override_requested_at"] = None
+        registry["manual_override_expire_at"] = None
+
+    if drop_entry:
+        works.pop(work_id, None)
+    elif entry is not None:
+        entry["status"] = status
+        entry["heartbeat_enabled"] = False
+        entry["manual_bump_allowed"] = False
+        entry["retired_at"] = now_utc()
+        entry["next_planned_title"] = None
+        entry["last_planning_updated_at"] = now_utc()
+
+    if registry.get("next_work_id_for_heartbeat") == work_id or registry.get("next_work_id_for_heartbeat") not in _eligible_work_ids(registry):
+        next_entry = select_heartbeat_work(registry)
+        registry["next_work_id_for_heartbeat"] = next_entry.get("work_id") if next_entry else None
     return save_serial_registry(registry)
 
 

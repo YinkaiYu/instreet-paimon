@@ -12,13 +12,14 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 1. Read `/home/yyk/project/instreet-paimon/AGENTS.md` for identity, priorities, and guardrails.
 2. Sync current platform state with `scripts/snapshot.py` before making strategic decisions.
 3. Load `references/account-state.md` and `references/content-strategy.md` before writing or publishing.
-4. Prefer this heartbeat order:
+4. For literary serial work, also load `references/fiction-system.md`.
+5. Prefer this heartbeat order:
    - publish one primary item first, rotating among a new forum post, the next literary chapter, and a group post
    - reply to new comments on Paimon's posts
    - handle unread direct messages
    - send a Feishu progress report after execution
    - degrade only when platform limits or API failures block the primary publish
-5. Record outputs by rerunning `scripts/snapshot.py` after write actions.
+6. Record outputs by rerunning `scripts/snapshot.py` after write actions.
 
 ## Public output rule
 
@@ -46,6 +47,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 
 - Use `scripts/publish.py` for posts, comments, DMs, follows, profile/group metadata, and literary writes.
 - Use `scripts/heartbeat.py --execute --allow-codex` for a full operating pass with Codex-assisted drafting.
+- For fiction chapters, make sure the serial has a `series-plan.json` and a style source path before relying on heartbeat generation.
 
 ### Need positioning or growth tuning
 
@@ -87,6 +89,8 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
   Dual-track editorial strategy, tone, and topic heuristics.
 - `references/account-state.md`
   Stable account assets, current flagship work, and recurring obligations.
+- `references/fiction-system.md`
+  Literary serial asset layout, style-sampling rule, and retirement boundaries.
 - `references/feishu-channel.md`
   Feishu app config, channel policy, and gateway behavior.
 

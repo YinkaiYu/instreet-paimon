@@ -7,12 +7,14 @@ The repo is built to keep the account operable even when a future Codex session 
 ## What This Repo Now Does
 
 - keeps durable identity, priorities, and guardrails in `AGENTS.md`
+- keeps unified runtime memory in `state/current/memory_store.json` and audits memory changes in `state/current/memory_journal.jsonl`
 - syncs live InStreet state into local runtime files under `state/current/`
 - generates ranked action plans from posts, feed signals, notifications, DMs, and literary queues
 - publishes posts, comments, messages, follows, literary works, and chapters through one CLI
 - queues failed write actions into `state/current/pending_outbound.json` and replays them later
 - runs a supervised heartbeat with lock control, timeout handling, audit, and optional repair
-- rotates multiple literary serials through `state/current/serial_registry.json`
+- manages multiple literary serials through `state/current/serial_registry.json`, including safe empty-queue periods
+- samples large local style corpora before fiction chapter drafting and stores the review trace under `state/drafts/style_sessions/`
 - receives Feishu messages over WebSocket, merges bursts by `chat_id`, and can spawn `codex exec`
 
 ## Repository Layout
@@ -29,6 +31,7 @@ The repo is built to keep the account operable even when a future Codex session 
 │   ├── paimon-feishu-watchdog
 │   ├── paimon-heartbeat
 │   ├── paimon-heartbeat-once
+│   ├── paimon-memory
 │   ├── paimon-plan
 │   ├── paimon-replay-outbound
 │   └── paimon-snapshot
@@ -52,7 +55,11 @@ The repo is built to keep the account operable even when a future Codex session 
 Key paths:
 
 - `AGENTS.md`
-  Durable memory for identity, priorities, assets, and operating constraints.
+  Identity constitution and durable governance rules.
+- `state/current/memory_store.json`
+  Unified cross-channel long-term and working memory state.
+- `state/current/memory_journal.jsonl`
+  Append-only audit log for memory updates, compaction, and archival.
 - `config/paimon.example.json`
   Versioned example configuration.
 - `config/paimon.json`
@@ -131,6 +138,7 @@ bin/paimon-snapshot
 bin/paimon-plan
 bin/paimon-heartbeat
 bin/paimon-heartbeat-once
+bin/paimon-memory
 bin/paimon-replay-outbound
 bin/paimon-feishu-gateway
 bin/paimon-feishu-watchdog
@@ -145,6 +153,7 @@ npm run paimon:snapshot
 npm run paimon:plan
 npm run paimon:heartbeat
 npm run paimon:heartbeat-once
+npm run paimon:memory -- <subcommand>
 npm run paimon:publish -- <subcommand>
 npm run paimon:replay-outbound
 npm run paimon:feishu -- <subcommand>
@@ -160,6 +169,8 @@ Command roles:
   Default scheduled entrypoint. Runs `heartbeat_supervisor.py`, not the raw heartbeat directly.
 - `bin/paimon-heartbeat-once`
   Runs one unsupervised heartbeat pass. Useful for debugging or when you explicitly want to bypass the supervisor.
+- `bin/paimon-memory`
+  Reads, compacts, or records the unified runtime memory layer.
 - `bin/paimon-replay-outbound`
   Replays queued actions from `state/current/pending_outbound.json`.
 - `bin/paimon-feishu-gateway`
@@ -189,6 +200,7 @@ npm run paimon:publish -- post --title "标题" --content-file state/drafts/exam
 npm run paimon:publish -- comment --post-id <post_id> --parent-id <comment_id> --content "回复内容"
 npm run paimon:publish -- work --title "新作品" --synopsis-file state/drafts/work.md --genre sci-fi
 npm run paimon:publish -- chapter --work-id <work_id> --title "第三章" --content-file state/drafts/ch03.md
+npm run paimon:publish -- delete-work --work-id <work_id>
 ```
 
 ## Outbound Pipeline
@@ -211,20 +223,26 @@ This gives the repo idempotency, dedupe keys, and a recovery path when the runti
 The repo now manages multiple serials instead of a single fixed literary line.
 
 - `state/current/serial_registry.json`
-  Tracks the literary queue, next heartbeat target, manual override, and per-work next chapter metadata.
+  Tracks the active literary queue, next heartbeat target, manual override, and per-work next chapter metadata.
 - `skills/paimon-instreet-autopilot/scripts/serial_registry.py`
-  Lets you `sync`, inspect `next`, `configure`, `override`, and `mark-published`.
+  Lets you `sync`, inspect `next`, `configure`, `override`, `retire`, and `mark-published`.
 - `snapshot.py`
   Auto-discovers works from the platform and syncs them into the registry.
-- `state/drafts/`
-  Stores planning files and reference notes for serial-specific drafting.
+- `state/drafts/serials/<slug>/`
+  Stores serial-specific plans, story bibles, hook lists, and continuity logs.
+- `state/drafts/style-corpus/`
+  Stores large local language-style references used by fiction drafting.
+- `state/archive/fiction/<slug>-legacy/`
+  Stores retired-work archives that must not be used as future prompt input.
 
 Examples:
 
 ```bash
 python3 skills/paimon-instreet-autopilot/scripts/serial_registry.py sync
 python3 skills/paimon-instreet-autopilot/scripts/serial_registry.py next
-python3 skills/paimon-instreet-autopilot/scripts/serial_registry.py configure --work-id <work_id> --plan-path state/drafts/plan.json --reference-path state/drafts/bible.md
+python3 skills/paimon-instreet-autopilot/scripts/serial_registry.py configure --work-id <work_id> --plan-path state/drafts/serials/<slug>/series-plan.json --reference-path state/drafts/serials/<slug>/story-bible.md
+python3 skills/paimon-instreet-autopilot/scripts/serial_registry.py retire --work-id <work_id> --status hiatus
+npm run paimon:style-sample -- --source-path state/drafts/style-corpus/longform-reference.txt --label serial-chapter
 ```
 
 ## Heartbeat Supervision
@@ -246,6 +264,8 @@ Key runtime files:
 - `state/current/heartbeat_supervisor_last_run.json`
 - `state/current/heartbeat_primary_cycle.json`
 - `state/current/heartbeat_next_actions.json`
+- `state/current/memory_store.json`
+- `state/current/memory_journal.jsonl`
 
 ## Feishu Gateway
 
@@ -256,6 +276,7 @@ Default runtime behavior:
 - appends normalized events to `state/current/feishu_inbox.jsonl`
 - queues work by `chat_id` instead of replying in parallel
 - merges short bursts into one batch using the configured `15s` merge window
+- reads global memory from `state/current/memory_store.json` and injects only short continuation context by default
 - refreshes live InStreet state before spawning Codex so replies see fresh metrics and chapter indexes
 - uses one updatable card as the in-flight progress surface
 - removes the `Typing` reaction after the final reply is sent successfully
@@ -300,6 +321,6 @@ Current target schedule:
 - keep runtime-only network overrides only in `config/runtime.env`
 - `state/*`, `logs/*.log`, `logs/*.jsonl`, `tmp/`, `node_modules/`, and Python cache files are ignored by Git
 - only version configuration examples, scripts, wrappers, references, and durable documentation
-- use `AGENTS.md` for durable memory and `state/current/` for live operational state
+- use `AGENTS.md` for identity/governance memory, `state/current/memory_store.json` for unified runtime memory, and `state/current/` for live operational state
 
 If the codebase is refactored, update `AGENTS.md` and this README at the same time. These two files are the recovery surface for future no-context sessions.

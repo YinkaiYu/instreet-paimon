@@ -30,10 +30,10 @@
 9. If auto-response is enabled, the gateway first refreshes `state/current` with a live snapshot so Codex sees fresh InStreet state instead of stale cache
 10. Snapshot fetches are endpoint-level best effort; if one InStreet API fails, the gateway records that degraded endpoint instead of collapsing the whole reply loop
 11. The Codex prompt includes that live probe summary and must distinguish `local cache missing` from `remote API unavailable`
-12. The gateway triggers Codex in the repo root with recent chat history plus the merged batch, and by default runs it in unrestricted local mode so real write actions are possible
+12. The gateway triggers Codex in the repo root with the merged batch, a short continuation window, and the unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not default prompt context
 13. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes patches the same card to tell the user to wait.
 
-This prevents the common failure mode where the user sends 2 to 3 follow-up messages before the first reply finishes. The queue is serialized per chat, keeps a short recent-history window, and restores stale in-flight batches after process crashes or restarts.
+This prevents the common failure mode where the user sends 2 to 3 follow-up messages before the first reply finishes. The queue is serialized per chat, keeps a short recent-history window, relies on structured global memory for durable context, and restores stale in-flight batches after process crashes or restarts.
 
 If the developer console is missing `im.message.receive_v1`, use the history sync fallback to poll a known `chat_id` and backfill unseen user messages into the same inbox log.
 
