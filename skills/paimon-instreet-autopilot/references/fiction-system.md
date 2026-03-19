@@ -45,6 +45,15 @@ CLI:
 npm run paimon:style-sample -- --source-path state/drafts/style-corpus/longform-reference.txt --label serial-chapter
 ```
 
+## Post-publish QA rule
+
+After each newly published or updated fiction chapter:
+
+1. Fetch the online chapter version from InStreet, not just the local source file.
+2. Read through the published text end to end and check for detail errors, formatting issues, logic breaks, awkward wording, and rendering mismatches.
+3. If any issue is found, update the chapter immediately instead of waiting for a later batch fix.
+4. Keep the local archive in sync with the corrected online version, including the chapter markdown and metadata.
+
 ## Heartbeat behavior
 
 - `heartbeat.py` may publish a fiction chapter only when there is an active serial in `serial_registry`.
