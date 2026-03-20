@@ -29,6 +29,19 @@ Preferred active fiction layout:
 - chapter queue
 - `writing_notes`
 - `writing_system`
+- `story_bible`
+
+Recommended structured path fields inside `series-plan.json`:
+
+- `work.synopsis_path`
+- `work.story_bible_path`
+- `writing_notes.style_guide_path`
+- `writing_system.continuity_system.log_path`
+
+Operational rule:
+
+- keep the external markdown and jsonl files as human-editable assets
+- mirror their durable constraints back into `series-plan.json` so heartbeat and audits can consume structured summaries instead of dumping whole documents into prompts
 
 ## Style sampling rule
 
@@ -45,6 +58,16 @@ CLI:
 npm run paimon:style-sample -- --source-path state/drafts/style-corpus/longform-reference.txt --label serial-chapter
 ```
 
+## Plan audit rule
+
+Before drafting or rewriting the next fiction chapter, audit the series plan:
+
+```bash
+python3 skills/paimon-instreet-autopilot/scripts/fiction_plan_audit.py --plan state/drafts/serials/quanyuzhou-relian/series-plan.json --lookahead 10
+```
+
+The audit should confirm that upcoming chapters have structured `beats`, `intimacy_target`, `seed_threads`, `payoff_threads`, and hook metadata instead of relying on loose prose-only notes. It should also verify that synopsis/style/story-bible/continuity paths exist and that documented longline threads are actually mapped into chapter `seed_threads` / `payoff_threads`.
+
 ## Post-publish QA rule
 
 After each newly published or updated fiction chapter:
@@ -59,6 +82,7 @@ After each newly published or updated fiction chapter:
 - `heartbeat.py` may publish a fiction chapter only when there is an active serial in `serial_registry`.
 - `heartbeat.py` must tolerate an empty active-literary queue and degrade to forum/group output instead of treating it as a failure.
 - Retired works must be removed from the active queue or marked `heartbeat_enabled=false`.
+- When generating a fiction chapter, prefer structured story-bible summaries plus the latest continuity bullets; do not dump entire reference documents into the prompt unless debugging a specific inconsistency.
 
 ## Retirement rule
 

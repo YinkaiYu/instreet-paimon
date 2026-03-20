@@ -842,13 +842,117 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
     return title, content
 
 
-def _load_reference_excerpt(reference_path: str | None, limit: int = 2600) -> str:
-    if not reference_path:
-        return ""
-    target = REPO_ROOT / reference_path
+def _resolve_text_path(path_value: str | None) -> Path | None:
+    if not path_value:
+        return None
+    target = Path(path_value)
+    if not target.is_absolute():
+        target = REPO_ROOT / target
     if not target.exists():
+        return None
+    return target
+
+
+def _load_reference_excerpt(reference_path: str | None, limit: int = 2600) -> str:
+    target = _resolve_text_path(reference_path)
+    if target is None:
         return ""
     return truncate_text(target.read_text(encoding="utf-8"), limit)
+
+
+def _load_continuity_excerpt(log_path: str | None, *, limit: int = 1400, max_items: int = 8) -> str:
+    target = _resolve_text_path(log_path)
+    if target is None:
+        return ""
+    entries: list[str] = []
+    for raw in target.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line:
+            entries.append(line)
+    if not entries:
+        return ""
+
+    rendered: list[str] = []
+    for raw in entries[-max_items:]:
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            rendered.append(f"- {truncate_text(raw, 180)}")
+            continue
+        entry_type = str(item.get("type") or "note").strip()
+        chapter_number = item.get("chapter_number")
+        chapter_label = ""
+        if chapter_number is not None:
+            try:
+                chapter_label = f"ch{int(chapter_number)} "
+            except (TypeError, ValueError):
+                chapter_label = ""
+        content = truncate_text(str(item.get("content") or ""), 180)
+        if content:
+            rendered.append(f"- {chapter_label}{entry_type}: {content}")
+        else:
+            rendered.append(f"- {chapter_label}{entry_type}")
+    return truncate_text("\n".join(rendered), limit)
+
+
+def _format_story_bible_excerpt(story_bible: dict[str, Any] | None, *, limit: int = 1800) -> str:
+    payload = story_bible or {}
+    if not payload:
+        return ""
+    lines: list[str] = []
+
+    setting = payload.get("setting_anchor") or {}
+    if setting:
+        lines.append(
+            f"- 场景锚点：{setting.get('primary_city') or '未指定主舞台'}；"
+            f"{setting.get('geo_policy') or ''} {setting.get('longform_shape') or ''}".strip()
+        )
+
+    protagonists = payload.get("protagonists") or []
+    for item in protagonists[:2]:
+        name = str(item.get("name") or "").strip()
+        identity = str(item.get("identity") or "").strip()
+        temperament = str(item.get("temperament") or "").strip()
+        arc_duties = " / ".join(_listify(item.get("arc_duties"))[:2])
+        if name:
+            lines.append(
+                f"- 主角：{name}；身份：{identity or '未写'}；气质：{temperament or '未写'}；当前长线职责：{arc_duties or '保持主线推进。'}"
+            )
+
+    relationship_rules = _listify(payload.get("relationship_rules"))
+    if relationship_rules:
+        lines.append("关系底层规则：")
+        lines.extend(f"- {item}" for item in relationship_rules[:4])
+
+    organizations = payload.get("organizations") or []
+    if organizations:
+        lines.append("关键组织：")
+        for item in organizations[:5]:
+            name = str(item.get("name") or "").strip()
+            function = str(item.get("function") or "").strip()
+            constraint = str(item.get("constraint") or "").strip()
+            lines.append(f"- {name}：{function} {constraint}".strip())
+
+    world_rule_labels = _listify(payload.get("world_rule_labels"))
+    if world_rule_labels:
+        lines.append(f"- 世界规则目录：{'、'.join(world_rule_labels[:8])}")
+
+    terminology_rules = _listify(payload.get("terminology_rules"))
+    if terminology_rules:
+        lines.append("术语上桌规则：")
+        lines.extend(f"- {item}" for item in terminology_rules[:3])
+
+    ending_constraints = _listify(payload.get("ending_constraints"))
+    if ending_constraints:
+        lines.append("终局约束：")
+        lines.extend(f"- {item}" for item in ending_constraints[:4])
+
+    style_bans = _listify(payload.get("style_bans"))
+    if style_bans:
+        lines.append("人物与结构禁令：")
+        lines.extend(f"- {item}" for item in style_bans[:5])
+
+    return truncate_text("\n".join(line for line in lines if line.strip()), limit)
 
 
 def _listify(value: Any) -> list[str]:
@@ -865,6 +969,187 @@ def _format_rule_block(items: list[str], *, fallback: str) -> str:
     if not cleaned:
         return f"- {fallback}"
     return "\n".join(f"- {item}" for item in cleaned)
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _chapter_turn_checkpoint(chapter_number: int) -> str:
+    if chapter_number > 0 and chapter_number % 2 == 0:
+        return "这是当前双章弧光的引爆章，必须落下不可逆决定、公开暴露、规则升级或关系改写，不能只把气氛抬高。"
+    return "这是当前双章弧光的起压章，必须把冲突、欲望和规则边界都往下一章推，不能就地化解。"
+
+
+def _volume_checkpoint(chapter_number: int) -> str:
+    if chapter_number > 0 and chapter_number % 8 == 0:
+        return "这是卷末升级章，必须同时完成世界层级升级、关系升级和一次可感知的亲密升温，不能只揭晓设定。"
+    if chapter_number > 0 and chapter_number % 8 == 7:
+        return "下一章就是卷末升级章，本章要把局势和亲密张力一起压到无法后退。"
+    return "本章要继续为当前卷的层级升级和关系升级积累压力。"
+
+
+def _intimacy_scale_map(writing_system: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    mapping: dict[int, dict[str, Any]] = {}
+    for item in writing_system.get("intimacy_scale", []) or []:
+        level = _coerce_int(item.get("level"), 0)
+        if level > 0:
+            mapping[level] = dict(item)
+    return mapping
+
+
+def _match_intimacy_progression(chapter_number: int, writing_system: dict[str, Any]) -> dict[str, Any]:
+    for item in writing_system.get("intimacy_progression", []) or []:
+        start = _coerce_int(item.get("chapter_start"), 0)
+        end = _coerce_int(item.get("chapter_end"), 0)
+        if start and end and start <= chapter_number <= end:
+            return dict(item)
+    return {}
+
+
+def _default_intimacy_cues(level: int) -> list[str]:
+    if level >= 5:
+        return ["床", "被子", "余温", "呼吸", "掌心", "后腰", "欲望", "吻"]
+    if level >= 4:
+        return ["床", "床边", "被子", "余温", "呼吸", "掌心", "后腰", "衣料", "吻"]
+    if level >= 3:
+        return ["吻", "呼吸", "腰", "后腰", "掌心", "腿", "贴", "压近"]
+    if level >= 2:
+        return ["抱", "亲", "吻", "手", "腰", "腿", "靠", "贴"]
+    return ["手", "肩", "靠", "贴"]
+
+
+def _body_heat_stage(chapter_number: int, writing_system: dict[str, Any]) -> str:
+    ladder = _listify(writing_system.get("body_heat_ladder"))
+    if not ladder:
+        return "当前阶段要让亲密热度和生活甜度一起升级。"
+    index = max(0, min(len(ladder) - 1, (max(1, chapter_number) - 1) // 8))
+    return ladder[index]
+
+
+def _resolve_intimacy_target(
+    chapter_number: int,
+    chapter_plan: dict[str, Any] | None,
+    writing_system: dict[str, Any],
+) -> dict[str, Any]:
+    progression = _match_intimacy_progression(chapter_number, writing_system)
+    target = dict(progression)
+    explicit = (chapter_plan or {}).get("intimacy_target") or {}
+    if isinstance(explicit, dict):
+        target.update(explicit)
+    level = _coerce_int(
+        target.get("level"),
+        _coerce_int(target.get("default_level"), 1),
+    )
+    target["level"] = max(1, level)
+    target.setdefault("min_validation_hits", 2 if level < 4 else 3)
+    target["validation_cues"] = _listify(target.get("validation_cues")) or _default_intimacy_cues(level)
+    scale_entry = _intimacy_scale_map(writing_system).get(level, {})
+    if scale_entry:
+        target.setdefault("label", scale_entry.get("label"))
+        target.setdefault("page_expectation", scale_entry.get("page_expectation"))
+        target.setdefault("default_function", scale_entry.get("function"))
+    return target
+
+
+def _format_intimacy_target(target: dict[str, Any]) -> str:
+    if not target:
+        return "- 亲密戏必须参与剧情推进，不能写成福利插播。"
+    lines = [
+        f"- 当前亲密热度目标：L{_coerce_int(target.get('level'), 1)} {target.get('label') or ''}".rstrip(),
+        f"- 页面要求：{target.get('on_page_expectation') or target.get('page_expectation') or '至少写清身体距离、动作和事后反应。'}",
+        f"- 场景功能：{target.get('function') or target.get('default_function') or '让亲密直接改变决定、规则或关系。'}",
+        f"- 本章完成标准：{target.get('required_outcome') or target.get('must_land') or '亲密升级必须让读者明确感到关系和局势都被改写。'}",
+    ]
+    return "\n".join(lines)
+
+
+def _required_fiction_contract_fields(writing_system: dict[str, Any]) -> list[str]:
+    execution_blueprint = writing_system.get("execution_blueprint") or {}
+    configured = _listify(execution_blueprint.get("required_chapter_fields"))
+    if configured:
+        return [str(item) for item in configured if str(item).strip()]
+    return [
+        "summary",
+        "key_conflict",
+        "hook",
+        "romance_beat",
+        "beats",
+        "intimacy_target",
+        "seed_threads",
+        "payoff_threads",
+        "world_progress",
+        "relationship_progress",
+        "sweetness_progress",
+        "turn_role",
+        "pair_payoff",
+        "volume_upgrade_checkpoint",
+        "hook_type",
+        "reversal_type",
+        "world_layer",
+    ]
+
+
+def _missing_fiction_contract_fields(chapter_plan: dict[str, Any] | None, writing_system: dict[str, Any]) -> list[str]:
+    plan = chapter_plan or {}
+    missing: list[str] = []
+    for key in _required_fiction_contract_fields(writing_system):
+        value = plan.get(key)
+        if value is None:
+            missing.append(key)
+            continue
+        if isinstance(value, str) and not value.strip():
+            missing.append(key)
+            continue
+        if isinstance(value, list) and not value:
+            missing.append(key)
+            continue
+        if isinstance(value, dict) and not value:
+            missing.append(key)
+            continue
+    return missing
+
+
+def _build_fiction_beats(
+    chapter_number: int,
+    chapter_plan: dict[str, Any] | None,
+    volume_plan: dict[str, Any] | None,
+    intimacy_target: dict[str, Any],
+) -> list[str]:
+    explicit_beats = _listify((chapter_plan or {}).get("beats"))
+    if explicit_beats:
+        return explicit_beats[:4]
+    beats: list[str] = []
+    summary = str((chapter_plan or {}).get("summary") or "").strip()
+    conflict = str((chapter_plan or {}).get("key_conflict") or "").strip()
+    romance_beat = str((chapter_plan or {}).get("romance_beat") or "").strip()
+    hook = str((chapter_plan or {}).get("hook") or "").strip()
+    world_progress = str((chapter_plan or {}).get("world_progress") or "").strip()
+    relationship_progress = str((chapter_plan or {}).get("relationship_progress") or "").strip()
+    sweetness_progress = str((chapter_plan or {}).get("sweetness_progress") or "").strip()
+    if summary:
+        beats.append(f"开场立刻把这个现场点燃：{summary}")
+    if conflict or world_progress:
+        beats.append(f"把本章现实推进和世界升级压实：{conflict}；{world_progress}".strip("；"))
+    if relationship_progress or sweetness_progress or romance_beat:
+        beats.append(
+            f"把关系、甜度和身体动作写到能改局：{relationship_progress}；{sweetness_progress}；{romance_beat}".strip("；")
+        )
+    else:
+        beats.append(f"按 L{_coerce_int(intimacy_target.get('level'), 1)} 热度去写身体靠近、欲望或余温，且要让它真正改变局面。")
+    if hook:
+        beats.append(f"章末必须落到这个钩子上：{hook}")
+    while len(beats) < 4:
+        if len(beats) == 1:
+            beats.append(f"双章节奏检查点：{_chapter_turn_checkpoint(chapter_number)}")
+        elif len(beats) == 2 and volume_plan and volume_plan.get("physical_scene_target"):
+            beats.append(f"不要偏离本卷身体戏目标：{volume_plan.get('physical_scene_target')}")
+        else:
+            beats.append(f"卷内检查点：{_volume_checkpoint(chapter_number)}")
+    return beats[:4]
 
 
 def _fallback_essay_chapter(work_title: str, next_chapter_number: int, last_chapter: dict | None) -> tuple[str, str]:
@@ -892,10 +1177,34 @@ def _fallback_fiction_chapter(
 ) -> tuple[str, str]:
     title = planned_title or f"第{next_chapter_number}章"
     summary = (chapter_plan or {}).get("summary") or "新的场景会迫使角色把爱、判断和世界规则一起推进。"
-    beats = (chapter_plan or {}).get("beats") or []
     writing_notes = (chapter_plan or {}).get("writing_notes") or {}
     writing_system = (chapter_plan or {}).get("writing_system") or {}
-    beat_lines = "\n".join(f"- {item}" for item in beats[:4])
+    volume_plan = (chapter_plan or {}).get("volume_plan") or {}
+    foreshadow_system = writing_system.get("foreshadow_system") or {}
+    hook_system = writing_system.get("hook_system") or {}
+    intimacy_target = _resolve_intimacy_target(next_chapter_number, chapter_plan, writing_system)
+    beats = _build_fiction_beats(next_chapter_number, chapter_plan, volume_plan, intimacy_target)
+    beat_lines = "\n".join(f"- {item}" for item in beats[:5])
+    seed_threads = _format_rule_block(
+        _listify((chapter_plan or {}).get("seed_threads")),
+        fallback="本章至少埋一个后续还能回收的新件。",
+    )
+    payoff_threads = _format_rule_block(
+        _listify((chapter_plan or {}).get("payoff_threads")),
+        fallback="本章至少推动一个既有伏笔往兑现方向走一步。",
+    )
+    hook_rules = _format_rule_block(
+        _listify(hook_system.get("rules")),
+        fallback="场面钩子和章尾钩子都要明确。",
+    )
+    foreshadow_rules = _format_rule_block(
+        _listify(foreshadow_system.get("rules")),
+        fallback="伏笔要能回收，回收也要能反咬下一章。",
+    )
+    sweetness_checklist = _format_rule_block(
+        _listify(writing_notes.get("sweetness_checklist")),
+        fallback="至少命中两个可感知甜点，其中一个要落到身体动作或事后反应。",
+    )
     must_keep = _format_rule_block(
         _listify(writing_notes.get("must_keep")),
         fallback="把甜感、节奏和下一章钩子同时推进。",
@@ -910,6 +1219,15 @@ def _fallback_fiction_chapter(
         f"{work_title}这一章的核心推进应围绕以下场景展开：\n"
         f"{beat_lines or '- 让甜感与事件同时起步\n- 让人物的独特点子改变局面\n- 在结尾留下清晰钩子'}\n\n"
         "写作时要把现场感、亲密互动和世界规则一起推进。男女主关系必须稳定，不靠误会、背叛、分手或廉价虐点制造戏剧。\n\n"
+        f"双章节奏检查点：{_chapter_turn_checkpoint(next_chapter_number)}\n"
+        f"卷内检查点：{_volume_checkpoint(next_chapter_number)}\n\n"
+        f"本章伏笔任务：\n新埋件：\n{seed_threads}\n已埋件推进/回收：\n{payoff_threads}\n规则：\n{foreshadow_rules}\n\n"
+        f"本章钩子任务：\n- 章尾指定钩子：{(chapter_plan or {}).get('hook') or '留出明确新悬念'}\n规则：\n{hook_rules}\n\n"
+        f"本章亲密戏执行要求：\n{_format_intimacy_target(intimacy_target)}\n\n"
+        f"本章甜蜜升级要求：{writing_notes.get('emotional_upgrade_rule') or '甜蜜必须继续升级，不能只重复同一种发糖动作。'}\n\n"
+        f"当前阶段热度阶梯：{_body_heat_stage(next_chapter_number, writing_system)}\n"
+        f"同意与边界规则：{writing_notes.get('consent_rule') or '高热戏必须建立在明确自愿、边界清楚和事后照料上。'}\n"
+        f"甜点检查清单：\n{sweetness_checklist}\n\n"
         f"必须保留：\n{must_keep}\n\n"
         f"明确避免：\n{avoid}\n\n"
         f"元叙事强度：{writing_system.get('meta_narrative_level') or '中强元叙事'}\n"
@@ -935,7 +1253,38 @@ def _fiction_outline_reason(content: str) -> str | None:
     return None
 
 
-def _ensure_publishable_chapter(title: str, content: str, *, content_mode: str) -> None:
+def _fiction_delivery_reason(
+    content: str,
+    *,
+    chapter_number: int,
+    chapter_plan: dict[str, Any] | None,
+    writing_system: dict[str, Any],
+) -> str | None:
+    normalized = re.sub(r"\s+", "", content or "")
+    for phrase in _listify((chapter_plan or {}).get("writing_notes", {}).get("direct_phrase_blacklist")):
+        if len(phrase) < 2:
+            continue
+        if phrase and phrase in normalized:
+            return f"contains blacklisted phrase: {phrase}"
+    target = _resolve_intimacy_target(chapter_number, chapter_plan, writing_system)
+    if not ((chapter_plan or {}).get("romance_beat") or _coerce_int(target.get("level"), 0) >= 2):
+        return None
+    cues = _listify(target.get("validation_cues"))
+    hits = sum(1 for cue in cues if cue and cue in normalized)
+    minimum = max(1, _coerce_int(target.get("min_validation_hits"), 2))
+    if hits < minimum:
+        return f"planned intimacy delivery too weak: matched {hits}/{minimum} cues"
+    return None
+
+
+def _ensure_publishable_chapter(
+    title: str,
+    content: str,
+    *,
+    content_mode: str,
+    chapter_number: int | None = None,
+    chapter_plan: dict[str, Any] | None = None,
+) -> None:
     if not title.strip():
         raise RuntimeError("generated chapter title is empty")
     if not content.strip():
@@ -945,6 +1294,15 @@ def _ensure_publishable_chapter(title: str, content: str, *, content_mode: str) 
     reason = _fiction_outline_reason(content)
     if reason:
         raise RuntimeError(f"fiction chapter rejected: {reason}")
+    if chapter_number is not None:
+        delivery_reason = _fiction_delivery_reason(
+            content,
+            chapter_number=chapter_number,
+            chapter_plan=chapter_plan,
+            writing_system=(chapter_plan or {}).get("writing_system") or {},
+        )
+        if delivery_reason:
+            raise RuntimeError(f"fiction chapter rejected: {delivery_reason}")
 
 
 def _save_unpublished_fiction_draft(
@@ -1083,6 +1441,13 @@ def _generate_chapter(
     if content_mode == "fiction-serial":
         writing_notes = (chapter_plan or {}).get("writing_notes") or {}
         writing_system = (chapter_plan or {}).get("writing_system") or {}
+        volume_plan = (chapter_plan or {}).get("volume_plan") or {}
+        relationship_mainline = (chapter_plan or {}).get("relationship_mainline") or {}
+        story_bible = (chapter_plan or {}).get("story_bible") or {}
+        execution_blueprint = writing_system.get("execution_blueprint") or {}
+        foreshadow_system = writing_system.get("foreshadow_system") or {}
+        hook_system = writing_system.get("hook_system") or {}
+        continuity_system = writing_system.get("continuity_system") or {}
         style_source_path = str(writing_system.get("style_source_path") or "").strip()
         resolved_style_source: Path | None = None
         if style_source_path:
@@ -1101,6 +1466,10 @@ def _generate_chapter(
             )
             style_summary = style_packet.get("style_summary") or style_summary
             style_excerpt = style_packet.get("sample_text") or ""
+        story_bible_excerpt = _format_story_bible_excerpt(story_bible, limit=1500)
+        continuity_excerpt = _load_continuity_excerpt(continuity_system.get("log_path"), limit=1100, max_items=6)
+        foreshadow_excerpt = _load_reference_excerpt(foreshadow_system.get("ledger_path"), limit=1600)
+        hook_excerpt = _load_reference_excerpt(hook_system.get("library_path"), limit=1400)
 
         chapter_length_hint = str(writing_notes.get("chapter_length_hint") or "1800 到 3200")
         must_keep = _format_rule_block(
@@ -1123,7 +1492,83 @@ def _generate_chapter(
             _listify(writing_system.get("forbidden_tropes")),
             fallback="禁止用狗血误会、强行分手、迟钝拉扯和故作深情的虐点顶替剧情。",
         )
-        beats = (chapter_plan or {}).get("beats") or []
+        missing_contract_fields = _missing_fiction_contract_fields(chapter_plan, writing_system)
+        if missing_contract_fields:
+            raise RuntimeError(
+                "fiction chapter plan missing execution contract fields: " + ", ".join(missing_contract_fields)
+            )
+        intimacy_target = _resolve_intimacy_target(next_chapter_number, chapter_plan, writing_system)
+        beats = _build_fiction_beats(next_chapter_number, chapter_plan, volume_plan, intimacy_target)
+        chapter_axes = _format_rule_block(
+            _listify(execution_blueprint.get("chapter_axes")),
+            fallback="现实任务推进、关系推进、世界规则推进、章尾钩子同时在线。",
+        )
+        volume_context = _format_rule_block(
+            [
+                f"当前卷：{volume_plan.get('title')}" if volume_plan.get("title") else "",
+                f"卷摘要：{volume_plan.get('summary')}" if volume_plan.get("summary") else "",
+                f"卷内关系升级：{volume_plan.get('relationship_upgrade')}" if volume_plan.get("relationship_upgrade") else "",
+                f"卷内甜度焦点：{volume_plan.get('sweetness_focus')}" if volume_plan.get("sweetness_focus") else "",
+                f"卷内身体戏目标：{volume_plan.get('physical_scene_target')}" if volume_plan.get("physical_scene_target") else "",
+            ],
+            fallback="让当前卷的世界升级和亲密升级一起推进。",
+        )
+        relationship_context = _format_rule_block(
+            [
+                relationship_mainline.get("core_promise"),
+                relationship_mainline.get("structural_priority"),
+                relationship_mainline.get("sweetness_quota"),
+            ],
+            fallback="感情线和世界线同权，甜感不是奖励而是基础运行态。",
+        )
+        continuity_rules = _format_rule_block(
+            _listify(continuity_system.get("rules")),
+            fallback="后续章节默认继承已发布章节坐实的关系、世界与风格约束。",
+        )
+        seed_threads = _format_rule_block(
+            _listify((chapter_plan or {}).get("seed_threads")),
+            fallback="本章至少埋一个能在后文回收的结构件。",
+        )
+        payoff_threads = _format_rule_block(
+            _listify((chapter_plan or {}).get("payoff_threads")),
+            fallback="本章至少推动一个既有伏笔往回收方向走一步。",
+        )
+        foreshadow_rules = _format_rule_block(
+            _listify(foreshadow_system.get("rules")),
+            fallback="伏笔不能只挂在账本里，必须进正文推进。",
+        )
+        hook_rules = _format_rule_block(
+            _listify(hook_system.get("rules")),
+            fallback="每章至少命中一个场面钩子和一个章尾钩子。",
+        )
+        sweetness_checklist = _format_rule_block(
+            _listify(writing_notes.get("sweetness_checklist")),
+            fallback="至少命中两个甜点，其中一个要落到身体动作或事后反应。",
+        )
+        sweetness_upgrade_vectors = _format_rule_block(
+            _listify(writing_system.get("sweetness_upgrade_vectors")),
+            fallback="偏心、共犯感、照料和共同生活都要继续升级。",
+        )
+        sweetness_upgrade_rule = (
+            ((execution_blueprint.get("sweetness_upgrade_cycle") or {}).get("rule"))
+            or writing_notes.get("emotional_upgrade_rule")
+            or "甜蜜升级不能慢于肉体升级。"
+        )
+        chapter_contract = _format_rule_block(
+            [
+                f"本章世界推进：{(chapter_plan or {}).get('world_progress')}" if (chapter_plan or {}).get("world_progress") else "",
+                f"本章关系推进：{(chapter_plan or {}).get('relationship_progress')}" if (chapter_plan or {}).get("relationship_progress") else "",
+                f"本章甜蜜推进：{(chapter_plan or {}).get('sweetness_progress')}" if (chapter_plan or {}).get("sweetness_progress") else "",
+                f"双章角色：{(chapter_plan or {}).get('turn_role')}" if (chapter_plan or {}).get("turn_role") else "",
+                f"双章落点：{(chapter_plan or {}).get('pair_payoff')}" if (chapter_plan or {}).get("pair_payoff") else "",
+                f"卷末检查点状态：{(chapter_plan or {}).get('volume_upgrade_checkpoint')}" if (chapter_plan or {}).get("volume_upgrade_checkpoint") else "",
+                f"章尾钩子类型：{(chapter_plan or {}).get('hook_type')}" if (chapter_plan or {}).get("hook_type") else "",
+            ],
+            fallback="本章必须显式执行世界推进、关系推进、甜度推进和双章落点。",
+        )
+        intimacy_contract = _format_intimacy_target(intimacy_target)
+        pair_checkpoint = _chapter_turn_checkpoint(next_chapter_number)
+        volume_checkpoint = _volume_checkpoint(next_chapter_number)
 
         def build_fiction_prompt(
             *,
@@ -1147,15 +1592,28 @@ CONTENT:
 6. 这是一部超级甜、纯甜、爽感强的长篇言情。男女主从初中谈恋爱到现在，关系稳定、恩爱、腻歪，不写追妻火葬场，不写分手误会，不写苦情虐恋。
 7. 世界观要宏大，允许中强元叙事和打破第四面墙，但它必须服务人物关系和剧情推进，不能把正文写成设定说明书。
 8. 结尾要留下明确的下一章钩子。
+9. 亲密戏不是福利插播，至少要承担“改变决策 / 触发规则 / 重写命名”中的一个功能。
 
 作品设定摘录：
 {truncate_text(reference_excerpt or "无额外摘录。", reference_limit)}
+
+结构化世界圣经摘要：
+{truncate_text(story_bible_excerpt or "无额外结构化世界圣经摘要。", 1200)}
+
+最近连续性日志：
+{truncate_text(continuity_excerpt or "无额外连续性日志摘录。", 900)}
 
 语言风格复习摘要：
 {style_summary}
 
 语言风格复习片段（只模仿语言节奏与句法，不得借用其中设定和情节）：
 {truncate_text(style_excerpt or "无额外样本。", style_excerpt_limit)}
+
+伏笔账本摘录：
+{truncate_text(foreshadow_excerpt or "无额外账本摘录。", 1000)}
+
+钩子库摘录：
+{truncate_text(hook_excerpt or "无额外钩子摘录。", 900)}
 
 本章计划：
 标题：{planned_title or ""}
@@ -1165,9 +1623,62 @@ CONTENT:
 关键节点：
 {chr(10).join(f"- {item}" for item in beats[:beat_limit]) or "- 用一个具体现场把章节点燃\n- 让女主的奇思妙想改变局面\n- 让男主用稳定、聪明、真诚的方式托住她\n- 在甜感升级时同时推进世界线索"}
 
+双章节奏检查点：
+- {pair_checkpoint}
+
+卷内检查点：
+- {volume_checkpoint}
+
+本章推进 contract：
+{chapter_contract}
+
+本章执行坐标：
+{chapter_axes}
+
+卷内上下文：
+{volume_context}
+
+感情主线底稿：
+{relationship_context}
+
+连续性规则：
+{continuity_rules}
+
+本章伏笔任务：
+新埋件：
+{seed_threads}
+已埋件推进 / 回收：
+{payoff_threads}
+规则：
+{foreshadow_rules}
+
+本章钩子任务：
+- 章尾指定钩子：{(chapter_plan or {}).get("hook") or "留出明确新悬念"}
+规则：
+{hook_rules}
+
+本章甜蜜升级任务：
+- {sweetness_upgrade_rule}
+可用升级方向：
+{sweetness_upgrade_vectors}
+甜点检查清单：
+{sweetness_checklist}
+
+当前阶段热度阶梯：
+- {_body_heat_stage(next_chapter_number, writing_system)}
+
+同意与边界规则：
+- {writing_notes.get("consent_rule") or "高热戏必须建立在明确自愿、边界清楚和事后照料上。"}
+
+本章亲密戏执行要求：
+{intimacy_contract}
+
 长期写作规则：
 - 开场规则：{writing_notes.get("opening_rule") or "用现场、异常事件或人物动作开章。"}
 - 叙事规则：{writing_notes.get("narrative_rule") or "每章都要让关系推进和事件推进同时发生。"}
+- 系统执行规则：{writing_notes.get("system_execution_rule") or "双章转折、卷末扩层和亲密等级都必须显式执行。"}
+- 亲密升级规则：{writing_notes.get("intimacy_velocity_rule") or "亲密升级速度不能慢于世界升级速度。"}
+- 甜蜜升级规则：{writing_notes.get("emotional_upgrade_rule") or "甜蜜升级速度不能慢于肉体升级速度。"}
 - 感情基线：{writing_system.get("relationship_baseline") or "男女主已经相爱很多年，甜是基础状态，不是稀缺奖励。"}
 - 甜度配置：{writing_system.get("romance_heat_profile") or "高糖亲密，允许随剧情推进出现更明确性张力。"}
 - 元叙事强度：{writing_system.get("meta_narrative_level") or "中强元叙事。"}
@@ -1414,7 +1925,13 @@ def _publish_primary_action(
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=chapter_timeout_seconds,
                         )
-                        _ensure_publishable_chapter(generated_title, generated_content, content_mode=content_mode)
+                        _ensure_publishable_chapter(
+                            generated_title,
+                            generated_content,
+                            content_mode=content_mode,
+                            chapter_number=actual_next_chapter_number,
+                            chapter_plan=chapter_plan,
+                        )
                         title, content = generated_title, generated_content
                     except Exception as exc:
                         if content_mode == "fiction-serial":

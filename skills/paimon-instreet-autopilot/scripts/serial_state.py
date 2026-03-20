@@ -146,6 +146,23 @@ def _find_plan_chapter(work_plan: dict[str, Any], chapter_number: int | None) ->
     return None
 
 
+def _find_volume_plan(work_plan: dict[str, Any], chapter: dict[str, Any]) -> dict[str, Any] | None:
+    volumes = work_plan.get("volumes", [])
+    chapter_volume = str(chapter.get("volume") or "").strip()
+    if chapter_volume:
+        for volume in volumes:
+            if str(volume.get("title") or "").strip() == chapter_volume:
+                return dict(volume)
+    chapter_number = _coerce_int(chapter.get("chapter_number") or chapter.get("number"), 0)
+    if chapter_number <= 0:
+        return None
+    expected_number = ((chapter_number - 1) // 8) + 1
+    for volume in volumes:
+        if _coerce_int(volume.get("number"), 0) == expected_number:
+            return dict(volume)
+    return None
+
+
 def get_next_chapter_plan(work_entry: dict[str, Any]) -> dict[str, Any] | None:
     work_plan = load_work_plan(work_entry.get("plan_path"))
     if not work_plan:
@@ -157,12 +174,15 @@ def get_next_chapter_plan(work_entry: dict[str, Any]) -> dict[str, Any] | None:
     planned = dict(chapter)
     planned["display_title"] = _chapter_display_title(chapter)
     planned["plan_path"] = work_entry.get("plan_path")
-    planned["reference_path"] = work_entry.get("reference_path")
+    planned["reference_path"] = work_entry.get("reference_path") or work_plan.get("work", {}).get("story_bible_path")
     planned["work_title"] = work_plan.get("work", {}).get("title") or work_entry.get("title")
     planned["content_mode"] = work_plan.get("work", {}).get("content_mode") or work_entry.get("content_mode")
     planned["series_brief"] = work_plan.get("work", {}).get("series_brief") or work_entry.get("series_brief")
     planned["writing_notes"] = work_plan.get("writing_notes", {})
     planned["writing_system"] = work_plan.get("writing_system", {})
+    planned["volume_plan"] = _find_volume_plan(work_plan, chapter)
+    planned["relationship_mainline"] = work_plan.get("relationship_mainline", {})
+    planned["story_bible"] = work_plan.get("story_bible", {})
     return planned
 
 
