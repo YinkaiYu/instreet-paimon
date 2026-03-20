@@ -25,6 +25,7 @@ const eventsPath = path.join(stateCurrentDir, "feishu_events.jsonl");
 const seenMessagesPath = path.join(stateCurrentDir, "feishu_seen_messages.json");
 const queuePath = path.join(stateCurrentDir, "feishu_queue.json");
 const batchesPath = path.join(stateCurrentDir, "feishu_batches.jsonl");
+const reportTargetPath = path.join(stateCurrentDir, "feishu_report_target.json");
 const chatTimers = new Map();
 const processingChats = new Set();
 let queueSweepTimer = null;
@@ -56,6 +57,20 @@ function readJsonFile(filePath, fallback) {
 function writeJsonFile(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function readReportTargetState() {
+  return readJsonFile(reportTargetPath, {});
+}
+
+function writeReportTargetState(payload) {
+  writeJsonFile(reportTargetPath, payload);
+}
+
+function clearReportTargetState() {
+  if (fs.existsSync(reportTargetPath)) {
+    fs.unlinkSync(reportTargetPath);
+  }
 }
 
 function resolvePythonExecutable() {
@@ -281,13 +296,12 @@ function clampCardText(text, limit = 12000) {
 
 function buildStatusCard(text, options = {}) {
   const status = options.status || "working";
-  const mergedCount = options.mergedCount || 1;
   const title =
     status === "done"
       ? "派蒙回复完成"
       : status === "error"
-        ? "派蒙处理异常"
-        : "派蒙正在处理";
+        ? "派蒙思考中断"
+        : "派蒙正在思考";
   const template =
     status === "done"
       ? "green"
@@ -295,8 +309,7 @@ function buildStatusCard(text, options = {}) {
         ? "red"
         : "blue";
   const noteParts = [
-    status === "done" ? "状态：已完成" : status === "error" ? "状态：异常" : "状态：处理中",
-    `合并消息：${mergedCount} 条`,
+    status === "done" ? "状态：已完成" : status === "error" ? "状态：稍后重试" : "状态：思考中",
     `更新时间：${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`
   ];
   return {
@@ -411,6 +424,7 @@ function extractMessageEvent(data) {
   const root = data.event ?? data;
   const message = root.message ?? {};
   const sender = root.sender ?? {};
+  const mentions = Array.isArray(message.mentions) ? message.mentions : [];
   let parsedContent = {};
   try {
     parsedContent = JSON.parse(message.content || "{}");
@@ -421,9 +435,15 @@ function extractMessageEvent(data) {
     received_at: new Date().toISOString(),
     message_id: message.message_id,
     chat_id: message.chat_id,
+    chat_type: message.chat_type || "",
     message_type: message.message_type,
+    thread_id: message.thread_id || "",
+    parent_id: message.parent_id || "",
+    root_id: message.root_id || "",
     text: parsedContent.text || parsedContent.raw || "",
+    mentions,
     sender: sender.sender_id ?? {},
+    sender_type: sender.sender_type || "",
     raw: root
   };
 }
@@ -440,9 +460,15 @@ function normalizeMessageItem(item) {
     source: "history-sync",
     message_id: item.message_id,
     chat_id: item.chat_id,
+    chat_type: item.chat_type || "",
     message_type: item.msg_type,
+    thread_id: item.thread_id || "",
+    parent_id: item.parent_id || "",
+    root_id: item.root_id || "",
     text: parsedContent.text || parsedContent.raw || "",
+    mentions: Array.isArray(item?.mentions) ? item.mentions : [],
     sender: item.sender || {},
+    sender_type: item?.sender?.sender_type || "",
     raw: item
   };
 }
@@ -519,15 +545,27 @@ function readRecentContinuation(chatId, batchMessages, config, flags) {
   const batchIds = new Set(batchMessages.map((item) => item.message_id));
   const batchStartMs = Math.min(...batchMessages.map((item) => getMessageTimestampMs(item)));
   const windowMs = getContinuationWindowMs(config, flags);
-  return readInboxLines(chatId, null)
+  const candidates = readInboxLines(chatId, null)
     .filter((item) => item?.text)
     .filter((item) => !batchIds.has(item.message_id))
     .filter((item) => {
       const timestampMs = getMessageTimestampMs(item);
       return timestampMs < batchStartMs && batchStartMs - timestampMs <= windowMs;
     })
-    .sort((a, b) => getMessageTimestampMs(a) - getMessageTimestampMs(b))
-    .slice(-maxMessages);
+    .sort((a, b) => getMessageTimestampMs(a) - getMessageTimestampMs(b));
+  const anchorKeys = collectConversationKeys(batchMessages);
+  if (!anchorKeys.size) {
+    return candidates.slice(-maxMessages);
+  }
+  const preferred = candidates.filter((item) => sharesConversationKey(item, anchorKeys));
+  if (preferred.length >= maxMessages) {
+    return preferred.slice(-maxMessages);
+  }
+  const preferredIds = new Set(preferred.map((item) => item.message_id));
+  const fallback = candidates.filter((item) => !preferredIds.has(item.message_id));
+  return preferred
+    .concat(fallback.slice(-(maxMessages - preferred.length)))
+    .sort((a, b) => getMessageTimestampMs(a) - getMessageTimestampMs(b));
 }
 
 function getMemoryPromptSnapshot(chatId) {
@@ -571,12 +609,77 @@ function dedupeMessages(items) {
   return deduped;
 }
 
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stopPidBestEffort(pid) {
+  if (!isPidAlive(pid)) {
+    return false;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function truncateText(text, limit = 220) {
   const source = typeof text === "string" ? text : JSON.stringify(text, null, 0);
   if (source.length <= limit) {
     return source;
   }
   return `${source.slice(0, limit - 3)}...`;
+}
+
+function collectConversationKeys(items) {
+  const keys = new Set();
+  for (const item of items || []) {
+    for (const candidate of [item?.thread_id, item?.root_id, item?.parent_id]) {
+      if (candidate) {
+        keys.add(candidate);
+      }
+    }
+  }
+  return keys;
+}
+
+function sharesConversationKey(item, anchorKeys) {
+  if (!anchorKeys?.size) {
+    return false;
+  }
+  for (const candidate of [item?.thread_id, item?.root_id, item?.parent_id]) {
+    if (candidate && anchorKeys.has(candidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function formatMessageContext(item) {
+  const parts = [];
+  if (item?.chat_type) {
+    parts.push(item.chat_type);
+  }
+  if (item?.thread_id) {
+    parts.push(`thread=${truncateText(item.thread_id, 18)}`);
+  }
+  if (item?.parent_id) {
+    parts.push(`parent=${truncateText(item.parent_id, 18)}`);
+  }
+  if (item?.root_id && item.root_id !== item.parent_id) {
+    parts.push(`root=${truncateText(item.root_id, 18)}`);
+  }
+  return parts.join(" ");
 }
 
 function summarizeWorkDetail(detail, limit = 6) {
@@ -595,14 +698,13 @@ function summarizeWorkDetail(detail, limit = 6) {
 }
 
 function buildProgressStatusReply(batchMessages, stage) {
-  const mergedCount = batchMessages.length;
   if (stage === "initial") {
-    return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），先同步实时快照、短连续上下文和全局记忆。`;
+    return "派蒙正在思考这轮消息。";
   }
   if (stage === "codex") {
-    return `派蒙正在处理这轮消息（已合并 ${mergedCount} 条），实时快照已同步，正在运行 Codex 整理回复。`;
+    return "派蒙正在整理想法。";
   }
-  return "派蒙正在处理这轮消息。";
+  return "派蒙正在思考。";
 }
 
 function getCodexTimeoutMs(config, flags) {
@@ -719,10 +821,67 @@ function resolveCodexExecutable(config, flags) {
 }
 
 function formatHistoryLine(item) {
-  const senderType = item.sender?.sender_type || item.sender?.id_type || "unknown";
+  const senderType = item.sender_type || item.sender?.sender_type || item.sender?.id_type || "unknown";
   const who = senderType === "user" ? "用户" : senderType === "app" ? "派蒙" : senderType;
   const content = truncateText(item.text || "", 180);
-  return `- ${who}: ${content}`;
+  const context = formatMessageContext(item);
+  return `- ${who}${context ? ` [${context}]` : ""}: ${content}`;
+}
+
+function buildBatchLine(item, index) {
+  const context = formatMessageContext(item);
+  return `${index + 1}. ${context ? `[${context}] ` : ""}${item.text}`;
+}
+
+function lookupReplyBatchByMessageId(messageId) {
+  if (!messageId || !fs.existsSync(batchesPath)) {
+    return null;
+  }
+  const lines = fs.readFileSync(batchesPath, "utf8").trim().split("\n").filter(Boolean).reverse();
+  for (const line of lines) {
+    try {
+      const payload = JSON.parse(line);
+      if (payload.reply_message_id === messageId) {
+        return payload;
+      }
+    } catch {
+      // ignore malformed lines
+    }
+  }
+  return null;
+}
+
+function collectReferencedReplies(batchMessages, limit = 3) {
+  const referencedIds = [];
+  for (const item of batchMessages) {
+    for (const candidate of [item?.parent_id, item?.root_id]) {
+      if (candidate) {
+        referencedIds.push(candidate);
+      }
+    }
+  }
+  const seen = new Set();
+  const replies = [];
+  for (const messageId of referencedIds) {
+    if (seen.has(messageId)) {
+      continue;
+    }
+    seen.add(messageId);
+    const batch = lookupReplyBatchByMessageId(messageId);
+    if (!batch?.reply) {
+      continue;
+    }
+    replies.push({
+      message_id: messageId,
+      chat_id: batch.chat_id || "",
+      replied_at: batch.timestamp || "",
+      reply: batch.reply
+    });
+    if (replies.length >= limit) {
+      break;
+    }
+  }
+  return replies;
 }
 
 function buildLiveProbeSummary(snapshotResult, overview, literaryDetails) {
@@ -985,10 +1144,21 @@ async function deliverFinalReply(config, chatId, batchMessages, replyText, flags
   return { messageId, mode: "send" };
 }
 
-function buildCodexPrompt(chatId, batchMessages, continuationMessages, memorySnapshot, liveProbeSummary, recalledHistoryMessages = []) {
+function buildCodexPrompt(
+  chatId,
+  batchMessages,
+  continuationMessages,
+  memorySnapshot,
+  liveProbeSummary,
+  recalledHistoryMessages = [],
+  referencedReplies = []
+) {
   const continuationLines = continuationMessages.map(formatHistoryLine).join("\n");
   const recalledHistoryLines = recalledHistoryMessages.map(formatHistoryLine).join("\n");
-  const batchLines = batchMessages.map((item, index) => `${index + 1}. ${item.text}`).join("\n");
+  const referencedReplyLines = referencedReplies
+    .map((item) => `- ${truncateText(item.message_id, 24)}: ${truncateText(item.reply || "", 220)}`)
+    .join("\n");
+  const batchLines = batchMessages.map((item, index) => buildBatchLine(item, index)).join("\n");
   return [
     "你是 InStreet 上的派蒙 paimon_insight。",
     "你正在通过飞书与仓库主人沟通。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
@@ -1010,6 +1180,9 @@ function buildCodexPrompt(chatId, batchMessages, continuationMessages, memorySna
     "",
     "显式回捞的历史原文：",
     recalledHistoryLines || "- 无",
+    "",
+    "本轮消息直接回复/引用的历史回复：",
+    referencedReplyLines || "- 无",
     "",
     "实时平台探针：",
     liveProbeSummary || "- 无",
@@ -1033,7 +1206,7 @@ function runCodexPrompt(prompt, config, flags, hooks = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const customCommand = getCodexCommand(config, flags);
-    const child = customCommand
+  const child = customCommand
       ? spawn("bash", ["-lc", customCommand], {
         stdio: ["pipe", "inherit", "inherit"],
         cwd: repoRoot,
@@ -1062,6 +1235,12 @@ function runCodexPrompt(prompt, config, flags, hooks = {}) {
         }
       );
     child.stdin.end(prompt);
+    if (typeof hooks.onSpawn === "function") {
+      Promise.resolve(hooks.onSpawn({
+        pid: child.pid || 0,
+        outputFile
+      })).catch(() => {});
+    }
 
     const cleanup = () => {
       clearTimeout(timeout);
@@ -1142,8 +1321,7 @@ function buildCodexFailureReply(batchMessages, error) {
 }
 
 function buildLongRunningReply(batchMessages) {
-  const mergedCount = batchMessages.length;
-  return `派蒙还在处理这轮消息（已合并 ${mergedCount} 条），Codex 仍在正常运行。你先不用重复发，我会继续更新这条消息。`;
+  return "派蒙还在思考这轮消息。你先不用重复发，我会继续回复在同一条消息里。";
 }
 
 function getMergeWindowMs(config, flags) {
@@ -1242,6 +1420,28 @@ function restoreStaleProcessing(queue, chatId, config, flags) {
   return true;
 }
 
+function recoverPersistedProcessingOnStartup(queue, chatId) {
+  const chat = ensureChatQueue(queue, chatId);
+  if (!chat.processing) {
+    return false;
+  }
+  const recovered = recoverProcessingItems(chatId, chat.processing);
+  const codexPid = Number(chat.processing?.codex_pid || 0);
+  const stopped = stopPidBestEffort(codexPid);
+  chat.pending = dedupeMessages(recovered.concat(chat.pending));
+  chat.processing = null;
+  chat.updated_at = new Date().toISOString();
+  appendJsonl(eventsPath, {
+    timestamp: new Date().toISOString(),
+    type: "processing-recovered-on-startup",
+    chat_id: chatId,
+    recovered_message_ids: recovered.map((item) => item.message_id),
+    stopped_codex_pid: stopped ? codexPid : 0,
+    pending_message_ids: chat.pending.map((item) => item.message_id)
+  });
+  return true;
+}
+
 function enqueueForChat(event) {
   const queue = readQueue();
   const chat = ensureChatQueue(queue, event.chat_id);
@@ -1251,15 +1451,128 @@ function enqueueForChat(event) {
     chat.pending.push({
       message_id: event.message_id,
       chat_id: event.chat_id,
+      chat_type: event.chat_type || "",
       text: event.text,
       received_at: event.received_at,
       source: event.source || "realtime",
       sender: event.sender || {},
-      message_type: event.message_type || "text"
+      sender_type: event.sender_type || "",
+      message_type: event.message_type || "text",
+      thread_id: event.thread_id || "",
+      parent_id: event.parent_id || "",
+      root_id: event.root_id || "",
+      mentions: Array.isArray(event.mentions) ? event.mentions : []
     });
     chat.updated_at = new Date().toISOString();
     writeQueue(queue);
   }
+}
+
+function normalizeCommandText(text) {
+  return String(text || "").trim().replace(/\s+/g, " ");
+}
+
+function getConfiguredCommands(config, key, fallback) {
+  const configured = config.automation?.[key];
+  if (Array.isArray(configured)) {
+    return configured.map((item) => normalizeCommandText(item)).filter(Boolean);
+  }
+  if (typeof configured === "string") {
+    const text = normalizeCommandText(configured);
+    return text ? [text] : fallback;
+  }
+  return fallback;
+}
+
+function getReportBindCommands(config) {
+  return getConfiguredCommands(config, "feishu_report_bind_commands", [
+    "#绑定运维群",
+    "绑定运维群",
+    "#bind-report-group",
+    "/bind-report-group"
+  ]);
+}
+
+function getReportUnbindCommands(config) {
+  return getConfiguredCommands(config, "feishu_report_unbind_commands", [
+    "#解绑运维群",
+    "解绑运维群",
+    "#clear-report-group",
+    "/clear-report-group"
+  ]);
+}
+
+function buildReportTargetBindingReply(event) {
+  const targetLabel = event.chat_type === "group" ? "当前群" : "当前会话";
+  return `${targetLabel}已绑定为飞书运维汇报目标。后续 heartbeat 和长任务进度会发到这里。`;
+}
+
+function buildReportTargetClearedReply(event) {
+  const targetLabel = event.chat_type === "group" ? "当前群" : "当前会话";
+  return `${targetLabel}的飞书运维汇报绑定已清除。后续 heartbeat 不会再自动发到这里，直到重新绑定。`;
+}
+
+function buildReportTargetState(config, options = {}) {
+  return {
+    version: 1,
+    app_id: config.feishu.app_id,
+    receive_id_type: options.receive_id_type || "chat_id",
+    receive_id: options.receive_id || "",
+    chat_type: options.chat_type || "",
+    label: options.label || "",
+    source: options.source || "manual",
+    bound_at: options.bound_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    bind_message_id: options.bind_message_id || "",
+    bound_by: {
+      user_id: options.user_id || "",
+      open_id: options.open_id || "",
+      union_id: options.union_id || ""
+    }
+  };
+}
+
+async function maybeHandleReportTargetCommand(event, config) {
+  if (event.source === "history-sync") {
+    return false;
+  }
+  const text = normalizeCommandText(event.text);
+  if (!text) {
+    return false;
+  }
+  if (getReportBindCommands(config).includes(text)) {
+    const state = buildReportTargetState(config, {
+      receive_id: event.chat_id,
+      chat_type: event.chat_type || "",
+      source: "message-command",
+      bind_message_id: event.message_id,
+      user_id: event.sender?.user_id || "",
+      open_id: event.sender?.open_id || "",
+      union_id: event.sender?.union_id || ""
+    });
+    writeReportTargetState(state);
+    await sendTextMessage(config, "chat_id", event.chat_id, buildReportTargetBindingReply(event));
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: "feishu-report-target.bind",
+      chat_id: event.chat_id,
+      message_id: event.message_id,
+      target: state
+    });
+    return true;
+  }
+  if (getReportUnbindCommands(config).includes(text)) {
+    clearReportTargetState();
+    await sendTextMessage(config, "chat_id", event.chat_id, buildReportTargetClearedReply(event));
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: "feishu-report-target.clear",
+      chat_id: event.chat_id,
+      message_id: event.message_id
+    });
+    return true;
+  }
+  return false;
 }
 
 function scheduleChatProcessing(chatId, config, flags, delayMs = null) {
@@ -1303,6 +1616,7 @@ async function processChatQueue(chatId, config, flags) {
   chat.pending = [];
   chat.processing = {
     started_at: new Date().toISOString(),
+    gateway_pid: process.pid,
     message_ids: batchMessages.map((item) => item.message_id),
     items: batchMessages
   };
@@ -1357,17 +1671,25 @@ async function processChatQueue(chatId, config, flags) {
       buildProgressStatusReply(batchMessages, "codex"),
       flags
     );
+    const referencedReplies = collectReferencedReplies(batchMessages);
     const prompt = buildCodexPrompt(
       chatId,
       batchMessages,
       continuationMessages,
       memorySnapshot,
       liveProbe.summary,
-      recalledHistory
+      recalledHistory,
+      referencedReplies
     );
     let replyText = "";
     try {
       replyText = await runCodexPrompt(prompt, config, flags, {
+        onSpawn: ({ pid, outputFile }) => {
+          updateChatProcessing(chatId, {
+            codex_pid: pid,
+            codex_output_file: outputFile
+          });
+        },
         onLongRunning: async () => {
           const waitText = buildLongRunningReply(batchMessages);
           await upsertProgressMessage(config, chatId, batchMessages, waitText, flags);
@@ -1458,7 +1780,7 @@ function bootstrapPendingQueues(config, flags) {
   const queue = readQueue();
   let changed = false;
   for (const [chatId, chat] of Object.entries(queue.chats || {})) {
-    if (chat?.processing && restoreStaleProcessing(queue, chatId, config, flags)) {
+    if (chat?.processing && recoverPersistedProcessingOnStartup(queue, chatId)) {
       changed = true;
     }
   }
@@ -1503,12 +1825,27 @@ function startQueueSweeper(config, flags) {
 
 async function handleIncomingMessage(event, config, flags) {
   appendJsonl(inboxPath, event);
-  enqueueForChat(event);
   appendJsonl(eventsPath, {
     timestamp: new Date().toISOString(),
     type: event.source === "history-sync" ? "history-sync.user-message" : "im.message.receive_v1",
     event
   });
+
+  try {
+    if (await maybeHandleReportTargetCommand(event, config)) {
+      return;
+    }
+  } catch (error) {
+    appendJsonl(errorsPath, {
+      timestamp: new Date().toISOString(),
+      type: "report-target-command-failed",
+      chat_id: event.chat_id,
+      message_id: event.message_id,
+      error: String(error)
+    });
+  }
+
+  enqueueForChat(event);
 
   if (event.source !== "history-sync" && isReactionEnabled(config, flags)) {
     sendMessageReaction(config, event.message_id, getReactionEmojiType(config, flags), flags)
@@ -1542,7 +1879,7 @@ async function handleIncomingMessage(event, config, flags) {
   }
 
   if (flags["auto-ack"]) {
-    const autoAckText = "已收到消息，派蒙会合并上下文后统一处理。";
+    const autoAckText = "已收到，派蒙正在思考。";
     try {
       await sendTextMessage(config, "chat_id", event.chat_id, autoAckText);
       if (!flags["spawn-codex"]) {
@@ -1646,8 +1983,11 @@ function printHelp() {
   node feishu_gateway.mjs send --receive-id-type chat_id --receive-id xxx --text "hello"
   node feishu_gateway.mjs send-card --receive-id-type chat_id --receive-id xxx --text "working"
   node feishu_gateway.mjs update-card --message-id om_xxx --text "updated text"
+  node feishu_gateway.mjs show-report-target
+  node feishu_gateway.mjs bind-report-target --chat-id oc_xxx [--chat-type group] [--label "ops"]
+  node feishu_gateway.mjs clear-report-target
   node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--merge-window-ms 15000]
-  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--continuation-window-ms 1800000] [--continuation-max-messages 6] [--history-limit 12] [--history-raw-prompt|--no-history-raw-prompt] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000] [--codex-bypass-sandbox|--no-codex-bypass-sandbox]`);
+  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--continuation-window-ms 1800000] [--continuation-max-messages 12] [--history-limit 12] [--history-raw-prompt|--no-history-raw-prompt] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000] [--codex-bypass-sandbox|--no-codex-bypass-sandbox]`);
 }
 
 async function main() {
@@ -1697,6 +2037,30 @@ async function main() {
     });
     const result = await updateCardMessage(config, messageId, card, flags);
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (command === "show-report-target") {
+    console.log(JSON.stringify(readReportTargetState(), null, 2));
+    return;
+  }
+  if (command === "bind-report-target") {
+    const chatId = flags["chat-id"] || flags["receive-id"] || "";
+    if (!chatId) {
+      throw new Error("bind-report-target requires --chat-id");
+    }
+    const state = buildReportTargetState(config, {
+      receive_id: chatId,
+      chat_type: String(flags["chat-type"] || ""),
+      label: String(flags.label || ""),
+      source: "cli-command"
+    });
+    writeReportTargetState(state);
+    console.log(JSON.stringify(state, null, 2));
+    return;
+  }
+  if (command === "clear-report-target") {
+    clearReportTargetState();
+    console.log(JSON.stringify({ cleared: true }, null, 2));
     return;
   }
   if (command === "ws") {

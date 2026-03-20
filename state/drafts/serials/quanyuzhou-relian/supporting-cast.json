@@ -1,0 +1,1043 @@
+{
+  "version": 2,
+  "updated_at": "2026-03-20T22:15:00+08:00",
+  "policy": {
+    "naming_rule": "重复出场的配角第一次亮相必须给出全名、职责和一个可见动作或物件锚点；后续章节默认沿用名字，不退回纯泛称。",
+    "generic_label_rule": "只有在 POV 故意保持距离、角色尚未认出对方，或故意体现制度匿名性时，才允许短暂使用“负责人”“顾问”“白西装”这类泛称。",
+    "recurrence_rule": "默认保持每 1-2 章至少出现一次既有配角、机构代理人或样本/见证节点回场，维持城市与制度在场感；但当章节明确承担纯双人世界、关系升级或关键余温功能时，可以暂时不强塞配角上桌。",
+    "memory_anchor_rule": "每个配角都要绑定一句口头判断、一个稳定动作、一个物件或一个典型压力来源，让读者记得住。",
+    "lifecycle_rule": "配角不是无限常驻背景板。必须为常驻、阶段活跃、阶段退场、失势退场、转暗线、答案回流等状态做结构化管理。",
+    "turn_rule": "立场翻转只给少数真正值得翻的人：要么来自求稳者被迫选边，要么来自中层执行者承认自己也被体制吞掉，要么来自样本对象的回流，不做廉价大洗白。",
+    "reveal_rule": "全书角色资产可以提前存全，但写作提示词默认采用渐进披露：未到 reveal 窗口的角色优先以功能位或 masked_label 出现，避免提前漏底。",
+    "exit_rule": "阶段配角退场时必须写明是降频、失势、转暗线还是回流准备，不能无故消失。"
+  },
+  "selection_policy": {
+    "default_reveal_mode": "gradual",
+    "default_floor_per_two_chapters": 1,
+    "allow_pair_only_chapters": true,
+    "max_prompt_characters": 8,
+    "always_include_tiers": [
+      "core_supporting"
+    ],
+    "chapter_override_fields": [
+      "active_cast",
+      "new_cast_introductions",
+      "cast_returns",
+      "cast_exit_or_fade",
+      "antagonist_pressure_source"
+    ],
+    "prompt_sections": [
+      "core_active",
+      "phase_active",
+      "new_entries",
+      "returns",
+      "turns",
+      "exits"
+    ]
+  },
+  "characters": [
+    {
+      "character_id": "zhou_yao",
+      "name": "周遥",
+      "aliases": [
+        "项目负责人"
+      ],
+      "tier": "core_supporting",
+      "faction": "折光公益实验室",
+      "role": "折光公益实验室项目负责人",
+      "first_appearance_chapter": 1,
+      "active_windows": [
+        {
+          "start": 1,
+          "end": 16,
+          "status": "frontline",
+          "function": "内部求稳压力与现实后果阀门"
+        },
+        {
+          "start": 17,
+          "end": 32,
+          "status": "strained_ally",
+          "function": "在机构安全与主角选边之间摇摆"
+        },
+        {
+          "start": 54,
+          "end": 64,
+          "status": "return",
+          "function": "以现实资源和机构通道支持终局回流"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          1
+        ],
+        "turn": [
+          10,
+          22
+        ],
+        "exit": [
+          32
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 1,
+        "full_detail_after_chapter": 1
+      },
+      "memory_anchor": "总在主位上按太阳穴，嘴上先说“先保上线/先把项目保住”，是机构内部最稳定的求稳阀门。",
+      "desire": "守住机构、合作盘面和项目存续。",
+      "pressure_source": "预算、排期、合作方问责和现实后果。",
+      "bias": "遇事先保盘面，再谈判断。",
+      "relationship_to_protagonists": "认可秦荔的判断力，也依赖陆既明的冷静兜底，但职业惯性永远逼她先保合作盘面。",
+      "story_function": "把机构预算、排期、合作风险和现实后果具体化，不能只写成一个抽象的“负责人”。",
+      "growth_or_turn": "从先保项目到先保人；不是反派洗白，而是求稳管理者被局势逼到明确选边。",
+      "exit_mode": "阶段降频，转为内部稳定盟友。",
+      "return_trigger": "旧配角带着答案回场时，她负责把现实层面的通道重新打开。",
+      "reentry_plan": "第1-8章承担内部求稳压力；第9-32章逐渐完成选边；第54章后带着机构资源回场。"
+    },
+    {
+      "character_id": "tang_zhao",
+      "name": "唐照",
+      "aliases": [
+        "小唐"
+      ],
+      "tier": "core_supporting",
+      "faction": "折光公益实验室",
+      "role": "折光公益实验室运营执行 / 数据助理",
+      "first_appearance_chapter": 2,
+      "active_windows": [
+        {
+          "start": 2,
+          "end": 24,
+          "status": "frontline",
+          "function": "后台、数据、舆情和执行链路的异常报信人"
+        },
+        {
+          "start": 25,
+          "end": 40,
+          "status": "core_growth",
+          "function": "从被带着跑升级为能独立判断风险的执行骨干"
+        },
+        {
+          "start": 54,
+          "end": 64,
+          "status": "return",
+          "function": "带着留存数据和旧记录回场"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          2
+        ],
+        "turn": [
+          18,
+          36
+        ],
+        "exit": [
+          40
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 2,
+        "full_detail_after_chapter": 2
+      },
+      "memory_anchor": "总是抱着平板或电脑一路冲进门，消息先到、人后到，遇事先喊一声再补完整句子。",
+      "desire": "把异常先看懂，再让现场别炸。",
+      "pressure_source": "后台报警、舆情飙升、执行断链。",
+      "bias": "先报信、先救火，再慢慢总结。",
+      "relationship_to_protagonists": "被秦荔和陆既明一起带着救火，对两人的疯点子又怕又服，是最早看见异常连锁反应的一线目击者。",
+      "story_function": "负责把后台、数据、舆情和日常执行的变化及时带进场，让世界规则和现实流程接上。",
+      "growth_or_turn": "从第一线报信人长成能独立判断样本风险、保存证据和反制追踪的骨干。",
+      "exit_mode": "中后段降频为后勤核心，必要时通过数据和日志回声回场。",
+      "return_trigger": "终局前需要调回所有旧后台和异常记录时重新成为关键节点。",
+      "reentry_plan": "前期承担监测、报信和现场执行；中期升级为独立骨干；终局回流时带着完整记录回场。"
+    },
+    {
+      "character_id": "lin_sui",
+      "name": "林穗",
+      "aliases": [],
+      "tier": "core_supporting",
+      "faction": "折光公益实验室",
+      "role": "折光公益实验室对外负责人",
+      "first_appearance_chapter": 7,
+      "active_windows": [
+        {
+          "start": 7,
+          "end": 24,
+          "status": "frontline",
+          "function": "媒体、会务和危机公关调度"
+        },
+        {
+          "start": 25,
+          "end": 40,
+          "status": "independent_front",
+          "function": "独立扛大型外部场面，替主角争时间"
+        },
+        {
+          "start": 54,
+          "end": 64,
+          "status": "return",
+          "function": "把外部公共场的入口重新打开"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          7
+        ],
+        "turn": [
+          26,
+          38
+        ],
+        "exit": [
+          40
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 7,
+        "full_detail_after_chapter": 7
+      },
+      "memory_anchor": "面无表情挡媒体，吐槽归吐槽，办事节奏却比谁都准。",
+      "desire": "让真实的人和真实现场别被抽成模板。",
+      "pressure_source": "媒体围堵、活动失控、舆情窗口和外部问责。",
+      "bias": "先挡住镜头，再给自己人腾空间。",
+      "relationship_to_protagonists": "在公共舆论层替两人争时间、挡镜头、稳外部场，是折光少数能跟上他们节奏的现实派队友。",
+      "story_function": "把媒体、会务、危机公关和现实场面调度拉进主线，避免外部世界只剩抽象热搜。",
+      "growth_or_turn": "从挡媒体的现实派升级为能独自管理大型公共场、为主角制造外部缓冲层的前线队友。",
+      "exit_mode": "阶段降频但不退场，保留随时调动的现实前线属性。",
+      "return_trigger": "旧配角大回流和终局公开场面需要现实组织力时回到核心。",
+      "reentry_plan": "前期负责挡媒体和对外协同；中期成长为第二前线；终局卷负责稳住公共场与真实人群。"
+    },
+    {
+      "character_id": "lin_jianxia",
+      "name": "林见夏",
+      "aliases": [],
+      "tier": "phase_core",
+      "faction": "折光公益实验室",
+      "role": "折光公益实验室新来的实习生",
+      "first_appearance_chapter": 5,
+      "active_windows": [
+        {
+          "start": 5,
+          "end": 18,
+          "status": "witness",
+          "function": "误入式目击与外围年轻视角"
+        },
+        {
+          "start": 21,
+          "end": 24,
+          "status": "archive_keeper",
+          "function": "保留偷拍视频、花絮和边缘证据"
+        },
+        {
+          "start": 54,
+          "end": 60,
+          "status": "return",
+          "function": "带着第三机位和旧素材回场"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          5
+        ],
+        "turn": [
+          11,
+          21
+        ],
+        "exit": [
+          24
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 5,
+        "full_detail_after_chapter": 5
+      },
+      "memory_anchor": "抱着手机冲进来，嘴上先嘴硬，手却抖得厉害，是意外拍到异常画面的年轻见证者。",
+      "desire": "别让自己拍到的东西白白被删掉。",
+      "pressure_source": "信息过载、害怕惹祸、又舍不得丢掉真相。",
+      "bias": "先假装只是花絮，再偷偷把证据存住。",
+      "relationship_to_protagonists": "比唐照更晚进场，却更早从“围观者”身份撞上异常边缘，容易带来目击视角和代际反应。",
+      "story_function": "提供年轻视角、偷拍视频和旁观者误入的切口，让异常如何扩散到普通执行层有具体载体。",
+      "growth_or_turn": "从误入者成长为边角证据的保管人，后期以留存的第三机位素材参与答案回流。",
+      "exit_mode": "阶段退场，转入暗线存档人。",
+      "return_trigger": "第三机位、旧花絮和被删镜头需要回流时重新显影。",
+      "reentry_plan": "前期承担误入式目击；中期退到暗线保留证据；终局前把关键影像带回来。"
+    },
+    {
+      "character_id": "guan_rong",
+      "name": "关嵘",
+      "aliases": [
+        "关老师"
+      ],
+      "tier": "phase_core",
+      "faction": "商业合作方",
+      "role": "赞助方品牌部负责人",
+      "first_appearance_chapter": 1,
+      "active_windows": [
+        {
+          "start": 1,
+          "end": 12,
+          "status": "frontline",
+          "function": "最早、最具体的模板化合作压力"
+        },
+        {
+          "start": 19,
+          "end": 20,
+          "status": "echo",
+          "function": "商业化模板如何并线到命名权争夺"
+        },
+        {
+          "start": 54,
+          "end": 56,
+          "status": "return",
+          "function": "带着旧合作链条里的证据回场"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          1
+        ],
+        "turn": [
+          20
+        ],
+        "exit": [
+          12
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 1,
+        "full_detail_after_chapter": 1
+      },
+      "memory_anchor": "领带总打得太紧，话术里总有“稳妥、温暖、普适”，第一反应永远是把锋利内容磨平。",
+      "desire": "让所有合作都安全、温顺、可投放。",
+      "pressure_source": "品牌风险、甲方话术、可复制性指标。",
+      "bias": "默认把所有尖锐表达磨成适配各方的温吞模板。",
+      "relationship_to_protagonists": "代表合作方最早、最具体的模板化压力，让秦荔的表达欲和现实秩序直接撞上。",
+      "story_function": "把平台外的商业压力和模板语气具体化，是“别再灵机一动”这一套秩序的真人脸。",
+      "growth_or_turn": "不洗白成盟友，但会在后期意识到自己只是最底层模板供应链的一环，留下可回收的现实证据。",
+      "exit_mode": "阶段退场，转为商业链条的旧回声。",
+      "return_trigger": "当主角需要证明模板化治理并非抽象恶意，而是现实供应链时回场。",
+      "reentry_plan": "前期通过远程沟通和项目反馈回场；中期与基金会路线并线；终局前短暂带着证据回场。"
+    },
+    {
+      "character_id": "wen_zhao",
+      "name": "闻昭",
+      "aliases": [
+        "项目顾问",
+        "白西装"
+      ],
+      "tier": "antagonist",
+      "faction": "基金会联盟",
+      "role": "基金会联盟项目顾问",
+      "first_appearance_chapter": 5,
+      "active_windows": [
+        {
+          "start": 5,
+          "end": 24,
+          "status": "frontline_antagonist",
+          "function": "把双人关系样本化、流程化和合同化的前台执行者"
+        },
+        {
+          "start": 31,
+          "end": 32,
+          "status": "conditional_turn",
+          "function": "为保住自身筹码而短暂偏转协助主角潜入"
+        },
+        {
+          "start": 49,
+          "end": 54,
+          "status": "return",
+          "function": "带着自保与复仇心重新上桌，交出部分制度内幕"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          5
+        ],
+        "turn": [
+          31
+        ],
+        "exit": [
+          32
+        ],
+        "return": [
+          49,
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 5,
+        "full_detail_after_chapter": 12
+      },
+      "memory_anchor": "西装总像刚熨过，笑容像包了糖纸，说话永远先谈止损和流程。",
+      "desire": "让样本保持可管理、可测量、可向上交差。",
+      "pressure_source": "基金会 KPI、A-7 进度、上层流程考核。",
+      "bias": "凡事先谈止损和流程，相信体面地收编总比硬碰硬有效。",
+      "relationship_to_protagonists": "把两人的真实关系当成可测量、可管理、可打包的样本对象，是最早把他们往 A-7 轨道上推的人。",
+      "story_function": "承担基金会一线执行人与制度代言人的双重功能，既要能当场施压，也要能显出他只是更大结构的前台。",
+      "growth_or_turn": "只做策略性偏转，不做彻底洗白；他的翻转来自失势与自保，不来自价值觉醒。",
+      "exit_mode": "前台失势后降频，转为握着旧协议边角料的危险中间人。",
+      "return_trigger": "当主角需要进入更高层档案或拆解婚约模板源头时，他会带着私心重新出现。",
+      "reentry_plan": "前期负责递合同、压场面、引导去 A-7；第31-32章短暂偏转；第49章后带着制度内幕回场。"
+    },
+    {
+      "character_id": "han_zhixu",
+      "name": "韩知许",
+      "aliases": [
+        "韩秘书长",
+        "秘书长"
+      ],
+      "tier": "antagonist",
+      "faction": "深湾公共传播基金会",
+      "role": "深湾公共传播基金会秘书长",
+      "first_appearance_chapter": 6,
+      "active_windows": [
+        {
+          "start": 6,
+          "end": 24,
+          "status": "senior_antagonist",
+          "function": "用资源和体面谈招安"
+        },
+        {
+          "start": 25,
+          "end": 32,
+          "status": "upper_manager",
+          "function": "把地方观测站与更高治理模板连起来"
+        },
+        {
+          "start": 45,
+          "end": 48,
+          "status": "echo",
+          "function": "作为旧治理层在更高权限介入前的最后话语人"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          6
+        ],
+        "turn": [],
+        "exit": [
+          48
+        ],
+        "return": []
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 6,
+        "full_detail_after_chapter": 6
+      },
+      "memory_anchor": "语气总是太客气，像每句话都能直接改成收购书或招安条款。",
+      "desire": "把异常纳入可以估值、可以购买、可以治理的结构。",
+      "pressure_source": "基金会理事会、城市样本指标、上层授权窗口。",
+      "bias": "相信体面地买断和包装比暴力更高级，也更可持续。",
+      "relationship_to_protagonists": "试图用资源和体面把两人的异常纳入机构治理，是闻昭之上的制度性收编代表。",
+      "story_function": "让基金会的招安逻辑和长期布局具象化，承担“笑着谈买断”的上层压力。",
+      "growth_or_turn": "不做洗白，只在更高层权限显影时暴露其上限：她不是终局敌人，而是会被更高治理机制替代的中高层代理人。",
+      "exit_mode": "被更高层写作权限覆盖后失势退场。",
+      "return_trigger": "无主动回流；后续只可作为旧档案、旧话术或旧协议的余波出现。",
+      "reentry_plan": "在 A-7 之后反复出现，代表更高层治理结构继续谈条件、换说法、升级筹码；第48章前后被更高权限挤出主舞台。"
+    },
+    {
+      "character_id": "du_xingzhi",
+      "name": "杜行止",
+      "aliases": [
+        "杜老师"
+      ],
+      "tier": "phase_core",
+      "faction": "深湾大学评审体系",
+      "role": "深湾大学交叉评审委员会副主任 / 学术伦理委员",
+      "first_appearance_chapter": 9,
+      "active_windows": [
+        {
+          "start": 9,
+          "end": 14,
+          "status": "frontline",
+          "function": "用学术客观性话术要求剔除感情变量"
+        },
+        {
+          "start": 18,
+          "end": 20,
+          "status": "echo",
+          "function": "在论文、答辩和命名权争执里代表学术体制压力"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          9
+        ],
+        "turn": [],
+        "exit": [
+          20
+        ],
+        "return": []
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 9,
+        "full_detail_after_chapter": 9
+      },
+      "memory_anchor": "眼镜总往鼻梁下滑一点，说话前先把笔尖在桌面敲两下，张口就是“请回到可验证变量”。",
+      "desire": "把异常收束到可发表、可答辩、可审查的框架里。",
+      "pressure_source": "论文伦理、学术名声、校内评审风险。",
+      "bias": "默认认为感情变量只能是噪声，不能是理论核心。",
+      "relationship_to_protagonists": "他不是私人恶意，而是陆既明在正式秩序里必须正面击穿的一道门。",
+      "story_function": "把‘恋爱不该影响实验结果’这套客观性压力具象化，逼陆既明第一次在正式场合承认秦荔不是噪声。",
+      "growth_or_turn": "不翻转，只负责把体面的学术秩序推到主角面前，然后被现实打穿。",
+      "exit_mode": "阶段退场，留作学术秩序旧回声。",
+      "return_trigger": "无主动回流。",
+      "reentry_plan": "第9章亮相，第9-14章集中施压，第20章后退出主舞台。"
+    },
+    {
+      "character_id": "cheng_guanlan",
+      "name": "程观澜",
+      "aliases": [
+        "A-7站长",
+        "站长"
+      ],
+      "tier": "antagonist",
+      "faction": "地方观测站 A-7",
+      "role": "A-7 观测站站长",
+      "first_appearance_chapter": 12,
+      "active_windows": [
+        {
+          "start": 8,
+          "end": 11,
+          "status": "masked_setup",
+          "function": "以站长和校准方的匿名形象先行施压"
+        },
+        {
+          "start": 12,
+          "end": 28,
+          "status": "frontline_antagonist",
+          "function": "用样本协议、观测测试和地方站权限控制主角"
+        },
+        {
+          "start": 45,
+          "end": 46,
+          "status": "turn",
+          "function": "承认自己也只是中层执行者，从监工转为证人"
+        },
+        {
+          "start": 54,
+          "end": 56,
+          "status": "return",
+          "function": "带着原始观测记录和接口坐标回场"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          12
+        ],
+        "turn": [
+          45
+        ],
+        "exit": [
+          46
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "mask_until_named",
+        "masked_label": "A-7站长",
+        "named_after_chapter": 12,
+        "full_detail_after_chapter": 25
+      },
+      "memory_anchor": "袖扣永远扣得一丝不苟，校准倒计时一响就会下意识看表，像比任何人都先活在流程里。",
+      "desire": "把地方站样本按时做完，证明自己配得上更高层授权。",
+      "pressure_source": "上层考核、样本成功率、校准进度和失败追责。",
+      "bias": "默认认为个体只要足够稳定，就该接受被纳入治理模板。",
+      "relationship_to_protagonists": "前中期最具体的制度监工，把他们的关系当作可校准、可合同化、可抽样复用的接口。",
+      "story_function": "让观测站从抽象设施变成具体人脸；同时为第45章‘观测者也在被看’提供可翻的中层执行者。",
+      "growth_or_turn": "他的立场翻转不是因为认同爱情，而是因为终于承认自己也只是样本链上的一节；第45-46章从监工转为证人。",
+      "exit_mode": "中层失势退场，转暗线证人。",
+      "return_trigger": "主角需要原始观测记录、接口坐标和地方站密钥时回场。",
+      "reentry_plan": "第8-11章以匿名站长先施压，第12章具名，第25章后暴露层级上限，第45章翻转，第54章带证据回场。"
+    },
+    {
+      "character_id": "xie_shiyu",
+      "name": "谢识雨",
+      "aliases": [
+        "谢总监"
+      ],
+      "tier": "antagonist",
+      "faction": "平台侧",
+      "role": "平台命名系统平台主管",
+      "first_appearance_chapter": 18,
+      "active_windows": [
+        {
+          "start": 18,
+          "end": 32,
+          "status": "frontline_antagonist",
+          "function": "掌管热搜、标题、标签和推荐位的命名权限"
+        },
+        {
+          "start": 41,
+          "end": 42,
+          "status": "echo",
+          "function": "在标题回流与未来章节倒灌时显出平台的技术面孔"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          18
+        ],
+        "turn": [],
+        "exit": [
+          42
+        ],
+        "return": []
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 18,
+        "full_detail_after_chapter": 18
+      },
+      "memory_anchor": "说话像在念已经通过 A/B 测试的句子，连笑都带着精准停顿。",
+      "desire": "让命名系统稳定、高效、可预测，把所有标题回到能计算的轨道。",
+      "pressure_source": "平台留存、推荐位收益、命名模型准确率。",
+      "bias": "默认把一切关系和叙事都视作可压缩的标签组合。",
+      "relationship_to_protagonists": "他不是看不懂爱情，而是故意把爱情拆成标签、标题和推荐逻辑。",
+      "story_function": "把平台命名权斗争具象化，让‘首稿权 / 终稿权’不只是一套概念。",
+      "growth_or_turn": "不翻转；他的存在感更多体现在系统层面的技术压力和语言整齐感。",
+      "exit_mode": "被更高层写作权限盖过后退出主视野。",
+      "return_trigger": "无主动回流。",
+      "reentry_plan": "第18章具名进场，第18-32章主打平台压力，第41-42章以技术余波再显影。"
+    },
+    {
+      "character_id": "xu_jinghe",
+      "name": "许镜荷",
+      "aliases": [
+        "许主任"
+      ],
+      "tier": "antagonist",
+      "faction": "样本工程",
+      "role": "样本工程总设计师",
+      "first_appearance_chapter": 13,
+      "active_windows": [
+        {
+          "start": 13,
+          "end": 28,
+          "status": "frontline_antagonist",
+          "function": "把高甜稳定关系拆成可复制流程模板"
+        },
+        {
+          "start": 33,
+          "end": 36,
+          "status": "debt_echo",
+          "function": "样本工程崩坏后的后果承担者与切割者"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          13
+        ],
+        "turn": [],
+        "exit": [
+          36
+        ],
+        "return": []
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 13,
+        "full_detail_after_chapter": 13
+      },
+      "memory_anchor": "说到“稳定性”三个字时总会把尾音压得很轻，像怕惊扰一台精密仪器。",
+      "desire": "证明高甜、稳定、可传播的爱情可以被工业化量产。",
+      "pressure_source": "样本成功率、复制成本、可推广性。",
+      "bias": "认为只要把动作、语气和触发阈值拆够细，亲密就能被复制。",
+      "relationship_to_protagonists": "她把主角当作最优训练样本，而不是具体的人。",
+      "story_function": "承担样本情侣、婚约模板、标准件亲密等中期反派压力。",
+      "growth_or_turn": "不翻转；她的弧线重点是工程失败后如何切割责任并暴露制度残酷。",
+      "exit_mode": "样本工程崩坏后失势退场。",
+      "return_trigger": "无主动回流。",
+      "reentry_plan": "第13章具名进场，第13-28章持续施压，第36章前后随样本崩坏一起塌缩。"
+    },
+    {
+      "character_id": "xu_mei",
+      "name": "许莓",
+      "aliases": [],
+      "tier": "phase_core",
+      "faction": "样本工程",
+      "role": "第一对样本情侣中的女方脚本执行样本",
+      "first_appearance_chapter": 13,
+      "active_windows": [
+        {
+          "start": 13,
+          "end": 19,
+          "status": "display_sample",
+          "function": "展示模板化高甜如何模仿主角"
+        },
+        {
+          "start": 36,
+          "end": 36,
+          "status": "dangerous_return",
+          "function": "以债务回流和样本崩坏的伤口形态回场"
+        },
+        {
+          "start": 59,
+          "end": 64,
+          "status": "return",
+          "function": "从悲剧副本转成等着被重新命名的人"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          13
+        ],
+        "turn": [
+          36,
+          59
+        ],
+        "exit": [
+          19
+        ],
+        "return": [
+          36,
+          59
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 13,
+        "full_detail_after_chapter": 13
+      },
+      "memory_anchor": "笑的时候像在等耳机里的下一句提示，伸手牵人前会先轻轻碰一下袖口。",
+      "desire": "一开始只想把任务完成，后来只想活成一个不用背脚本的人。",
+      "pressure_source": "样本脚本、触发阈值、随时会被下线的恐惧。",
+      "bias": "前期把每一步亲密当成必须按时命中的动作。",
+      "relationship_to_protagonists": "她是主角关系被工业化之后最刺眼的一面镜子。",
+      "story_function": "承担‘仿制、崩坏、回流、重命名’这条样本线的具名代表。",
+      "growth_or_turn": "先是模板的执行者，再变成被抛弃的危险回流者，终局才有资格被重新命名。",
+      "exit_mode": "被样本工程下线后退入债务暗线。",
+      "return_trigger": "样本崩坏与终局重命名。",
+      "reentry_plan": "第13章亮相；第19章后消失；第36章危险回流；第59章以可救回的人重新上桌。"
+    },
+    {
+      "character_id": "shen_yanqiu",
+      "name": "沈砚秋",
+      "aliases": [],
+      "tier": "phase_core",
+      "faction": "样本工程",
+      "role": "第一对样本情侣中的男方稳定性样本",
+      "first_appearance_chapter": 13,
+      "active_windows": [
+        {
+          "start": 13,
+          "end": 19,
+          "status": "display_sample",
+          "function": "展示模板化稳定感如何模仿陆既明式托底"
+        },
+        {
+          "start": 36,
+          "end": 36,
+          "status": "dangerous_return",
+          "function": "以被治理后遗症和偏执控制欲回流"
+        },
+        {
+          "start": 59,
+          "end": 64,
+          "status": "return",
+          "function": "与许莓一起从失败样本转回具体的人"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          13
+        ],
+        "turn": [
+          36,
+          59
+        ],
+        "exit": [
+          19
+        ],
+        "return": [
+          36,
+          59
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 13,
+        "full_detail_after_chapter": 13
+      },
+      "memory_anchor": "说每句话前都像先在心里读一遍脚本，连安抚动作都精确得过头。",
+      "desire": "前期想成为最稳定的标准答案，后期只想摆脱“稳定性样本”这个身份。",
+      "pressure_source": "被量化的稳定指标、样本配对考核和失败后的淘汰。",
+      "bias": "习惯把亲密当流程执行，崩坏后又会本能地抓住控制感。",
+      "relationship_to_protagonists": "他是陆既明这一路‘稳定、托底、聪明’被模板偷走后的扭曲版本。",
+      "story_function": "补足样本情侣线的双人性，避免样本化战争只有概念没有人。",
+      "growth_or_turn": "与许莓同线：从展示样本到危险回流者，再到终局可被重新命名的人。",
+      "exit_mode": "被样本工程下线后退入债务暗线。",
+      "return_trigger": "样本崩坏与终局重命名。",
+      "reentry_plan": "第13章亮相；第19章后消失；第36章危险回流；第59章和许莓一起回到终局。"
+    },
+    {
+      "character_id": "witness_collective",
+      "name": "见证回流节点",
+      "aliases": [
+        "旧读者",
+        "旧项目回流人群",
+        "见证网络"
+      ],
+      "tier": "group_node",
+      "faction": "被影响过的普通人 / 见证者",
+      "role": "由旧读者、受助者、评论者和被项目影响过的人组成的分布式见证网络",
+      "first_appearance_chapter": 11,
+      "active_windows": [
+        {
+          "start": 11,
+          "end": 11,
+          "status": "signal",
+          "function": "以替主角保密和掩护的方式第一次显影"
+        },
+        {
+          "start": 21,
+          "end": 23,
+          "status": "return",
+          "function": "从旧项目和旧读者中回流，变成分布式帮助节点"
+        },
+        {
+          "start": 54,
+          "end": 64,
+          "status": "payoff",
+          "function": "把终局从主角私人幸福抬成公共结局"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          11
+        ],
+        "turn": [
+          46,
+          63
+        ],
+        "exit": [],
+        "return": [
+          21,
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "gradual",
+        "masked_label": "分散见证者",
+        "named_after_chapter": 21,
+        "full_detail_after_chapter": 46
+      },
+      "memory_anchor": "他们不会整齐地喊口号，只会在不同地方各自做一点保护、转移、封口、作证或回声。",
+      "desire": "守住那些曾经被主角影响过的具体生活，不让它们再被模板压平。",
+      "pressure_source": "平台围观、旁白税、样本化治理和被记录的风险。",
+      "bias": "不是统一组织，而是一群各自保留碎片的人；他们的力量来自分散与回流，不来自整齐建制。",
+      "relationship_to_protagonists": "他们不是屏幕外上帝，也不是单一派系，而是主角曾经真正影响过的现实节点与见证者。",
+      "story_function": "回答‘读者会不会成为某种势力’：会，但形式是分布式见证网络，而不是早期整齐登场的读者组织。",
+      "growth_or_turn": "从弱干预的观看和保密，成长为终局能把“请继续”改写成祝福的公共见证层。",
+      "exit_mode": "不做常规退场；以疏密不同的方式贯穿全书。",
+      "return_trigger": "每当主角需要现实中的回声、证词、掩护和祝福时显影。",
+      "reentry_plan": "第11章第一次以保密行为显影，第21-23章正式回流，第46章明确其并非纯屏幕外上帝视角，第63章完成祝福式回收。"
+    },
+    {
+      "character_id": "zhu_jinan",
+      "name": "祝今安",
+      "aliases": [
+        "祝主任"
+      ],
+      "tier": "phase_core",
+      "faction": "第二城公共叙事中心",
+      "role": "第二城公共叙事中心执行官",
+      "first_appearance_chapter": 33,
+      "active_windows": [
+        {
+          "start": 33,
+          "end": 40,
+          "status": "phase_core",
+          "function": "把第二城的表演化恋爱秩序具体化"
+        },
+        {
+          "start": 54,
+          "end": 56,
+          "status": "return",
+          "function": "带着多城债务账本和节点图回场"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          33
+        ],
+        "turn": [
+          38,
+          39
+        ],
+        "exit": [
+          40
+        ],
+        "return": [
+          54
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 33,
+        "full_detail_after_chapter": 33
+      },
+      "memory_anchor": "胸牌永远别得笔直，介绍城市项目时笑得像在主持一场永不停机的直播。",
+      "desire": "让第二城继续成为最会表演、最能转化的叙事样板。",
+      "pressure_source": "多城联动 KPI、城市级观看税和叙事债结算。",
+      "bias": "习惯把所有心动先看成公共资源，再看成私人选择。",
+      "relationship_to_protagonists": "她先是第二城秩序的门面，后期才被债务压到开始松动。",
+      "story_function": "把第五卷的第二城与多城叙事潮从背景板变成具体的人脸和管理逻辑。",
+      "growth_or_turn": "从表演化秩序的执行官翻到债务见证人，是卷五最重要的阶段性偏转角色。",
+      "exit_mode": "阶段退场，转为多城债务告密者。",
+      "return_trigger": "当主角需要多城节点图和叙事债账本时回场。",
+      "reentry_plan": "第33章具名进场；第38-39章开始松动；第40章退场；第54章带账本回流。"
+    },
+    {
+      "character_id": "qi_yanheng",
+      "name": "祁砚衡",
+      "aliases": [
+        "外层接口主笔"
+      ],
+      "tier": "antagonist",
+      "faction": "上层写作治理机构",
+      "role": "外层观察接口主笔 / 宇宙写作治理协议负责人",
+      "first_appearance_chapter": 50,
+      "active_windows": [
+        {
+          "start": 48,
+          "end": 49,
+          "status": "masked_setup",
+          "function": "以更高权限和外层接口的匿名压力显影"
+        },
+        {
+          "start": 50,
+          "end": 62,
+          "status": "endgame_antagonist",
+          "function": "把所有爱情压成统一句法模板的终局对手"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          50
+        ],
+        "turn": [],
+        "exit": [
+          62
+        ],
+        "return": []
+      },
+      "reveal": {
+        "mode": "mask_until_named",
+        "masked_label": "外层接口主笔",
+        "named_after_chapter": 50,
+        "full_detail_after_chapter": 51
+      },
+      "memory_anchor": "总像在替世界修句子，说“更整齐一点”时语气平得近乎温柔。",
+      "desire": "消灭不可预测的主动偏爱，让所有爱情都变成可治理、可继承、可归档的统一句法。",
+      "pressure_source": "宇宙级治理模板、自身对秩序的信仰和对混乱的洁癖。",
+      "bias": "相信整齐比自由更仁慈，相信模板比选择更稳定。",
+      "relationship_to_protagonists": "他不是要拆散他们，而是要把他们也压成标准答案，剥掉主动选择的噪声。",
+      "story_function": "承担第50-62章的终局反派功能，给‘爱情模板化治理’一个稳定的人脸和语言风格。",
+      "growth_or_turn": "不翻转；他的魅力在于自洽、冷静和高效，不在于可被感化。",
+      "exit_mode": "终局失权退场。",
+      "return_trigger": "无回流。",
+      "reentry_plan": "第48-49章以匿名更高权限先显影，第50章具名，第51章明牌，第62章失权退场。"
+    },
+    {
+      "character_id": "sample_collective",
+      "name": "样本情侣回流群像",
+      "aliases": [
+        "回流样本",
+        "样本群像"
+      ],
+      "tier": "returning_payoff",
+      "faction": "样本工程回流者",
+      "role": "所有被制造、被下线、被模板压平的样本情侣群体节点",
+      "first_appearance_chapter": 59,
+      "active_windows": [
+        {
+          "start": 59,
+          "end": 64,
+          "status": "return",
+          "function": "让终局不只关乎主角，而关乎所有等待被重新命名的人"
+        }
+      ],
+      "key_chapters": {
+        "entry": [
+          59
+        ],
+        "turn": [],
+        "exit": [],
+        "return": [
+          59
+        ]
+      },
+      "reveal": {
+        "mode": "full",
+        "named_after_chapter": 59,
+        "full_detail_after_chapter": 59
+      },
+      "memory_anchor": "他们不再共享统一台词，回场时每个人都带着不同的伤口、不同的沉默和不同的等待。",
+      "desire": "被重新命名，被从模板和失败稿里救回具体的人。",
+      "pressure_source": "叙事债、旁白税、失败样本记录和被删掉的结局。",
+      "bias": "前期被迫服从模板，后期则本能地不再相信任何整齐的承诺。",
+      "relationship_to_protagonists": "他们把主角的胜利从私人爱情，抬成了要不要把写回权分给更多人的公共抉择。",
+      "story_function": "承担第59章及终局的群像回流功能，防止‘所有样本情侣’继续停留在抽象集合名词。",
+      "growth_or_turn": "不是单一个体的翻转，而是整条样本线从悲剧副本转向可被重命名的公共群像。",
+      "exit_mode": "终局后融入新规则，不再作为模板样本存在。",
+      "return_trigger": "第59章后的终局连续回收。",
+      "reentry_plan": "第59章正式上桌，之后一直作为终局公共结局的承载层存在。"
+    }
+  ],
+  "generic_labels_to_retire": [
+    {
+      "label": "负责人",
+      "preferred_name": "周遥",
+      "note": "如果明确指折光项目负责位，优先写周遥；只有刻意保持距离时才退回泛称。"
+    },
+    {
+      "label": "小唐",
+      "preferred_name": "唐照",
+      "note": "第一次亮相先给全名，后续可以昵称和全名交替。"
+    },
+    {
+      "label": "项目顾问",
+      "preferred_name": "闻昭",
+      "note": "闻昭是 recurring cast，不要让他在不同章节像新顾问。"
+    },
+    {
+      "label": "白西装",
+      "preferred_name": "闻昭",
+      "note": "白西装只能当临时外号，不能替代他的正式角色记忆。"
+    },
+    {
+      "label": "站长",
+      "preferred_name": "程观澜",
+      "note": "A-7 站长在具名后应尽量使用程观澜，不要长期停留在纯功能位。"
+    },
+    {
+      "label": "秘书长",
+      "preferred_name": "韩知许",
+      "note": "若明确指基金会秘书长，优先写韩知许，避免像新角色。"
+    }
+  ]
+}

@@ -120,6 +120,37 @@ class HeartbeatStateTests(unittest.TestCase):
                 content_mode="fiction-serial",
             )
 
+    def test_repair_fiction_delivery_rewrites_blacklisted_phrase(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        repaired_body = " ".join(["她把人拉近，低头迎上去，吻得更深，呼吸贴在一起，谁也没有后退。"] * 70)
+        try:
+            heartbeat.run_codex = lambda *args, **kwargs: (
+                "TITLE: 第八章：原来我们两个必须同时在场\n"
+                "CONTENT:\n"
+                f"{repaired_body}"
+            )
+            repaired = heartbeat._repair_fiction_delivery(
+                work_title="全宇宙都在围观我和竹马热恋",
+                chapter_number=8,
+                title="第八章：原来我们两个必须同时在场",
+                content="她把人拉近，低头接住，接得更深。",
+                rejection_reason="contains blacklisted phrase: 接住",
+                chapter_plan={
+                    "writing_notes": {"direct_phrase_blacklist": ["接住"]},
+                    "writing_system": {},
+                    "intimacy_target": {"level": 1},
+                },
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat.run_codex = original_run_codex
+        self.assertIsNotNone(repaired)
+        repaired_title, repaired_content = repaired
+        self.assertEqual(repaired_title, "第八章：原来我们两个必须同时在场")
+        self.assertNotIn("接住", repaired_content)
+
     def test_prune_post_comment_backlog_archives_stale_comments_on_cold_post(self) -> None:
         result = heartbeat._prune_post_comment_backlog(
             {

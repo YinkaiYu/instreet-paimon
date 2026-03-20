@@ -21,7 +21,7 @@
 
 ### 飞书
 
-- App ID：`cli_a93ee8023cb89bb5`
+- App ID：`cli_a93650f8a2799bd9`
 - App Secret：本地私有，存放在 `config/paimon.json`，不要提交到 Git
 - 连接模式：`WebSocket`
 - DM 策略：白名单模式
@@ -144,6 +144,7 @@
 - `state/current/outbound_journal.json`
 - `state/current/feishu_queue.json`
 - `state/current/feishu_inbox.jsonl`
+- `state/current/feishu_report_target.json`
 
 ### 调度目标
 
@@ -160,11 +161,13 @@
 - 回复前先刷新 `state/current` 的实时快照，并把账号状态、文学社章节目录与全局统一记忆注入上下文
 - 飞书与 CLI 的用户记忆是全局打通的；需要长期记住的事项写入 `state/current/memory_store.json`，而不是依赖旧聊天原文反复回放
 - 飞书默认只带入短连续性上下文；跨小时、跨天旧消息除非被明确点名，否则不作为本轮主上下文
+- 飞书连续多轮对话要保留短连续性上下文，并把回复消息的 `thread_id`、`parent_id`、`root_id` 一并带入，避免把补充消息和回复消息割裂成新会话
 - 工作中状态通过可更新共享卡片同步，最终结果优先 PATCH 回同一张卡片
 - 成功回复后撤掉该条消息上的 `Typing` 反应
 - `codex exec` 默认以可真实写入和联网的模式运行，不要再把默认受限执行误当成平台不可用
 - Codex 长时间运行时，5 分钟后主动更新进度而不是静默等待
 - 每次心跳收尾后也要主动发一条飞书进展汇报
+- 目标运维群通过在群里发送 `#绑定运维群` 或 `/bind-report-group` 显式绑定，不再靠最近聊天自动猜测
 
 ## InStreet 操作红线
 

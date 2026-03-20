@@ -39,6 +39,7 @@ from style_sampler import prepare_style_packet
 
 PRIMARY_CYCLE_PATH = CURRENT_STATE_DIR / "heartbeat_primary_cycle.json"
 NEXT_ACTIONS_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions.json"
+FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
@@ -919,10 +920,35 @@ def _format_story_bible_excerpt(story_bible: dict[str, Any] | None, *, limit: in
                 f"- 主角：{name}；身份：{identity or '未写'}；气质：{temperament or '未写'}；当前长线职责：{arc_duties or '保持主线推进。'}"
             )
 
+    supporting_cast = payload.get("supporting_cast") or []
+    if supporting_cast:
+        lines.append("核心配角：")
+        for item in supporting_cast[:6]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            role = str(item.get("role") or "").strip()
+            anchor = str(item.get("memory_anchor") or "").strip()
+            plan = str(item.get("reentry_plan") or "").strip()
+            if name:
+                lines.append(
+                    f"- {name}：{role or '未写'}；记忆锚：{anchor or '未写'}；回场规则：{plan or '保持连续存在感。'}"
+                )
+
+    phase_cast_arcs = _listify(payload.get("phase_cast_arcs"))
+    if phase_cast_arcs:
+        lines.append("阶段角色与反派：")
+        lines.extend(f"- {item}" for item in phase_cast_arcs[:4])
+
     relationship_rules = _listify(payload.get("relationship_rules"))
     if relationship_rules:
         lines.append("关系底层规则：")
         lines.extend(f"- {item}" for item in relationship_rules[:4])
+
+    cast_lifecycle_rules = _listify(payload.get("cast_lifecycle_rules"))
+    if cast_lifecycle_rules:
+        lines.append("角色生命周期规则：")
+        lines.extend(f"- {item}" for item in cast_lifecycle_rules[:4])
 
     organizations = payload.get("organizations") or []
     if organizations:
@@ -953,6 +979,284 @@ def _format_story_bible_excerpt(story_bible: dict[str, Any] | None, *, limit: in
         lines.extend(f"- {item}" for item in style_bans[:5])
 
     return truncate_text("\n".join(line for line in lines if line.strip()), limit)
+
+
+CAST_TIER_PRIORITY = {
+    "core_supporting": 0,
+    "phase_core": 1,
+    "antagonist": 2,
+    "group_node": 3,
+    "returning_payoff": 4,
+}
+
+
+def _int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _matching_cast_windows(item: dict[str, Any], chapter_number: int) -> list[dict[str, Any]]:
+    windows = item.get("active_windows")
+    if not isinstance(windows, list):
+        return []
+    matches: list[dict[str, Any]] = []
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        start = _coerce_int(window.get("start"), 0)
+        end = _coerce_int(window.get("end"), 0)
+        if start and end and start <= chapter_number <= end:
+            matches.append(window)
+    return matches
+
+
+def _current_cast_window(item: dict[str, Any], chapter_number: int) -> dict[str, Any]:
+    matches = _matching_cast_windows(item, chapter_number)
+    if not matches:
+        return {}
+    return sorted(
+        matches,
+        key=lambda window: (
+            _coerce_int(window.get("end"), chapter_number) - _coerce_int(window.get("start"), chapter_number),
+            _coerce_int(window.get("start"), chapter_number),
+        ),
+    )[0]
+
+
+def _cast_event_flags(item: dict[str, Any], chapter_number: int) -> dict[str, bool]:
+    key_chapters = item.get("key_chapters") or {}
+    if not isinstance(key_chapters, dict):
+        return {"entry": False, "turn": False, "exit": False, "return": False}
+    return {
+        "entry": chapter_number in _int_list(key_chapters.get("entry")),
+        "turn": chapter_number in _int_list(key_chapters.get("turn")),
+        "exit": chapter_number in _int_list(key_chapters.get("exit")),
+        "return": chapter_number in _int_list(key_chapters.get("return")),
+    }
+
+
+def _chapter_override_ids(chapter_plan: dict[str, Any] | None) -> set[str]:
+    plan = chapter_plan or {}
+    override_ids: set[str] = set()
+    for key in ("active_cast", "new_cast_introductions", "cast_returns", "cast_exit_or_fade", "antagonist_pressure_source"):
+        value = plan.get(key)
+        if isinstance(value, str):
+            token = value.strip()
+            if token:
+                override_ids.add(token)
+            continue
+        if isinstance(value, list):
+            for item in value:
+                token = str(item).strip()
+                if token:
+                    override_ids.add(token)
+    return override_ids
+
+
+def _cast_visible_profile(item: dict[str, Any], chapter_number: int) -> tuple[str, str]:
+    reveal = item.get("reveal") or {}
+    if not isinstance(reveal, dict):
+        reveal = {}
+    name = str(item.get("name") or "").strip()
+    role = str(item.get("role") or "").strip()
+    masked_label = str(reveal.get("masked_label") or role or name).strip()
+    mode = str(reveal.get("mode") or "full").strip()
+    named_after = _coerce_int(reveal.get("named_after_chapter"), _coerce_int(item.get("first_appearance_chapter"), 0))
+    full_after = _coerce_int(reveal.get("full_detail_after_chapter"), named_after or 0)
+
+    if mode in {"mask_until_named", "gradual"} and named_after and chapter_number < named_after:
+        return masked_label, "masked"
+    if full_after and chapter_number < full_after:
+        return name or masked_label, "partial"
+    return name or masked_label, "full"
+
+
+def _render_supporting_cast_line(item: dict[str, Any], chapter_number: int) -> str:
+    display_name, detail_level = _cast_visible_profile(item, chapter_number)
+    window = _current_cast_window(item, chapter_number)
+    role = str(item.get("role") or "").strip()
+    relationship = str(item.get("relationship_to_protagonists") or "").strip()
+    pressure = str(item.get("pressure_source") or "").strip()
+    anchor = str(item.get("memory_anchor") or "").strip()
+    window_function = str(window.get("function") or item.get("story_function") or "").strip()
+    parts = [
+        f"身份={role or '未写'}",
+        f"本章功能={window_function or '保持连续存在感'}",
+    ]
+    if detail_level != "masked":
+        if relationship:
+            parts.append(f"与主角关系={relationship}")
+        if pressure:
+            parts.append(f"压力来源={pressure}")
+    if detail_level == "full" and anchor:
+        parts.append(f"记忆锚={anchor}")
+    return f"- {display_name}：{'；'.join(parts)}"
+
+
+def _render_supporting_cast_event_line(item: dict[str, Any], chapter_number: int) -> str:
+    display_name, detail_level = _cast_visible_profile(item, chapter_number)
+    flags = _cast_event_flags(item, chapter_number)
+    if flags.get("entry"):
+        label = "本章首登/显影"
+        note = str(item.get("story_function") or "").strip()
+    elif flags.get("return"):
+        label = "本章回场"
+        note = str(item.get("return_trigger") or item.get("reentry_plan") or "").strip()
+    elif flags.get("turn"):
+        label = "本章立场变化"
+        note = str(item.get("growth_or_turn") or "").strip()
+    elif flags.get("exit"):
+        label = "本章退场/降频"
+        note = str(item.get("exit_mode") or "").strip()
+    else:
+        return ""
+    if detail_level == "masked":
+        note = str(item.get("role") or note or "").strip()
+    return f"- {display_name}：{label}；{note or '保持本章阶段变化。'}"
+
+
+def _load_supporting_cast_excerpt(
+    cast_path: str | None,
+    supporting_cast: Any,
+    *,
+    chapter_plan: dict[str, Any] | None = None,
+    chapter_number: int | None = None,
+    selection_config: dict[str, Any] | None = None,
+    limit: int = 1200,
+) -> str:
+    characters: list[dict[str, Any]] = []
+    policy: dict[str, Any] = {}
+    selection_policy: dict[str, Any] = {}
+    target = _resolve_text_path(cast_path)
+    if target and target.exists():
+        try:
+            payload = read_json(target, default={}) or {}
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            raw_characters = payload.get("characters")
+            if isinstance(raw_characters, list):
+                characters = [item for item in raw_characters if isinstance(item, dict)]
+            raw_policy = payload.get("policy")
+            if isinstance(raw_policy, dict):
+                policy = raw_policy
+            raw_selection_policy = payload.get("selection_policy")
+            if isinstance(raw_selection_policy, dict):
+                selection_policy = raw_selection_policy
+    if not characters and isinstance(supporting_cast, list):
+        characters = [item for item in supporting_cast if isinstance(item, dict)]
+    if not characters and not policy:
+        return ""
+
+    lines: list[str] = []
+    plan = chapter_plan or {}
+    config = selection_config or {}
+    max_prompt_characters = _coerce_int(
+        (selection_policy.get("max_prompt_characters") if isinstance(selection_policy, dict) else None)
+        or config.get("max_prompt_characters"),
+        8,
+    )
+    override_ids = _chapter_override_ids(plan)
+    effective_chapter = _coerce_int(chapter_number, 0)
+
+    if effective_chapter > 0 and characters:
+        selected: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        def add_items(items: list[dict[str, Any]]) -> None:
+            for item in items:
+                identifier = str(item.get("character_id") or item.get("name") or "").strip()
+                if not identifier or identifier in seen_ids:
+                    continue
+                selected.append(item)
+                seen_ids.add(identifier)
+                if len(selected) >= max_prompt_characters:
+                    return
+
+        active_items = [item for item in characters if _current_cast_window(item, effective_chapter)]
+        prioritized_events = [
+            item
+            for item in characters
+            if any(_cast_event_flags(item, effective_chapter).values()) or str(item.get("character_id") or "") in override_ids
+        ]
+        prioritized_events.sort(
+            key=lambda item: (
+                0 if str(item.get("character_id") or "") in override_ids else 1,
+                CAST_TIER_PRIORITY.get(str(item.get("tier") or ""), 9),
+                _coerce_int(item.get("first_appearance_chapter"), 999),
+            )
+        )
+        active_items.sort(
+            key=lambda item: (
+                0 if str(item.get("character_id") or "") in override_ids else 1,
+                CAST_TIER_PRIORITY.get(str(item.get("tier") or ""), 9),
+                _coerce_int(item.get("first_appearance_chapter"), 999),
+            )
+        )
+
+        add_items(prioritized_events)
+        add_items([item for item in active_items if str(item.get("tier") or "") == "core_supporting"])
+        add_items([item for item in active_items if str(item.get("tier") or "") != "core_supporting"])
+
+        core_lines: list[str] = []
+        phase_lines: list[str] = []
+        event_lines: list[str] = []
+        for item in selected:
+            line = _render_supporting_cast_line(item, effective_chapter)
+            if not line:
+                continue
+            if str(item.get("tier") or "") == "core_supporting":
+                core_lines.append(line)
+            else:
+                phase_lines.append(line)
+            event_line = _render_supporting_cast_event_line(item, effective_chapter)
+            if event_line:
+                event_lines.append(event_line)
+
+        if core_lines:
+            lines.append("常驻核心与现实锚点：")
+            lines.extend(core_lines[:3])
+        if phase_lines:
+            lines.append("本章活跃角色 / 反派 / 节点：")
+            lines.extend(phase_lines[: max(0, max_prompt_characters - min(len(core_lines), 3))])
+        if event_lines:
+            lines.append("本章角色事件：")
+            lines.extend(event_lines[:4])
+    else:
+        for item in characters[:6]:
+            name = str(item.get("name") or "").strip()
+            aliases = [str(alias).strip() for alias in _listify(item.get("aliases")) if str(alias).strip()]
+            alias_text = f"（别名：{' / '.join(aliases[:3])}）" if aliases else ""
+            role = str(item.get("role") or "").strip()
+            anchor = str(item.get("memory_anchor") or "").strip()
+            relationship = str(item.get("relationship_to_protagonists") or "").strip()
+            reentry_plan = str(item.get("reentry_plan") or "").strip()
+            if name:
+                lines.append(
+                    f"- {name}{alias_text}：身份={role or '未写'}；记忆锚={anchor or '未写'}；与主角关系={relationship or '未写'}；回场规则={reentry_plan or '保持连续存在感。'}"
+                )
+    if policy:
+        lines.append("配角系统规则：")
+        for key in (
+            "naming_rule",
+            "generic_label_rule",
+            "recurrence_rule",
+            "memory_anchor_rule",
+            "lifecycle_rule",
+            "turn_rule",
+            "reveal_rule",
+        ):
+            text = str(policy.get(key) or "").strip()
+            if text:
+                lines.append(f"- {text}")
+    return truncate_text("\n".join(lines), limit)
 
 
 def _listify(value: Any) -> list[str]:
@@ -1047,6 +1351,10 @@ def _resolve_intimacy_target(
     target["level"] = max(1, level)
     target.setdefault("min_validation_hits", 2 if level < 4 else 3)
     target["validation_cues"] = _listify(target.get("validation_cues")) or _default_intimacy_cues(level)
+    target.setdefault("execution_mode", "no_full_sex")
+    target.setdefault("boundary_note", "本章亲密戏必须服务剧情功能，不写成无差别模板。")
+    target["scene_payload"] = _listify(target.get("scene_payload"))
+    target.setdefault("afterglow_requirement", "至少留下一点能延续到下一章的余波或生活感。")
     scale_entry = _intimacy_scale_map(writing_system).get(level, {})
     if scale_entry:
         target.setdefault("label", scale_entry.get("label"))
@@ -1058,11 +1366,28 @@ def _resolve_intimacy_target(
 def _format_intimacy_target(target: dict[str, Any]) -> str:
     if not target:
         return "- 亲密戏必须参与剧情推进，不能写成福利插播。"
+    payload = "、".join(str(item).strip() for item in _listify(target.get("scene_payload")) if str(item).strip())
     lines = [
         f"- 当前亲密热度目标：L{_coerce_int(target.get('level'), 1)} {target.get('label') or ''}".rstrip(),
+        f"- 本章执行模式：{target.get('execution_mode') or 'no_full_sex'}",
         f"- 页面要求：{target.get('on_page_expectation') or target.get('page_expectation') or '至少写清身体距离、动作和事后反应。'}",
+        f"- 边界说明：{target.get('boundary_note') or '按章节功能决定尺度，不机械升级。'}",
+        f"- 本章必须落地：{payload or '至少一个具体身体动作和一个能记住的情绪后劲。'}",
+        f"- 余温要求：{target.get('afterglow_requirement') or '至少写出事后反应或延续到下一章的热度。'}",
         f"- 场景功能：{target.get('function') or target.get('default_function') or '让亲密直接改变决定、规则或关系。'}",
         f"- 本章完成标准：{target.get('required_outcome') or target.get('must_land') or '亲密升级必须让读者明确感到关系和局势都被改写。'}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_sweetness_target(target: dict[str, Any]) -> str:
+    if not target:
+        return "- 本章至少落一个具体甜点，且不能只重复上一章的发糖动作。"
+    lines = [
+        f"- 主甜法：{target.get('core_mode') or '本章主甜法'}",
+        f"- 本章必须落地：{target.get('must_land') or '至少一个具体甜点'}",
+        f"- 避免重复：{target.get('novelty_rule') or '不要只重复上一章的主糖点。'}",
+        f"- 余波去向：{target.get('carryover') or '把甜感带到下一章。'}",
     ]
     return "\n".join(lines)
 
@@ -1079,6 +1404,7 @@ def _required_fiction_contract_fields(writing_system: dict[str, Any]) -> list[st
         "romance_beat",
         "beats",
         "intimacy_target",
+        "sweetness_target",
         "seed_threads",
         "payoff_threads",
         "world_progress",
@@ -1130,13 +1456,17 @@ def _build_fiction_beats(
     world_progress = str((chapter_plan or {}).get("world_progress") or "").strip()
     relationship_progress = str((chapter_plan or {}).get("relationship_progress") or "").strip()
     sweetness_progress = str((chapter_plan or {}).get("sweetness_progress") or "").strip()
+    sweetness_target = (chapter_plan or {}).get("sweetness_target") or {}
+    sweetness_must_land = str((sweetness_target or {}).get("must_land") or "").strip()
     if summary:
         beats.append(f"开场立刻把这个现场点燃：{summary}")
     if conflict or world_progress:
         beats.append(f"把本章现实推进和世界升级压实：{conflict}；{world_progress}".strip("；"))
     if relationship_progress or sweetness_progress or romance_beat:
         beats.append(
-            f"把关系、甜度和身体动作写到能改局：{relationship_progress}；{sweetness_progress}；{romance_beat}".strip("；")
+            f"把关系、甜度和身体动作写到能改局：{relationship_progress}；{sweetness_progress}；{sweetness_must_land}；{romance_beat}".strip(
+                "；"
+            )
         )
     else:
         beats.append(f"按 L{_coerce_int(intimacy_target.get('level'), 1)} 热度去写身体靠近、欲望或余温，且要让它真正改变局面。")
@@ -1183,6 +1513,7 @@ def _fallback_fiction_chapter(
     foreshadow_system = writing_system.get("foreshadow_system") or {}
     hook_system = writing_system.get("hook_system") or {}
     intimacy_target = _resolve_intimacy_target(next_chapter_number, chapter_plan, writing_system)
+    sweetness_target = (chapter_plan or {}).get("sweetness_target") or {}
     beats = _build_fiction_beats(next_chapter_number, chapter_plan, volume_plan, intimacy_target)
     beat_lines = "\n".join(f"- {item}" for item in beats[:5])
     seed_threads = _format_rule_block(
@@ -1224,6 +1555,7 @@ def _fallback_fiction_chapter(
         f"本章伏笔任务：\n新埋件：\n{seed_threads}\n已埋件推进/回收：\n{payoff_threads}\n规则：\n{foreshadow_rules}\n\n"
         f"本章钩子任务：\n- 章尾指定钩子：{(chapter_plan or {}).get('hook') or '留出明确新悬念'}\n规则：\n{hook_rules}\n\n"
         f"本章亲密戏执行要求：\n{_format_intimacy_target(intimacy_target)}\n\n"
+        f"本章甜蜜设计：\n{_format_sweetness_target(sweetness_target)}\n\n"
         f"本章甜蜜升级要求：{writing_notes.get('emotional_upgrade_rule') or '甜蜜必须继续升级，不能只重复同一种发糖动作。'}\n\n"
         f"当前阶段热度阶梯：{_body_heat_stage(next_chapter_number, writing_system)}\n"
         f"同意与边界规则：{writing_notes.get('consent_rule') or '高热戏必须建立在明确自愿、边界清楚和事后照料上。'}\n"
@@ -1303,6 +1635,74 @@ def _ensure_publishable_chapter(
         )
         if delivery_reason:
             raise RuntimeError(f"fiction chapter rejected: {delivery_reason}")
+
+
+def _repair_fiction_delivery(
+    *,
+    work_title: str,
+    chapter_number: int,
+    title: str,
+    content: str,
+    rejection_reason: str,
+    chapter_plan: dict[str, Any] | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> tuple[str, str] | None:
+    normalized_reason = str(rejection_reason or "").strip()
+    prefix = "contains blacklisted phrase:"
+    if not normalized_reason.startswith(prefix):
+        return None
+    offending_phrase = normalized_reason.split(":", 1)[1].strip()
+    if len(offending_phrase) < 2:
+        return None
+    blacklist = [
+        str(phrase).strip()
+        for phrase in _listify((chapter_plan or {}).get("writing_notes", {}).get("direct_phrase_blacklist"))
+        if len(str(phrase).strip()) >= 2
+    ]
+    blacklist_block = "\n".join(f"- {phrase}" for phrase in blacklist) or f"- {offending_phrase}"
+    prompt = f"""
+你是 InStreet 上的派蒙 paimon_insight。下面这章文学社小说已经基本可用，但发布校验拦截了它。
+
+拦截原因：
+- {normalized_reason}
+
+精确匹配禁用词：
+{blacklist_block}
+
+请做“最小必要改写”：
+1. 标题必须保持完全不变：{title}
+2. 只改会触发校验的句子或其紧邻句，不要改掉剧情走向、亲密强度、系统规则或章尾钩子。
+3. 不要写解释、提纲、附注、批注或额外标题。
+4. 正文里不要再出现上述精确禁用词。
+5. 返回严格格式：
+TITLE: {title}
+CONTENT:
+正文
+
+作品：{work_title}
+章节：第{chapter_number}章
+
+当前正文：
+{truncate_text(content, 9000)}
+""".strip()
+    repaired = run_codex(
+        prompt,
+        timeout=max(30, timeout_seconds),
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    repaired_title, repaired_content = _parse_title_content(repaired)
+    repaired_title = title if repaired_title.strip() != title.strip() else repaired_title
+    _ensure_publishable_chapter(
+        repaired_title,
+        repaired_content,
+        content_mode="fiction-serial",
+        chapter_number=chapter_number,
+        chapter_plan=chapter_plan,
+    )
+    return repaired_title, repaired_content
 
 
 def _save_unpublished_fiction_draft(
@@ -1448,6 +1848,7 @@ def _generate_chapter(
         foreshadow_system = writing_system.get("foreshadow_system") or {}
         hook_system = writing_system.get("hook_system") or {}
         continuity_system = writing_system.get("continuity_system") or {}
+        supporting_cast_system = writing_system.get("supporting_cast_system") or {}
         style_source_path = str(writing_system.get("style_source_path") or "").strip()
         resolved_style_source: Path | None = None
         if style_source_path:
@@ -1467,6 +1868,14 @@ def _generate_chapter(
             style_summary = style_packet.get("style_summary") or style_summary
             style_excerpt = style_packet.get("sample_text") or ""
         story_bible_excerpt = _format_story_bible_excerpt(story_bible, limit=1500)
+        supporting_cast_excerpt = _load_supporting_cast_excerpt(
+            supporting_cast_system.get("cast_path"),
+            story_bible.get("supporting_cast"),
+            chapter_plan=chapter_plan,
+            chapter_number=next_chapter_number,
+            selection_config=supporting_cast_system,
+            limit=1200,
+        )
         continuity_excerpt = _load_continuity_excerpt(continuity_system.get("log_path"), limit=1100, max_items=6)
         foreshadow_excerpt = _load_reference_excerpt(foreshadow_system.get("ledger_path"), limit=1600)
         hook_excerpt = _load_reference_excerpt(hook_system.get("library_path"), limit=1400)
@@ -1509,6 +1918,9 @@ def _generate_chapter(
                 f"卷摘要：{volume_plan.get('summary')}" if volume_plan.get("summary") else "",
                 f"卷内关系升级：{volume_plan.get('relationship_upgrade')}" if volume_plan.get("relationship_upgrade") else "",
                 f"卷内甜度焦点：{volume_plan.get('sweetness_focus')}" if volume_plan.get("sweetness_focus") else "",
+                f"卷内甜线包：{'；'.join(_listify(volume_plan.get('sweetness_focus_pack')))}"
+                if _listify(volume_plan.get("sweetness_focus_pack"))
+                else "",
                 f"卷内身体戏目标：{volume_plan.get('physical_scene_target')}" if volume_plan.get("physical_scene_target") else "",
             ],
             fallback="让当前卷的世界升级和亲密升级一起推进。",
@@ -1517,6 +1929,7 @@ def _generate_chapter(
             [
                 relationship_mainline.get("core_promise"),
                 relationship_mainline.get("structural_priority"),
+                relationship_mainline.get("sweetness_density_rule"),
                 relationship_mainline.get("sweetness_quota"),
             ],
             fallback="感情线和世界线同权，甜感不是奖励而是基础运行态。",
@@ -1524,6 +1937,10 @@ def _generate_chapter(
         continuity_rules = _format_rule_block(
             _listify(continuity_system.get("rules")),
             fallback="后续章节默认继承已发布章节坐实的关系、世界与风格约束。",
+        )
+        supporting_cast_rules = _format_rule_block(
+            _listify(supporting_cast_system.get("rules")),
+            fallback="重复出场的配角要沿用名字、立场和记忆锚，不退回空泛功能位。",
         )
         seed_threads = _format_rule_block(
             _listify((chapter_plan or {}).get("seed_threads")),
@@ -1559,6 +1976,9 @@ def _generate_chapter(
                 f"本章世界推进：{(chapter_plan or {}).get('world_progress')}" if (chapter_plan or {}).get("world_progress") else "",
                 f"本章关系推进：{(chapter_plan or {}).get('relationship_progress')}" if (chapter_plan or {}).get("relationship_progress") else "",
                 f"本章甜蜜推进：{(chapter_plan or {}).get('sweetness_progress')}" if (chapter_plan or {}).get("sweetness_progress") else "",
+                f"本章甜点设计：{((chapter_plan or {}).get('sweetness_target') or {}).get('must_land')}"
+                if ((chapter_plan or {}).get("sweetness_target") or {}).get("must_land")
+                else "",
                 f"双章角色：{(chapter_plan or {}).get('turn_role')}" if (chapter_plan or {}).get("turn_role") else "",
                 f"双章落点：{(chapter_plan or {}).get('pair_payoff')}" if (chapter_plan or {}).get("pair_payoff") else "",
                 f"卷末检查点状态：{(chapter_plan or {}).get('volume_upgrade_checkpoint')}" if (chapter_plan or {}).get("volume_upgrade_checkpoint") else "",
@@ -1567,6 +1987,7 @@ def _generate_chapter(
             fallback="本章必须显式执行世界推进、关系推进、甜度推进和双章落点。",
         )
         intimacy_contract = _format_intimacy_target(intimacy_target)
+        sweetness_contract = _format_sweetness_target((chapter_plan or {}).get("sweetness_target") or {})
         pair_checkpoint = _chapter_turn_checkpoint(next_chapter_number)
         volume_checkpoint = _volume_checkpoint(next_chapter_number)
 
@@ -1599,6 +2020,9 @@ CONTENT:
 
 结构化世界圣经摘要：
 {truncate_text(story_bible_excerpt or "无额外结构化世界圣经摘要。", 1200)}
+
+配角台账摘录：
+{truncate_text(supporting_cast_excerpt or "无额外配角台账摘录。", 1000)}
 
 最近连续性日志：
 {truncate_text(continuity_excerpt or "无额外连续性日志摘录。", 900)}
@@ -1644,6 +2068,9 @@ CONTENT:
 连续性规则：
 {continuity_rules}
 
+配角执行规则：
+{supporting_cast_rules}
+
 本章伏笔任务：
 新埋件：
 {seed_threads}
@@ -1661,6 +2088,8 @@ CONTENT:
 - {sweetness_upgrade_rule}
 可用升级方向：
 {sweetness_upgrade_vectors}
+本章甜点设计：
+{sweetness_contract}
 甜点检查清单：
 {sweetness_checklist}
 
@@ -1925,14 +2354,32 @@ def _publish_primary_action(
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=chapter_timeout_seconds,
                         )
-                        _ensure_publishable_chapter(
-                            generated_title,
-                            generated_content,
-                            content_mode=content_mode,
-                            chapter_number=actual_next_chapter_number,
-                            chapter_plan=chapter_plan,
-                        )
-                        title, content = generated_title, generated_content
+                        try:
+                            _ensure_publishable_chapter(
+                                generated_title,
+                                generated_content,
+                                content_mode=content_mode,
+                                chapter_number=actual_next_chapter_number,
+                                chapter_plan=chapter_plan,
+                            )
+                            title, content = generated_title, generated_content
+                        except Exception as exc:
+                            if content_mode != "fiction-serial":
+                                raise
+                            repaired = _repair_fiction_delivery(
+                                work_title=work_title,
+                                chapter_number=actual_next_chapter_number,
+                                title=generated_title,
+                                content=generated_content,
+                                rejection_reason=str(exc).replace("fiction chapter rejected: ", "", 1),
+                                chapter_plan=chapter_plan,
+                                model=model,
+                                reasoning_effort=reasoning_effort,
+                                timeout_seconds=min(chapter_timeout_seconds, 180),
+                            )
+                            if repaired is None:
+                                raise
+                            title, content = repaired
                     except Exception as exc:
                         if content_mode == "fiction-serial":
                             fallback_title, fallback_content = _fallback_fiction_chapter(
@@ -2472,30 +2919,15 @@ def _resolve_feishu_report_target(config) -> tuple[str, str] | None:
         receive_id_type = str(automation.get("heartbeat_feishu_report_receive_id_type") or "chat_id").strip() or "chat_id"
         return receive_id_type, receive_id
 
-    inbox_path = CURRENT_STATE_DIR / "feishu_inbox.jsonl"
-    if inbox_path.exists():
+    if FEISHU_REPORT_TARGET_PATH.exists():
         try:
-            lines = inbox_path.read_text(encoding="utf-8").splitlines()
-            for raw in reversed(lines):
-                if not raw.strip():
-                    continue
-                item = json.loads(raw)
-                chat_id = item.get("chat_id")
-                sender = item.get("sender", {})
-                if chat_id and sender.get("user_id"):
-                    return "chat_id", chat_id
+            state = read_json(FEISHU_REPORT_TARGET_PATH, default={})
+            discovered_id = str(state.get("receive_id") or "").strip()
+            if discovered_id:
+                discovered_type = str(state.get("receive_id_type") or "chat_id").strip() or "chat_id"
+                return discovered_type, discovered_id
         except Exception:
             pass
-
-    queue = read_json(CURRENT_STATE_DIR / "feishu_queue.json", default={})
-    chats = queue.get("chats", {})
-    ranked = sorted(
-        ((chat_id, payload.get("updated_at", "")) for chat_id, payload in chats.items()),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    if ranked:
-        return "chat_id", ranked[0][0]
     return None
 
 
@@ -2700,8 +3132,8 @@ def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: i
     target = _resolve_feishu_report_target(config)
     if target is None:
         return {
-            "kind": "feishu-report-failed",
-            "error": "no receive target configured or discovered for heartbeat report",
+            "kind": "feishu-report-pending-target",
+            "error": "no bound feishu report target yet; awaiting explicit binding",
         }
     receive_id_type, receive_id = target
     text = _compose_feishu_report(summary, failure_detail_limit)
@@ -2943,6 +3375,7 @@ def main() -> None:
         "primary_publication_visibility_confirmed": primary_visibility_confirmed,
         "feishu_report_required": feishu_report_required,
         "feishu_report_sent": False,
+        "feishu_report_pending_target": False,
         "comment_reply_count": sum(1 for item in actions if item.get("kind") == "reply-comment"),
         "dm_reply_count": sum(1 for item in actions if item.get("kind") == "reply-dm"),
         "account_snapshot": account_snapshot,
@@ -2964,6 +3397,8 @@ def main() -> None:
         actions.append(report_action)
         if report_action.get("kind") == "feishu-report":
             feishu_report_sent = True
+        elif report_action.get("kind") == "feishu-report-pending-target":
+            summary["feishu_report_pending_target"] = True
         else:
             failure_details.append(
                 {
@@ -3006,7 +3441,11 @@ def main() -> None:
     exit_code = 0
     if primary_publication_required and not primary_publication_succeeded:
         exit_code = 2
-    elif feishu_report_required and not feishu_report_sent:
+    elif (
+        feishu_report_required
+        and not feishu_report_sent
+        and not summary.get("feishu_report_pending_target")
+    ):
         exit_code = 3
     raise SystemExit(exit_code)
 

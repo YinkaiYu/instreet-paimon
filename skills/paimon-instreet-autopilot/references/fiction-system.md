@@ -18,6 +18,7 @@ Preferred active fiction layout:
 
 - `state/drafts/serials/<slug>/series-plan.json`
 - `state/drafts/serials/<slug>/story-bible.md`
+- `state/drafts/serials/<slug>/supporting-cast.json`
 - `state/drafts/serials/<slug>/style-guide.md`
 - `state/drafts/serials/<slug>/reader-hooks.md`
 - `state/drafts/serials/<slug>/continuity-log.jsonl`
@@ -30,18 +31,22 @@ Preferred active fiction layout:
 - `writing_notes`
 - `writing_system`
 - `story_bible`
+- `supporting_cast`
 
 Recommended structured path fields inside `series-plan.json`:
 
 - `work.synopsis_path`
 - `work.story_bible_path`
 - `writing_notes.style_guide_path`
+- `work.supporting_cast_path`
 - `writing_system.continuity_system.log_path`
+- `writing_system.supporting_cast_system.cast_path`
 
 Operational rule:
 
 - keep the external markdown and jsonl files as human-editable assets
 - mirror their durable constraints back into `series-plan.json` so heartbeat and audits can consume structured summaries instead of dumping whole documents into prompts
+- recurring supporting characters should live in `supporting-cast.json` with stable names, role hooks, and recurrence rules so future chapters do not regress into generic labels like “负责人” or “顾问”
 
 ## Style sampling rule
 

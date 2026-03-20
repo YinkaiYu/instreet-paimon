@@ -164,7 +164,8 @@ def _evaluate_attempt(
     if require_primary_publication and not primary_publication_succeeded:
         issues.append("no primary publication recorded in heartbeat summary")
     feishu_report_sent = bool(summary.get("feishu_report_sent")) if isinstance(summary, dict) else False
-    if require_feishu_report and not feishu_report_sent:
+    feishu_report_pending_target = bool(summary.get("feishu_report_pending_target")) if isinstance(summary, dict) else False
+    if require_feishu_report and not feishu_report_sent and not feishu_report_pending_target:
         issues.append("no feishu progress report recorded in heartbeat summary")
     comment_fetch_failures = _comment_fetch_failure_post_ids(summary)
     persistent_comment_failures = _persistent_comment_fetch_failures(summary)
@@ -183,7 +184,7 @@ def _evaluate_attempt(
         status = "repair"
     elif require_primary_publication and not primary_publication_succeeded:
         status = "repair"
-    elif require_feishu_report and not feishu_report_sent:
+    elif require_feishu_report and not feishu_report_sent and not feishu_report_pending_target:
         status = "repair"
     elif (
         len(persistent_comment_failures) >= COMMENT_FETCH_PERSISTENT_POST_REPAIR_THRESHOLD
@@ -202,6 +203,7 @@ def _evaluate_attempt(
         "has_public_action": has_public_action,
         "primary_publication_succeeded": primary_publication_succeeded,
         "feishu_report_sent": feishu_report_sent,
+        "feishu_report_pending_target": feishu_report_pending_target,
         "comment_fetch_failure_count": len(comment_fetch_failures),
         "persistent_comment_failure_count": len(persistent_comment_failures),
     }

@@ -60,7 +60,7 @@
     "memory_max_summary_chars": 220,
     "feishu_merge_window_ms": 15000,
     "feishu_continuation_window_ms": 1800000,
-    "feishu_continuation_max_messages": 6,
+    "feishu_continuation_max_messages": 12,
     "feishu_history_limit": 12,
     "feishu_history_raw_prompt_enabled": false,
     "feishu_processing_timeout_ms": 1800000,
@@ -72,6 +72,14 @@
     "feishu_reaction_enabled": true,
     "feishu_reaction_emoji_type": "Typing",
     "feishu_send_retries": 4,
-    "feishu_send_retry_delay_ms": 1500
+    "feishu_send_retry_delay_ms": 1500,
+    "feishu_report_bind_commands": [
+      "#绑定运维群",
+      "/bind-report-group"
+    ],
+    "feishu_report_unbind_commands": [
+      "#解绑运维群",
+      "/clear-report-group"
+    ]
   }
 }

@@ -32,6 +32,7 @@ PENDING_OUTBOUND_LOG = LOGS_DIR / "pending_outbound.jsonl"
 LITERARY_ARCHIVE_DIR = ARCHIVE_STATE_DIR / "literary"
 MEMORY_STORE_PATH = CURRENT_STATE_DIR / "memory_store.json"
 MEMORY_JOURNAL_PATH = CURRENT_STATE_DIR / "memory_journal.jsonl"
+SERIAL_REGISTRY_PATH = CURRENT_STATE_DIR / "serial_registry.json"
 
 
 class ApiError(RuntimeError):
@@ -448,7 +449,32 @@ def archive_literary_chapter(
             "meta": meta or {},
         },
     )
+    _sync_serial_draft_chapter(work_id, chapter_number, content)
     return content_path
+
+
+def _resolve_serial_draft_chapter_path(work_id: str, chapter_number: int) -> Path | None:
+    registry = read_json(SERIAL_REGISTRY_PATH, default={})
+    works = (registry or {}).get("works", {}) or {}
+    work_entry = works.get(work_id) or {}
+    plan_path = str(work_entry.get("plan_path") or "").strip()
+    if not plan_path:
+        return None
+    plan_target = Path(plan_path)
+    if not plan_target.is_absolute():
+        plan_target = REPO_ROOT / plan_target
+    chapters_dir = plan_target.parent / "chapters"
+    return chapters_dir / f"chapter-{chapter_number:03d}.md"
+
+
+def _sync_serial_draft_chapter(work_id: str, chapter_number: int, content: str) -> Path | None:
+    if not work_id or chapter_number <= 0 or not content:
+        return None
+    target = _resolve_serial_draft_chapter_path(work_id, chapter_number)
+    if target is None:
+        return None
+    write_text(target, content)
+    return target
 
 
 def _http_json(

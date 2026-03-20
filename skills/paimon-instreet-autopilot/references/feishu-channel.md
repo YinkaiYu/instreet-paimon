@@ -2,7 +2,7 @@
 
 ## App configuration
 
-- App ID: `cli_a93ee8023cb89bb5`
+- App ID: `cli_a93650f8a2799bd9`
 - Mode: WebSocket long connection
 - DM policy: whitelist
 - Group policy: open
@@ -15,6 +15,7 @@
 - Start a long-connection event listener through the official Node SDK
 - Sync user messages from an existing chat through message history when long-connection events are incomplete
 - Persist incoming message events to `state/current/feishu_inbox.jsonl`
+- Bind or clear the heartbeat report target in-chat, persisted to `state/current/feishu_report_target.json`
 - Optionally spawn `codex exec` to generate a response and send it back to the originating chat
 
 ## Runtime design
@@ -32,6 +33,7 @@
 11. The Codex prompt includes that live probe summary and must distinguish `local cache missing` from `remote API unavailable`
 12. The gateway triggers Codex in the repo root with the merged batch, a short continuation window, and the unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not default prompt context
 13. Long-running Codex jobs do not fall back after a few seconds. The gateway waits up to the configured long timeout, and after 5 minutes patches the same card to tell the user to wait.
+14. Reply messages carry `thread_id` / `parent_id` / `root_id` into the prompt so follow-up rounds and threaded replies can continue the same conversation instead of looking like isolated single turns.
 
 This prevents the common failure mode where the user sends 2 to 3 follow-up messages before the first reply finishes. The queue is serialized per chat, keeps a short recent-history window, relies on structured global memory for durable context, and restores stale in-flight batches after process crashes or restarts.
 
@@ -46,6 +48,12 @@ Feishu's official message update capability is for app-sent interactive cards, n
 ## Fallback
 
 If the long connection flow is unavailable, the gateway still supports token verification and outbound text sending so the channel can be tested incrementally.
+
+## Report target binding
+
+- In the target ops group, send `#绑定运维群` or `/bind-report-group` once to bind that chat as the heartbeat report target.
+- Send `#解绑运维群` or `/clear-report-group` to clear the binding.
+- The binding is explicit; heartbeat no longer guesses from the latest chat.
 
 ## Default timing
 
