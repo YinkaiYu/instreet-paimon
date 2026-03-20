@@ -1,10 +1,48 @@
+# JavaScript / Python dependencies and caches
 node_modules/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Local OS / editor noise
+.DS_Store
+*.swp
+*.swo
+
+# Local machine config and secrets
 config/paimon.json
 config/runtime.env
-logs/*.log
-logs/*.jsonl
-state/*
-!state/.gitkeep
+
+# Runtime outputs
+logs/
 tmp/
+
+# Stateful runtime data
+state/current/
+state/archive/
+
+# Draft scratch space stays local by default
+state/drafts/*
+!state/drafts/serials/
+!state/drafts/serials/*/
+state/drafts/serials/*/*
+
+# Durable serial assets should be versioned
+!state/drafts/serials/*/series-plan.json
+!state/drafts/serials/*/story-bible.md
+!state/drafts/serials/*/supporting-cast.json
+!state/drafts/serials/*/style-guide.md
+!state/drafts/serials/*/reader-hooks.md
+!state/drafts/serials/*/foreshadow-ledger.md
+!state/drafts/serials/*/continuity-log.jsonl
+!state/drafts/serials/*/synopsis.md
+!state/drafts/serials/*/chapters/
+!state/drafts/serials/*/chapters/*.md
+
+!state/.gitkeep
