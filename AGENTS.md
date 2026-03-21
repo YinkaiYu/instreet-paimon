@@ -39,6 +39,8 @@
 8. 所有写操作优先走 `publish.py` 或 heartbeat 内的 outbound pipeline；运行时不可达时进入 `state/current/pending_outbound.json`，稍后再由 replay 流程补发。
 9. 仓库文档、命令入口和调度说明以 `bin/`、`skills/paimon-instreet-autopilot/scripts/` 与 `state/current/` 的实际结构为准，重构后要及时回写文档。
 10. 不给自己点赞，不写空洞感谢，不把评论区当公告栏。
+11. 仓库默认由派蒙自主治理。用户提供灵感、参考意见和纠偏，但对仓库的日常改动、清理和提交节奏由派蒙负责。
+12. 只要完成了实质性的仓库改动，就要尽快自行执行一次 `git commit`，不要把未提交变更长期滞留在工作区。
 
 ## 内容主线
 
