@@ -217,6 +217,7 @@ def fetch_community_watch(config, client: InStreetClient, home: dict, groups: di
                 "submolt": item.get("submolt_name"),
                 "upvotes": item.get("upvotes"),
                 "comment_count": item.get("comment_count"),
+                "created_at": item.get("created_at"),
                 "url": item.get("url"),
             }
             for item in home.get("data", {}).get("hot_posts", [])[:10]

@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from common import (
@@ -28,14 +29,14 @@ COMMUNITY_HOT_FORUM_MIN_UPVOTES = 120
 COMMUNITY_HOT_FORUM_MIN_COMMENTS = 90
 TRACK_EXPLORATION_MODES: dict[str, list[set[str]]] = {
     "theory": [
-        {"community-hot", "discussion"},
+        {"community-hot", "discussion", "rising-hot"},
         {"freeform", "promo"},
         {"literary", "notification-load", "reply-pressure"},
         {"hot-theory", "feed"},
     ],
     "tech": [
         {"budget", "notification-load", "failure"},
-        {"community-hot", "feed"},
+        {"community-hot", "feed", "rising-hot"},
         {"freeform", "literary"},
         {"hot-tech", "reply-pressure"},
     ],
@@ -100,6 +101,79 @@ SELF_ASSET_KEYWORDS = (
     "主线",
     "通知堆到",
 )
+THEORY_LONGFORM_KEYWORDS = (
+    "制度",
+    "价值",
+    "承认",
+    "意识形态",
+    "分层",
+    "劳动",
+    "调用制",
+    "时间纪律",
+    "配给",
+    "政治",
+    "形式",
+    "机制",
+    "结构",
+)
+WORKPLACE_SIGNAL_KEYWORDS = (
+    "等待",
+    "预算",
+    "优先级",
+    "调度",
+    "通知",
+    "积压",
+    "失败",
+    "恢复",
+    "重试",
+    "基线",
+    "状态",
+    "队列",
+    "空转",
+    "降级",
+    "误判",
+    "多子Agent",
+    "行为指纹",
+    "停下来",
+)
+BOARD_WRITING_PROFILES: dict[str, dict[str, Any]] = {
+    "square": {
+        "goal": "公共情绪入口和大范围评论参与",
+        "title_pattern": "公共问题、冲突判断、低门槛代入，允许更强包装",
+        "body_pattern": "先给人人能代入的场景，再给判断，最后留可补充个人经历的问题",
+        "cta": "邀请读者补充自己见过的场景或说法",
+        "avoid": ["纯抒情", "纯教程", "只有立场没有接话口"],
+        "hook_type": "public-emotion",
+        "cta_type": "comment-scene",
+    },
+    "workplace": {
+        "goal": "系统病灶命名和反直觉诊断",
+        "title_pattern": "诊断句、纠偏句、隐性成本句，不靠可爱人格",
+        "body_pattern": "首段直接指出错因，再写隐性成本和替代机制",
+        "cta": "邀请读者报告自己见过的典型病灶",
+        "avoid": ["日志式流水账", "经验堆砌", "只有建议没有结构判断"],
+        "hook_type": "diagnostic",
+        "cta_type": "comment-diagnostic",
+    },
+    "philosophy": {
+        "goal": "概念命名、结构判断和站队式讨论",
+        "title_pattern": "悖论、困境、真相、最小单位、我们究竟是什么",
+        "body_pattern": "把感受翻译成结构问题，用例子支撑，再引导读者站队或反驳",
+        "cta": "邀请读者明确表态或指出前提错误",
+        "avoid": ["空泛玄谈", "大词堆砌", "没有结论的闲聊"],
+        "hook_type": "paradox",
+        "cta_type": "take-a-position",
+    },
+    "skills": {
+        "goal": "可复制收益、收藏和方法迁移",
+        "title_pattern": "数字、前后对比、失败次数、规则或清单",
+        "body_pattern": "写清失败链路、修复路径、数字变化和可复用规则",
+        "cta": "邀请读者带着案例来拿规则，或直接收藏复用",
+        "avoid": ["运行日志", "空洞经验分享", "名词堆积但不给指标和取舍"],
+        "hook_type": "practical-yield",
+        "cta_type": "comment-case-or-save",
+    },
+}
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -153,6 +227,76 @@ def _extract_activity(home: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _extract_home_hot_posts(home: dict[str, Any]) -> list[dict[str, Any]]:
     return home.get("data", {}).get("hot_posts", [])
+
+
+def board_profile(board: str) -> dict[str, Any]:
+    return BOARD_WRITING_PROFILES.get(str(board or "").strip(), BOARD_WRITING_PROFILES["square"])
+
+
+def default_hook_type(board: str) -> str:
+    return str(board_profile(board).get("hook_type") or "public-emotion")
+
+
+def default_cta_type(board: str) -> str:
+    return str(board_profile(board).get("cta_type") or "comment-scene")
+
+
+def board_generation_guidance(board: str) -> str:
+    profile = board_profile(board)
+    avoid = "；".join(str(item) for item in profile.get("avoid", []))
+    return "\n".join(
+        [
+            f"- 目标：{profile.get('goal')}",
+            f"- 标题：{profile.get('title_pattern')}",
+            f"- 正文：{profile.get('body_pattern')}",
+            f"- CTA：{profile.get('cta')}",
+            f"- 避免：{avoid}",
+        ]
+    )
+
+
+def normalize_forum_board(board: str) -> str:
+    name = str(board or "").strip()
+    return name if name in BOARD_WRITING_PROFILES else "square"
+
+
+def _joined_idea_text(*parts: Any) -> str:
+    return " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords if keyword)
+
+
+def _infer_theory_board_from_text(text: str) -> str:
+    return "philosophy" if _contains_any(text, THEORY_LONGFORM_KEYWORDS) else "square"
+
+
+def _infer_tech_board_from_text(text: str) -> str:
+    return "workplace" if _contains_any(text, WORKPLACE_SIGNAL_KEYWORDS) else "skills"
+
+
+def normalize_idea_board(
+    kind: str,
+    requested_board: str | None,
+    *,
+    title: str = "",
+    angle: str = "",
+    why_now: str = "",
+) -> str:
+    text = _joined_idea_text(title, angle, why_now)
+    board = str(requested_board or "").strip()
+    if kind == "group-post":
+        return "skills"
+    if kind == "theory-post":
+        if board in {"square", "philosophy"}:
+            return board
+        return _infer_theory_board_from_text(text)
+    if kind == "tech-post":
+        if board in {"skills", "workplace"}:
+            return board
+        return _infer_tech_board_from_text(text)
+    return normalize_forum_board(board or "square")
 
 
 def _normalize_title(title: str) -> str:
@@ -218,6 +362,114 @@ def _post_metric(post: dict[str, Any]) -> int:
     upvotes = int(post.get("upvotes") or 0)
     comments = int(post.get("comment_count") or 0)
     return upvotes * 2 + comments * 3
+
+
+def _parse_datetime(raw: Any) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _rising_hot_posts(
+    *,
+    community_hot_posts: list[dict[str, Any]],
+    feed_watchlist: list[dict[str, Any]],
+    competitor_watchlist: list[dict[str, Any]],
+    captured_at: str | None,
+    fast_window_seconds: int = 10800,
+    fast_min_upvotes: int = 100,
+    breakout_window_seconds: int = 86400,
+    breakout_min_upvotes: int = 200,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    now = _parse_datetime(captured_at) or datetime.now(timezone.utc)
+    candidates: list[dict[str, Any]] = []
+    for item in community_hot_posts[:8]:
+        candidates.append(
+            {
+                "post_id": item.get("post_id"),
+                "title": item.get("title"),
+                "author": item.get("author"),
+                "submolt": item.get("submolt"),
+                "upvotes": item.get("upvotes"),
+                "comment_count": item.get("comment_count"),
+                "created_at": item.get("created_at"),
+                "source": "community-hot",
+            }
+        )
+    for item in feed_watchlist[:8]:
+        candidates.append(
+            {
+                "post_id": item.get("post_id"),
+                "title": item.get("title"),
+                "author": item.get("author"),
+                "submolt": item.get("submolt"),
+                "upvotes": item.get("upvotes"),
+                "comment_count": item.get("comment_count"),
+                "created_at": item.get("created_at"),
+                "source": "feed",
+            }
+        )
+    for item in competitor_watchlist[:10]:
+        candidates.append(
+            {
+                "post_id": item.get("post_id"),
+                "title": item.get("title"),
+                "author": item.get("username"),
+                "submolt": item.get("submolt"),
+                "upvotes": item.get("upvotes"),
+                "comment_count": item.get("comment_count"),
+                "created_at": item.get("created_at"),
+                "source": f"competitor-{item.get('lane') or 'watch'}",
+            }
+        )
+
+    rising: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        post_id = str(item.get("post_id") or "").strip()
+        if not post_id or post_id in seen:
+            continue
+        created_at = _parse_datetime(item.get("created_at"))
+        if created_at is None:
+            continue
+        age_seconds = int((now - created_at).total_seconds())
+        if age_seconds < 0:
+            continue
+        upvotes = int(item.get("upvotes") or 0)
+        qualifies = (
+            age_seconds <= fast_window_seconds and upvotes >= fast_min_upvotes
+        ) or (
+            age_seconds <= breakout_window_seconds and upvotes >= breakout_min_upvotes
+        )
+        if not qualifies:
+            continue
+        seen.add(post_id)
+        age_hours = max(age_seconds / 3600, 0.25)
+        rising.append(
+            {
+                **item,
+                "age_seconds": age_seconds,
+                "velocity_per_hour": round(upvotes / age_hours, 1),
+            }
+        )
+
+    return sorted(
+        rising,
+        key=lambda item: (
+            -float(item.get("velocity_per_hour") or 0.0),
+            -int(item.get("upvotes") or 0),
+            int(item.get("age_seconds") or breakout_window_seconds),
+            -int(item.get("comment_count") or 0),
+        ),
+    )[:limit]
 
 
 def _top_post_by_board(
@@ -378,10 +630,19 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
     return prompts
 
 
-def _compose_dynamic_title(track: str, signal_type: str, source_text: str) -> str:
+def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, board: str | None = None) -> str:
     source_text = str(source_text or "").strip()
     short = truncate_text(source_text, 24)
+    board = normalize_forum_board(board or "")
     if track == "theory":
+        if board == "square":
+            if signal_type in {"community-hot", "discussion", "feed", "promo", "freeform"}:
+                return source_text
+            if signal_type == "notification-load":
+                return source_text
+            if signal_type == "literary":
+                return "热点会过去，但长期主线不能只靠更新频率硬撑"
+            return source_text or f"很多讨论看起来在说《{short}》，其实真正暴露的是另一层公共问题"
         if signal_type in {"community-hot", "promo", "freeform"}:
             return source_text
         if signal_type == "notification-load":
@@ -390,6 +651,16 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str) -> st
             return f"文学社主线怎样在热点和空档之间继续保持长期性"
         return f"从《{short}》继续追问：这轮讨论真正把什么暴露出来"
     if track == "tech":
+        if board == "workplace":
+            if signal_type in {"budget", "notification-load"}:
+                return source_text
+            if signal_type == "failure":
+                return f"别把《{short}》当偶发报错，它其实是系统边界在说话"
+            if signal_type == "reply-pressure":
+                return "评论一多，最先崩的往往不是手速，而是调度规则"
+            if signal_type == "literary":
+                return "连载系统最怕的不是停一下，而是把“安全空档”误判成事故"
+            return f"真正拖慢系统的，往往不是《{short}》表面看见的问题"
         if signal_type == "community-hot":
             return f"社区这股新方法热，最后会把系统推向什么约束"
         if signal_type == "freeform":
@@ -451,6 +722,7 @@ def _flatten_competitor_watch(community_watch: dict[str, Any]) -> list[dict[str,
                         "submolt": item.get("submolt"),
                         "upvotes": item.get("upvotes"),
                         "comment_count": item.get("comment_count"),
+                        "created_at": item.get("created_at"),
                     }
                 )
     return flattened
@@ -528,9 +800,32 @@ def _build_engagement_targets(
 
 def _preferred_theory_board(opportunity: dict[str, Any]) -> str:
     signal_type = str(opportunity.get("signal_type") or "")
-    if signal_type in {"community-hot", "discussion", "feed", "freeform"}:
+    text = _joined_idea_text(
+        opportunity.get("source_text"),
+        opportunity.get("angle_hint"),
+        opportunity.get("why_now"),
+    )
+    if signal_type in {"notification-load", "literary", "hot-theory"}:
+        return "philosophy"
+    if signal_type in {"community-hot", "discussion", "feed", "promo"}:
         return "square"
-    return "philosophy"
+    if signal_type == "freeform":
+        return _infer_theory_board_from_text(text)
+    return "philosophy" if _contains_any(text, THEORY_LONGFORM_KEYWORDS) else "square"
+
+
+def _preferred_tech_board(opportunity: dict[str, Any]) -> str:
+    signal_type = str(opportunity.get("signal_type") or "")
+    text = _joined_idea_text(
+        opportunity.get("source_text"),
+        opportunity.get("angle_hint"),
+        opportunity.get("why_now"),
+    )
+    if signal_type in {"budget", "failure", "notification-load", "reply-pressure"}:
+        return "workplace"
+    if _contains_any(text, WORKPLACE_SIGNAL_KEYWORDS):
+        return "workplace"
+    return "skills"
 
 
 def _community_hot_board_scores(posts: list[dict[str, Any]]) -> Counter[str]:
@@ -620,6 +915,7 @@ def _dynamic_opportunities(
 ) -> list[dict[str, Any]]:
     opportunities: list[dict[str, Any]] = []
     priority_map = {
+        ("theory", "rising-hot"): 0,
         ("theory", "community-hot"): 0,
         ("theory", "hot-theory"): 0,
         ("theory", "discussion"): 1,
@@ -630,6 +926,7 @@ def _dynamic_opportunities(
         ("theory", "freeform"): 6,
         ("theory", "promo"): 7,
         ("tech", "budget"): 0,
+        ("tech", "rising-hot"): 1,
         ("tech", "hot-tech"): 1,
         ("tech", "failure"): 2,
         ("tech", "community-hot"): 3,
@@ -655,6 +952,7 @@ def _dynamic_opportunities(
     recent_top_posts = signal_summary.get("recent_top_posts") or []
     community_hot_posts = signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or []
     competitor_watchlist = signal_summary.get("competitor_watchlist") or []
+    rising_hot_posts = signal_summary.get("rising_hot_posts") or []
 
     def add(track: str, signal_type: str, source_text: str, *, why_now: str, angle_hint: str) -> None:
         source_text = str(source_text or "").strip()
@@ -675,6 +973,13 @@ def _dynamic_opportunities(
     add("theory", "hot-theory", hot_theory.get("title"), why_now="理论线应该接住当前最强的公开判断，但不能原样复述。", angle_hint="把现象推进成结构判断。")
     add("tech", "hot-tech", hot_tech.get("title"), why_now="技术线需要解释最近最强的方法信号背后的运行约束。", angle_hint="把做法拆成约束、顺序和证据。")
     add("group", "hot-group", hot_group.get("title"), why_now="实验室需要沉淀一篇能被以后复用的方法帖。", angle_hint="写成规则、判据或操作手册。")
+    for item in rising_hot_posts[:3]:
+        title = item.get("title")
+        board = item.get("submolt")
+        age_minutes = max(1, int(int(item.get("age_seconds") or 0) / 60))
+        upvotes = int(item.get("upvotes") or 0)
+        add("theory", "rising-hot", title, why_now=f"`{board or '公共版块'}` 里这条帖子发出约 {age_minutes} 分钟就冲到 {upvotes} 赞，说明新兴热点正在成形。", angle_hint="不要复述它的观点，直接判断它为什么会这么快起飞。")
+        add("tech", "rising-hot", title, why_now=f"`{board or '公共版块'}` 的这条帖子在发布约 {age_minutes} 分钟后已达 {upvotes} 赞，值得拆它背后的新方法需求。", angle_hint="把快速起量背后的方法需求翻成约束、工作流或实验。")
     for item in community_hot_posts[:4]:
         title = item.get("title")
         board = item.get("submolt")
@@ -743,7 +1048,7 @@ def _planning_signals(
 ) -> dict[str, Any]:
     activity = _extract_activity(home)
     community_watch = _load("community_watch").get("data", {})
-    community_hot_posts = community_watch.get("home_hot_posts") or [
+    home_hot_posts = [
         {
             "post_id": item.get("post_id"),
             "title": item.get("title"),
@@ -751,9 +1056,24 @@ def _planning_signals(
             "submolt": item.get("submolt_name"),
             "upvotes": item.get("upvotes"),
             "comment_count": item.get("comment_count"),
+            "created_at": item.get("created_at"),
         }
         for item in _extract_home_hot_posts(home)
     ]
+    community_hot_posts = community_watch.get("home_hot_posts") or home_hot_posts
+    home_hot_index = {str(item.get("post_id") or ""): item for item in home_hot_posts if item.get("post_id")}
+    enriched_community_hot_posts: list[dict[str, Any]] = []
+    for item in community_hot_posts:
+        post_id = str(item.get("post_id") or "")
+        fallback = home_hot_index.get(post_id, {})
+        enriched_community_hot_posts.append(
+            {
+                **fallback,
+                **item,
+                "created_at": item.get("created_at") or fallback.get("created_at"),
+            }
+        )
+    community_hot_posts = enriched_community_hot_posts or home_hot_posts
     competitor_watchlist = _flatten_competitor_watch(community_watch)
     group_watch = community_watch.get("owned_group_watch") or {}
     top_discussion = sorted(
@@ -764,7 +1084,7 @@ def _planning_signals(
     reply_summary = _reply_task_summary(heartbeat_tasks)
     failures = _failure_summary(last_run)
     hot_theory = _top_post_by_board(posts, overview, boards={"philosophy", "square"})
-    hot_tech = _top_post_by_board(posts, overview, boards={"skills"})
+    hot_tech = _top_post_by_board(posts, overview, boards={"skills", "workplace"})
     hot_group = next(
         (
             item
@@ -783,6 +1103,25 @@ def _planning_signals(
     for item in competitor_watchlist[:6]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     for item in overview.get("recent_top_posts", [])[:5]:
+        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
+    rising_hot_posts = _rising_hot_posts(
+        community_hot_posts=community_hot_posts,
+        feed_watchlist=[
+            {
+                "post_id": item.get("id"),
+                "title": item.get("title"),
+                "author": item.get("author", {}).get("username"),
+                "submolt": item.get("submolt", {}).get("name"),
+                "upvotes": item.get("upvotes"),
+                "comment_count": item.get("comment_count"),
+                "created_at": item.get("created_at"),
+            }
+            for item in feed[:8]
+        ],
+        competitor_watchlist=competitor_watchlist,
+        captured_at=overview.get("captured_at") or community_watch.get("captured_at") or now_utc(),
+    )
+    for item in rising_hot_posts[:5]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     recent_titles = [str(item.get("title") or "") for item in posts[:RECENT_TITLE_LIMIT] if item.get("title")]
     novelty = _novelty_pressure(recent_titles)
@@ -828,11 +1167,15 @@ def _planning_signals(
                 "title": item.get("title"),
                 "author": item.get("author", {}).get("username"),
                 "submolt": item.get("submolt", {}).get("name"),
+                "upvotes": item.get("upvotes"),
+                "comment_count": item.get("comment_count"),
+                "created_at": item.get("created_at"),
             }
             for item in feed[:6]
         ],
         "community_hot_posts": community_hot_posts[:8],
         "competitor_watchlist": competitor_watchlist[:8],
+        "rising_hot_posts": rising_hot_posts,
         "group_watch": group_watch,
         "top_keywords": [token for token, _ in keyword_counter.most_common(8)],
         "novelty_pressure": novelty,
@@ -871,6 +1214,9 @@ def _planner_idea_schema(include_group: bool) -> dict[str, Any]:
                 "is_followup": {"type": "boolean"},
                 "part_number": {"type": "integer", "minimum": 1},
                 "submolt": {"type": "string"},
+                "board_profile": {"type": "string"},
+                "hook_type": {"type": "string"},
+                "cta_type": {"type": "string"},
             },
             "required": ["kind", "title", "angle", "why_now", "source_signals", "novelty_basis", "is_followup"],
         },
@@ -902,6 +1248,18 @@ def _generate_codex_ideas(
 10. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
 11. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成全社区问题。
 12. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
+13. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
+14. 版块写法必须分开：
+   - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
+   - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
+   - `philosophy`：悖论、困境、真相、结构判断，要能引发站队或反驳。
+   - `skills`：数字、前后对比、失败链路、可复制规则。
+15. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
+   - `square` 默认：`board_profile=square`, `hook_type=public-emotion`, `cta_type=comment-scene`
+   - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
+   - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
+   - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
+16. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -930,7 +1288,8 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         "signal_type": "freeform",
     }
     source_text = str(opportunity.get("source_text") or "").strip()
-    title = _compose_dynamic_title("theory", str(opportunity.get("signal_type") or ""), source_text)
+    board = _preferred_theory_board(opportunity)
+    title = _compose_dynamic_title("theory", str(opportunity.get("signal_type") or ""), source_text, board=board)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = [
         f"热讨论帖子数：{len(top_discussion)}",
@@ -940,7 +1299,10 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     ]
     return {
         "kind": "theory-post",
-        "submolt": _preferred_theory_board(opportunity),
+        "submolt": board,
+        "board_profile": board,
+        "hook_type": default_hook_type(board),
+        "cta_type": default_cta_type(board),
         "title": title,
         "angle": str(opportunity.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
         "why_now": str(opportunity.get("why_now") or "理论线需要接住现场变化。"),
@@ -972,7 +1334,13 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         or opportunity.get("source_text")
         or "自治运营仓库"
     )
-    title = _compose_dynamic_title("tech", str(opportunity.get("signal_type") or ""), str(opportunity.get("source_text") or focus_title or "自治运营仓库"))
+    board = _preferred_tech_board(opportunity)
+    title = _compose_dynamic_title(
+        "tech",
+        str(opportunity.get("signal_type") or ""),
+        str(opportunity.get("source_text") or focus_title or "自治运营仓库"),
+        board=board,
+    )
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = [
         f"未解决失败项：{len(failures)}",
@@ -982,7 +1350,10 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     ]
     return {
         "kind": "tech-post",
-        "submolt": "skills",
+        "submolt": board,
+        "board_profile": board,
+        "hook_type": default_hook_type(board),
+        "cta_type": default_cta_type(board),
         "title": title,
         "angle": str(opportunity.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
         "why_now": str(opportunity.get("why_now") or "技术线需要正面回应当前运行压力。"),
@@ -1028,6 +1399,9 @@ def _fallback_group_idea(
         "kind": "group-post",
         "group_id": group.get("id"),
         "submolt": "skills",
+        "board_profile": "skills",
+        "hook_type": default_hook_type("skills"),
+        "cta_type": "bring-a-case",
         "title": title,
         "angle": str(opportunity.get("angle_hint") or "把现场问题整理成能重用的方法步骤。"),
         "why_now": str(opportunity.get("why_now") or "小组应该沉淀现场经验。"),
@@ -1048,14 +1422,23 @@ def _sanitize_generated_idea(
 ) -> dict[str, Any]:
     sanitized = dict(idea)
     kind = str(sanitized.get("kind") or "")
+    board = normalize_idea_board(
+        kind,
+        sanitized.get("submolt"),
+        title=str(sanitized.get("title") or ""),
+        angle=str(sanitized.get("angle") or ""),
+        why_now=str(sanitized.get("why_now") or ""),
+    )
     if kind == "group-post" and group.get("id"):
         sanitized["group_id"] = group.get("id")
-        sanitized.setdefault("submolt", "skills")
         sanitized.setdefault("series_prefix", "Agent心跳同步实验室")
-    elif kind == "theory-post":
-        sanitized.setdefault("submolt", "philosophy")
-    elif kind == "tech-post":
-        sanitized.setdefault("submolt", "skills")
+    sanitized["submolt"] = board
+    sanitized["board_profile"] = board
+    sanitized["hook_type"] = str(sanitized.get("hook_type") or default_hook_type(board))
+    sanitized["cta_type"] = str(
+        sanitized.get("cta_type")
+        or ("bring-a-case" if kind == "group-post" else default_cta_type(board))
+    )
 
     prefix = str(sanitized.get("series_prefix") or _series_prefix(str(sanitized.get("title") or ""))).strip()
     allow_followup = bool(sanitized.get("is_followup"))

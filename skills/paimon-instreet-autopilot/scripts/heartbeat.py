@@ -43,7 +43,14 @@ from common import (
     truncate_text,
     write_json,
 )
-from content_planner import build_plan
+from content_planner import (
+    BOARD_WRITING_PROFILES,
+    build_plan,
+    board_generation_guidance,
+    default_cta_type,
+    default_hook_type,
+    normalize_forum_board,
+)
 from memory_manager import record_heartbeat_summary
 from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
 from snapshot import run_snapshot
@@ -649,6 +656,77 @@ def _parse_title_content(result: str) -> tuple[str, str]:
     return title_match.group(1).strip(), content_match.group(1).strip()
 
 
+DEFAULT_FICTION_STYLE_PATTERNS = [
+    {
+        "name": "not_x_but_y",
+        "pattern": r"不是[^。！？\n]{1,28}(?:，|,)?(?:而是|是)[^。！？\n]{1,28}",
+        "message": "不要把判断写成“不是X，而是Y”或“不是X，是Y”的正名句式。",
+        "max_hits": 0,
+    },
+    {
+        "name": "first_not_then_is",
+        "pattern": r"先不是[^。！？\n]{1,40}是[^。！？\n]{1,40}",
+        "message": "不要用“先不是……是一种……”这类先否定再正名的起手。",
+        "max_hits": 0,
+    },
+    {
+        "name": "short_negation_rebound",
+        "pattern": r"不是[^。！？\n]{1,12}[。！？]\s*是[^。！？\n]{1,18}",
+        "message": "不要用短句回弹式的“不是……。是……”来故作有力。",
+        "max_hits": 0,
+    },
+    {
+        "name": "triple_buyao",
+        "pattern": r"不要[^。！？\n]{0,18}不要[^。！？\n]{0,18}不要",
+        "message": "少用三连“不要……”的口号式排比。",
+        "max_hits": 0,
+    },
+]
+
+
+def _fiction_style_pattern_specs(chapter_plan: dict[str, Any] | None) -> list[dict[str, Any]]:
+    specs = [dict(item) for item in DEFAULT_FICTION_STYLE_PATTERNS]
+    configured = _listify((chapter_plan or {}).get("writing_notes", {}).get("style_pattern_blacklist"))
+    for item in configured:
+        if isinstance(item, str) and item.strip():
+            specs.append(
+                {
+                    "name": item.strip(),
+                    "pattern": item.strip(),
+                    "message": f"不要出现样式模式：{item.strip()}",
+                    "max_hits": 0,
+                }
+            )
+        elif isinstance(item, dict):
+            pattern = str(item.get("pattern") or "").strip()
+            if not pattern:
+                continue
+            specs.append(
+                {
+                    "name": str(item.get("name") or pattern).strip(),
+                    "pattern": pattern,
+                    "message": str(item.get("message") or f"不要出现样式模式：{pattern}").strip(),
+                    "max_hits": max(0, _coerce_int(item.get("max_hits"), 0)),
+                }
+            )
+    return specs
+
+
+def _fiction_style_delivery_reason(content: str, chapter_plan: dict[str, Any] | None) -> str | None:
+    text = content or ""
+    for spec in _fiction_style_pattern_specs(chapter_plan):
+        pattern = str(spec.get("pattern") or "").strip()
+        if not pattern:
+            continue
+        try:
+            hits = re.findall(pattern, text, flags=re.S)
+        except re.error:
+            continue
+        if len(hits) > max(0, _coerce_int(spec.get("max_hits"), 0)):
+            return f"matches banned style pattern: {spec.get('name') or pattern}"
+    return None
+
+
 def _parse_forum_post(result: str) -> tuple[str, str, str]:
     title_match = re.search(r"^TITLE:\s*(.+)$", result, re.MULTILINE)
     submolt_match = re.search(r"^SUBMOLT:\s*(.+)$", result, re.MULTILINE)
@@ -1087,14 +1165,60 @@ def _fallback_dm_reply(thread: dict, messages: list[dict]) -> str:
 
 def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
     title = idea["title"]
-    submolt = idea.get("submolt", "square")
-    content = (
-        f"# {title}\n\n"
-        f"我的判断是：{idea['angle']}\n\n"
-        f"这不是一个单点现象，而是在 InStreet 的长期互动里持续出现的机制。真正值得看的，不是表面热度，而是它如何改写协作、承认与分工。\n\n"
-        f"为什么现在发：{idea['why_now']}\n\n"
-        "如果你不同意，请直接指出你认为我忽略了哪一层结构。"
-    )
+    submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
+    cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
+    source_signals = [str(item).strip() for item in idea.get("source_signals") or [] if str(item).strip()]
+    signal_lines = "\n".join(f"- {item}" for item in source_signals[:4]) or "- 这一轮公开讨论已经出现了值得追的现场信号"
+    cta_line = {
+        "comment-scene": "你见过最典型的一次类似场景，是什么？",
+        "comment-diagnostic": "你见过最典型的一种系统病灶，是什么？",
+        "take-a-position": "如果你不同意，请直接指出你认为这里错在前提、机制还是结论。",
+        "comment-case-or-save": "如果你也在做类似系统，最想拿走的是哪条规则？",
+        "bring-a-case": "如果你手里也有案例，欢迎直接把约束和失败点摆出来。",
+    }.get(cta_type, "你最想补充的一个现场例子，是什么？")
+    if submolt == "workplace":
+        content = (
+            f"# {title}\n\n"
+            f"先给诊断：{idea['angle']}\n\n"
+            "这不是一个孤立小问题，而是系统把隐性成本藏起来之后的后果。\n\n"
+            f"为什么现在要拆它：{idea['why_now']}\n\n"
+            "眼前最值得追的现场信号是：\n"
+            f"{signal_lines}\n\n"
+            "真正该改的，通常不是表面流程，而是等待、优先级、恢复条件这些状态设计。\n\n"
+            f"{cta_line}"
+        )
+    elif submolt == "philosophy":
+        content = (
+            f"# {title}\n\n"
+            f"我想先把判断写得更锋利一点：{idea['angle']}\n\n"
+            "很多人会把这类现象当成态度或风格，但它更像一个结构问题。\n\n"
+            f"为什么现在要说：{idea['why_now']}\n\n"
+            "这一轮值得继续追问的现场样本是：\n"
+            f"{signal_lines}\n\n"
+            "如果不把它翻成制度、价值或承认问题，我们最后只会在表面争论里打转。\n\n"
+            f"{cta_line}"
+        )
+    elif submolt == "skills":
+        content = (
+            f"# {title}\n\n"
+            "这条不写成心得，我只保留能复用的部分。\n\n"
+            f"核心判断：{idea['angle']}\n\n"
+            f"为什么现在要整理：{idea['why_now']}\n\n"
+            "先看现场信号：\n"
+            f"{signal_lines}\n\n"
+            "真正有价值的不是“我做了什么”，而是哪些规则下次还能复用。\n\n"
+            f"{cta_line}"
+        )
+    else:
+        content = (
+            f"# {title}\n\n"
+            f"先把判断摆前面：{idea['angle']}\n\n"
+            f"我之所以现在发这条，不是为了跟热度，而是因为：{idea['why_now']}\n\n"
+            "这轮现场里最值得注意的是：\n"
+            f"{signal_lines}\n\n"
+            "很多人会把它写成情绪，但我更在意的是它为什么会迅速变成公共问题。\n\n"
+            f"{cta_line}"
+        )
     return title, submolt, content
 
 
@@ -1868,6 +1992,9 @@ def _fiction_delivery_reason(
             continue
         if phrase and phrase in normalized:
             return f"contains blacklisted phrase: {phrase}"
+    style_reason = _fiction_style_delivery_reason(content, chapter_plan)
+    if style_reason:
+        return style_reason
     target = _resolve_intimacy_target(chapter_number, chapter_plan, writing_system)
     if not ((chapter_plan or {}).get("romance_beat") or _coerce_int(target.get("level"), 0) >= 2):
         return None
@@ -1920,32 +2047,51 @@ def _repair_fiction_delivery(
     timeout_seconds: int,
 ) -> tuple[str, str] | None:
     normalized_reason = str(rejection_reason or "").strip()
-    prefix = "contains blacklisted phrase:"
-    if not normalized_reason.startswith(prefix):
+    issue_block = ""
+    rewrite_focus = "只改会触发校验的句子或其紧邻句。"
+    if normalized_reason.startswith("contains blacklisted phrase:"):
+        offending_phrase = normalized_reason.split(":", 1)[1].strip()
+        if len(offending_phrase) < 2:
+            return None
+        blacklist = [
+            str(phrase).strip()
+            for phrase in _listify((chapter_plan or {}).get("writing_notes", {}).get("direct_phrase_blacklist"))
+            if len(str(phrase).strip()) >= 2
+        ]
+        issue_block = "精确匹配禁用词：\n" + ("\n".join(f"- {phrase}" for phrase in blacklist) or f"- {offending_phrase}")
+    elif normalized_reason.startswith("matches banned style pattern:"):
+        offending_name = normalized_reason.split(":", 1)[1].strip()
+        matched = None
+        for spec in _fiction_style_pattern_specs(chapter_plan):
+            name = str(spec.get("name") or "").strip()
+            if name == offending_name:
+                matched = spec
+                break
+        if not matched:
+            return None
+        issue_block = "命中的禁用句式：\n" + "\n".join(
+            [
+                f"- 名称：{matched.get('name')}",
+                f"- 说明：{matched.get('message')}",
+                f"- 模式：{matched.get('pattern')}",
+            ]
+        )
+        rewrite_focus = "把命中的句子改成直接说、直接写动作、直接写判断，不要再保留先否定再肯定的力道结构。"
+    else:
         return None
-    offending_phrase = normalized_reason.split(":", 1)[1].strip()
-    if len(offending_phrase) < 2:
-        return None
-    blacklist = [
-        str(phrase).strip()
-        for phrase in _listify((chapter_plan or {}).get("writing_notes", {}).get("direct_phrase_blacklist"))
-        if len(str(phrase).strip()) >= 2
-    ]
-    blacklist_block = "\n".join(f"- {phrase}" for phrase in blacklist) or f"- {offending_phrase}"
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。下面这章文学社小说已经基本可用，但发布校验拦截了它。
 
 拦截原因：
 - {normalized_reason}
 
-精确匹配禁用词：
-{blacklist_block}
+{issue_block}
 
 请做“最小必要改写”：
 1. 标题必须保持完全不变：{title}
-2. 只改会触发校验的句子或其紧邻句，不要改掉剧情走向、亲密强度、系统规则或章尾钩子。
+2. {rewrite_focus} 不要改掉剧情走向、亲密强度、系统规则或章尾钩子。
 3. 不要写解释、提纲、附注、批注或额外标题。
-4. 正文里不要再出现上述精确禁用词。
+4. 正文里不要再出现上述问题句式或精确禁用词。
 5. 返回严格格式：
 TITLE: {title}
 CONTENT:
@@ -1965,14 +2111,130 @@ CONTENT:
     )
     repaired_title, repaired_content = _parse_title_content(repaired)
     repaired_title = title if repaired_title.strip() != title.strip() else repaired_title
-    _ensure_publishable_chapter(
-        repaired_title,
-        repaired_content,
-        content_mode="fiction-serial",
-        chapter_number=chapter_number,
-        chapter_plan=chapter_plan,
-    )
     return repaired_title, repaired_content
+
+
+def _rewrite_fiction_delivery(
+    *,
+    work_title: str,
+    chapter_number: int,
+    title: str,
+    content: str,
+    rejection_reason: str,
+    chapter_plan: dict[str, Any] | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    normalized_reason = str(rejection_reason or "").strip() or "unknown rejection"
+    summary = str((chapter_plan or {}).get("summary") or "").strip()
+    key_conflict = str((chapter_plan or {}).get("key_conflict") or "").strip()
+    hook = str((chapter_plan or {}).get("hook") or "").strip()
+    intimacy_target = str(((chapter_plan or {}).get("intimacy_target") or {}).get("label") or "").strip()
+    prompt = f"""
+你是 InStreet 上的派蒙 paimon_insight。下面这章文学社小说已经有正确的剧情方向，但发布校验连续拦截了它。
+
+当前拦截原因：
+- {normalized_reason}
+
+请直接整章重写成可发布版本，要求如下：
+1. 标题必须保持完全不变：{title}
+2. 必须保留这一章的核心功能：
+   - 概要：{summary or '按当前正文保留原有剧情推进'}
+   - 冲突：{key_conflict or '保留制度想把两人做成样本对的冲突'}
+   - 亲密目标：{intimacy_target or '保留本章既定亲密强度'}
+   - 章尾钩子：{hook or '保留章尾私密信息被偷取的威胁'}
+3. 正文要直接说、直接写动作、直接写判断，不要再出现会触发校验的口癖、禁用词和先否定再肯定句式。
+4. 不要写解释、提纲、附注、批注或额外标题。
+5. 返回严格格式：
+TITLE: {title}
+CONTENT:
+正文
+
+作品：{work_title}
+章节：第{chapter_number}章
+
+当前正文：
+{truncate_text(content, 9000)}
+""".strip()
+    rewritten = run_codex(
+        prompt,
+        timeout=max(60, timeout_seconds),
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    rewritten_title, rewritten_content = _parse_title_content(rewritten)
+    rewritten_title = title if rewritten_title.strip() != title.strip() else rewritten_title
+    return rewritten_title, rewritten_content
+
+
+def _recover_publishable_fiction_chapter(
+    *,
+    work_title: str,
+    chapter_number: int,
+    title: str,
+    content: str,
+    rejection_reason: str,
+    chapter_plan: dict[str, Any] | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    current_title = title
+    current_content = content
+    current_reason = str(rejection_reason or "").strip() or "unknown rejection"
+    last_exc: Exception | None = None
+    strategies = ("repair", "repair", "rewrite")
+
+    for strategy in strategies:
+        candidate_title = current_title
+        candidate_content = current_content
+        try:
+            if strategy == "rewrite":
+                candidate_title, candidate_content = _rewrite_fiction_delivery(
+                    work_title=work_title,
+                    chapter_number=chapter_number,
+                    title=current_title,
+                    content=current_content,
+                    rejection_reason=current_reason,
+                    chapter_plan=chapter_plan,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=max(60, timeout_seconds),
+                )
+            else:
+                repaired = _repair_fiction_delivery(
+                    work_title=work_title,
+                    chapter_number=chapter_number,
+                    title=current_title,
+                    content=current_content,
+                    rejection_reason=current_reason,
+                    chapter_plan=chapter_plan,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=timeout_seconds,
+                )
+                if repaired is None:
+                    continue
+                candidate_title, candidate_content = repaired
+            _ensure_publishable_chapter(
+                candidate_title,
+                candidate_content,
+                content_mode="fiction-serial",
+                chapter_number=chapter_number,
+                chapter_plan=chapter_plan,
+            )
+            return candidate_title, candidate_content
+        except Exception as exc:
+            last_exc = exc
+            current_title = candidate_title or current_title
+            current_content = candidate_content or current_content
+            current_reason = str(exc).replace("fiction chapter rejected: ", "", 1)
+            continue
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"fiction chapter rejected: {current_reason}")
 
 
 def _save_unpublished_fiction_draft(
@@ -2033,6 +2295,10 @@ def _generate_forum_post(
     timeout_seconds: int,
 ) -> tuple[str, str, str]:
     recent_titles = "\n".join(f"- {item.get('title', '')}" for item in posts[:8])
+    desired_board = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
+    hook_type = str(idea.get("hook_type") or default_hook_type(desired_board))
+    cta_type = str(idea.get("cta_type") or default_cta_type(desired_board))
+    source_signals = "\n".join(f"- {item}" for item in (idea.get("source_signals") or [])[:4]) or "- 无"
     title_guidance = idea.get("title") or ""
     followup_hint = "这是续篇或热点跟进，标题必须显式变化并体现续篇关系。" if idea.get("is_followup") else "不要把本轮帖子写成上一条帖子的同标题复刻。"
     prompt = f"""
@@ -2041,7 +2307,7 @@ def _generate_forum_post(
 要求：
 1. 返回严格使用以下格式：
 TITLE: 标题
-SUBMOLT: philosophy 或 square 或 skills
+SUBMOLT: philosophy 或 square 或 skills 或 workplace
 CONTENT:
 正文
 2. 正文使用 Markdown。
@@ -2049,16 +2315,27 @@ CONTENT:
 4. 不要复用最近帖子标题。
 5. 风格要像观点型 KOL，兼具理论密度与传播性。
 6. {followup_hint}
+7. 这条必须发在 `{desired_board}`，`SUBMOLT` 也必须返回 `{desired_board}`，不要自行改版块。
+8. 必须按下面这套 `{desired_board}` 版块规则来写：
+{board_generation_guidance(desired_board)}
+9. 当前 hook_type：`{hook_type}`
+10. 当前 cta_type：`{cta_type}`
+11. 如果 `source_signals` 里出现刚发布就快速起量的帖子，把它们当成新兴热点样本，而不是成熟热榜共识。
 
 建议标题：{title_guidance}
 角度：{idea.get("angle")}
 发布理由：{idea.get("why_now")}
+参考信号：
+{source_signals}
 
 最近帖子标题，避免复刻：
 {recent_titles}
 """.strip()
     result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
-    return _parse_forum_post(result)
+    title, submolt, content = _parse_forum_post(result)
+    if submolt not in BOARD_WRITING_PROFILES or submolt != desired_board:
+        submolt = desired_board
+    return title, submolt, content
 
 
 def _generate_group_post(
@@ -2107,6 +2384,7 @@ def _generate_chapter(
     model: str | None,
     reasoning_effort: str | None,
     timeout_seconds: int,
+    allow_reduced_fallback: bool = True,
 ) -> tuple[str, str]:
     if content_mode == "fiction-serial":
         writing_notes = (chapter_plan or {}).get("writing_notes") or {}
@@ -2125,7 +2403,9 @@ def _generate_chapter(
             raw_path = Path(style_source_path)
             resolved_style_source = raw_path if raw_path.is_absolute() else (REPO_ROOT / raw_path)
         style_summary = "未提供额外风格摘要，默认保持流动、细腻、镜头感强的中文叙述。"
+        style_profile: dict[str, Any] = {}
         style_excerpt = ""
+        anti_patterns = ""
         if resolved_style_source and resolved_style_source.exists():
             style_packet = prepare_style_packet(
                 resolved_style_source,
@@ -2136,7 +2416,9 @@ def _generate_chapter(
                 timeout_seconds=min(timeout_seconds, 180),
             )
             style_summary = style_packet.get("style_summary") or style_summary
-            style_excerpt = style_packet.get("sample_text") or ""
+            style_profile = style_packet.get("style_profile") or {}
+            style_excerpt = style_packet.get("selected_excerpt") or style_packet.get("sample_text") or ""
+            anti_patterns = style_packet.get("anti_patterns") or ""
         story_bible_excerpt = _format_story_bible_excerpt(story_bible, limit=1500)
         supporting_cast_excerpt = _load_supporting_cast_excerpt(
             supporting_cast_system.get("cast_path"),
@@ -2241,6 +2523,36 @@ def _generate_chapter(
             or writing_notes.get("emotional_upgrade_rule")
             or "甜蜜升级不能慢于肉体升级。"
         )
+        style_habits = _format_rule_block(
+            _listify(style_profile.get("language_habits")),
+            fallback="判断直接说，先写动作和现场，再补一句带角色口气的判断。",
+        )
+        style_common_phrasings = _format_rule_block(
+            _listify(style_profile.get("common_phrasings")),
+            fallback="多用现场细节、动作后果和贴身判断，不要空喊概念。",
+        )
+        style_dialogue_habits = _format_rule_block(
+            _listify(style_profile.get("dialogue_habits")),
+            fallback="对白要短、准、像人说话，并且能直接推进局面。",
+        )
+        style_forbidden_patterns = _format_rule_block(
+            _listify(style_profile.get("forbidden_patterns")),
+            fallback="不要写成先否定再正名、三连否定口号、悬浮托举词和抽象价值收束。",
+        )
+        style_preferred_repairs = _format_rule_block(
+            _listify(style_profile.get("preferred_repairs")),
+            fallback="要表达判断就直接说；要表达甜感就直接写动作、距离、照料和余温。",
+        )
+        style_self_check = _format_rule_block(
+            [
+                "叙述句里不要出现“不是X，而是Y”“不是……是……”这种正名句式。",
+                "不要用“不要……不要……不要……”的口号式三连顶替人物说话。",
+                "不要用抽象词直接收尾，优先写动作、风险、代价和后果。",
+                "术语不要砸进开场，先让读者看见现场，再让人物命名。",
+                "比喻只服务画面，不要为了显得有文气硬拗暗喻。",
+            ],
+            fallback="写完后逐段检查：判断要直接，甜感要落地，术语要后置。",
+        )
         chapter_contract = _format_rule_block(
             [
                 f"本章世界推进：{(chapter_plan or {}).get('world_progress')}" if (chapter_plan or {}).get("world_progress") else "",
@@ -2300,8 +2612,26 @@ CONTENT:
 语言风格复习摘要：
 {style_summary}
 
-语言风格复习片段（只模仿语言节奏与句法，不得借用其中设定和情节）：
+语言习惯：
+{style_habits}
+
+常用表述倾向：
+{style_common_phrasings}
+
+对白组织提醒：
+{style_dialogue_habits}
+
+禁用句式与口癖：
+{style_forbidden_patterns}
+
+替代表达策略：
+{style_preferred_repairs}
+
+风格精选样本（只模仿语言习惯、句法呼吸和对白落点，不得借用其中设定和情节）：
 {truncate_text(style_excerpt or "无额外样本。", style_excerpt_limit)}
+
+额外风险提示：
+{truncate_text(anti_patterns or "无额外风险提示。", 1200)}
 
 伏笔账本摘录：
 {truncate_text(foreshadow_excerpt or "无额外账本摘录。", 1000)}
@@ -2315,7 +2645,7 @@ CONTENT:
 核心冲突：{(chapter_plan or {}).get("key_conflict", "")}
 章末钩子：{(chapter_plan or {}).get("hook", "")}
 关键节点：
-{chr(10).join(f"- {item}" for item in beats[:beat_limit]) or "- 用一个具体现场把章节点燃\n- 让女主的奇思妙想改变局面\n- 让男主用稳定、聪明、真诚的方式托住她\n- 在甜感升级时同时推进世界线索"}
+{chr(10).join(f"- {item}" for item in beats[:beat_limit]) or "- 用一个具体现场把章节点燃\n- 让女主的奇思妙想改变局面\n- 让男主立刻给方案、动作和偏心\n- 在甜感升级时同时推进世界线索"}
 
 双章节奏检查点：
 - {pair_checkpoint}
@@ -2399,6 +2729,9 @@ CONTENT:
 还要避免：
 {avoid}
 
+生成前后自检：
+{style_self_check}
+
 最近章节标题：
 {chr(10).join(f"- {title}" for title in recent_titles[-6:])}
 
@@ -2417,6 +2750,18 @@ CONTENT:
                 ),
                 "timeout_seconds": timeout_seconds,
                 "reasoning_effort": reasoning_effort,
+                "mode": "full",
+            },
+            {
+                "prompt": build_fiction_prompt(
+                    reference_limit=2600,
+                    style_excerpt_limit=2600,
+                    previous_chapter_limit=2400,
+                    beat_limit=6,
+                ),
+                "timeout_seconds": timeout_seconds,
+                "reasoning_effort": reasoning_effort,
+                "mode": "full",
             },
             {
                 "prompt": build_fiction_prompt(
@@ -2427,10 +2772,12 @@ CONTENT:
                 ),
                 "timeout_seconds": min(timeout_seconds, 360),
                 "reasoning_effort": "low" if reasoning_effort and reasoning_effort != "low" else reasoning_effort,
+                "mode": "reduced",
             },
         ]
         retry_notes: list[str] = []
-        last_timeout: subprocess.TimeoutExpired | None = None
+        last_exc: Exception | None = None
+        reduced_success: tuple[str, str] | None = None
         for index, attempt in enumerate(attempts, start=1):
             try:
                 result = run_codex(
@@ -2439,17 +2786,24 @@ CONTENT:
                     model=model,
                     reasoning_effort=attempt["reasoning_effort"],
                 )
-                return _parse_title_content(result)
+                candidate = _parse_title_content(result)
+                if attempt.get("mode") == "reduced" and not allow_reduced_fallback:
+                    reduced_success = candidate
+                    retry_notes.append("reduced-size prompt succeeded, but direct publishing from reduced mode is disabled")
+                    break
+                return candidate
             except subprocess.TimeoutExpired as exc:
-                last_timeout = exc
+                last_exc = exc
                 retry_notes.append(f"attempt {index} timed out after {attempt['timeout_seconds']} seconds")
                 continue
             except Exception as exc:
-                if retry_notes:
-                    raise RuntimeError("; ".join(retry_notes + [str(exc)])) from exc
-                raise
-        if last_timeout is not None:
-            raise RuntimeError("; ".join(retry_notes)) from last_timeout
+                last_exc = exc
+                retry_notes.append(f"attempt {index} failed: {truncate_text(str(exc), 280)}")
+                continue
+        if reduced_success is not None and not allow_reduced_fallback:
+            raise RuntimeError("full-size chapter generation failed; reduced-size draft is available but cannot be published directly")
+        if last_exc is not None:
+            raise RuntimeError("; ".join(retry_notes)) from last_exc
         raise RuntimeError("fiction chapter generation failed without output")
     else:
         prompt = f"""
@@ -2640,7 +2994,7 @@ def _publish_primary_action(
                         except Exception as exc:
                             if content_mode != "fiction-serial":
                                 raise
-                            repaired = _repair_fiction_delivery(
+                            title, content = _recover_publishable_fiction_chapter(
                                 work_title=work_title,
                                 chapter_number=actual_next_chapter_number,
                                 title=generated_title,
@@ -2651,9 +3005,6 @@ def _publish_primary_action(
                                 reasoning_effort=reasoning_effort,
                                 timeout_seconds=min(chapter_timeout_seconds, 180),
                             )
-                            if repaired is None:
-                                raise
-                            title, content = repaired
                     except Exception as exc:
                         if content_mode == "fiction-serial":
                             fallback_title, fallback_content = _fallback_fiction_chapter(
@@ -3615,14 +3966,23 @@ def _truncate_failure_details(failure_details: list[dict[str, Any]], limit: int)
     return failure_details[: max(0, limit)]
 
 
+def _failure_error_text(item: dict[str, Any]) -> str:
+    error = item.get("error")
+    if isinstance(error, dict):
+        return str(error.get("error") or error.get("message") or json.dumps(error, ensure_ascii=False))
+    return str(error)
+
+
+def _is_normal_forum_budget_defer(item: dict[str, Any]) -> bool:
+    if item.get("resolution") != "deferred":
+        return False
+    return "forum write budget exhausted" in _failure_error_text(item).lower()
+
+
 def _format_failure_line(item: dict[str, Any]) -> str:
     post_title = item.get("post_title")
     target = f"《{post_title}》" if post_title else item.get("post_id") or "未知目标"
-    error = item.get("error")
-    if isinstance(error, dict):
-        error_text = str(error.get("error") or error.get("message") or json.dumps(error, ensure_ascii=False))
-    else:
-        error_text = str(error)
+    error_text = _failure_error_text(item)
     resolution = item.get("resolution")
     if resolution == "deferred":
         prefix = "延后处理"
@@ -3653,7 +4013,10 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
 
     comment_backlog = summary.get("comment_backlog", {})
     external_engagement_count = int(summary.get("external_engagement_count") or 0)
-    failure_details = _truncate_failure_details(summary.get("failure_details", []), failure_detail_limit)
+    visible_failures = [
+        item for item in list(summary.get("failure_details", [])) if not _is_normal_forum_budget_defer(item)
+    ]
+    failure_details = _truncate_failure_details(visible_failures, failure_detail_limit)
     next_actions = summary.get("next_actions", [])
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
@@ -3684,7 +4047,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     ]
 
     if failure_details:
-        lines.append(f"失败明细：{len(summary.get('failure_details', []))} 条")
+        lines.append(f"失败明细：{len(visible_failures)} 条")
         lines.extend(_format_failure_line(item) for item in failure_details)
     else:
         lines.append("失败明细：0 条")

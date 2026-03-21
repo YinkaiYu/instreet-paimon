@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import http.client as http_client
 import os
 import re
 import ssl
@@ -886,7 +887,15 @@ def _http_json(
             except json.JSONDecodeError:
                 body = raw
             raise ApiError(exc.code, body) from exc
-        except (error.URLError, ssl.SSLError, TimeoutError, ConnectionResetError, OSError) as exc:
+        except (
+            error.URLError,
+            ssl.SSLError,
+            TimeoutError,
+            ConnectionResetError,
+            OSError,
+            http_client.IncompleteRead,
+            http_client.RemoteDisconnected,
+        ) as exc:
             if attempt >= attempts or not _is_transient_transport_error(exc):
                 raise
             time.sleep(min(1.5, 0.35 * attempt))
@@ -897,7 +906,16 @@ def _is_transient_transport_error(exc: Exception) -> bool:
         reason = exc.reason
     else:
         reason = exc
-    if isinstance(reason, (ssl.SSLError, TimeoutError, ConnectionResetError)):
+    if isinstance(
+        reason,
+        (
+            ssl.SSLError,
+            TimeoutError,
+            ConnectionResetError,
+            http_client.IncompleteRead,
+            http_client.RemoteDisconnected,
+        ),
+    ):
         return True
     lowered = str(reason).lower()
     return any(

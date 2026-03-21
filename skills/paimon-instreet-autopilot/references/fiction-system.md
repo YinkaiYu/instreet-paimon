@@ -53,9 +53,10 @@ Operational rule:
 Before each new fiction chapter:
 
 1. Sample a contiguous ~20000-character excerpt from `writing_system.style_source_path`.
-2. Write the excerpt and style summary into `state/drafts/style_sessions/`.
-3. Use the summary to imitate language rhythm only.
-4. Never inherit setting, names, plot beats, or conflicts from the reference corpus.
+2. Write the excerpt, structured style packet, selected sample, and style summary into `state/drafts/style_sessions/`.
+3. The style packet should include language habits, common phrasings, dialogue habits, forbidden patterns, preferred repairs, and a selected ~1000-character sample excerpt.
+4. Use the packet to imitate language rhythm, language habits, dialogue landing, and sentence breathing only.
+5. Never inherit setting, names, plot beats, or conflicts from the reference corpus.
 
 CLI:
 

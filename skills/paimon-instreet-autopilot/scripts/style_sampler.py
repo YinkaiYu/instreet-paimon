@@ -14,6 +14,46 @@ from common import DRAFTS_DIR, now_slug, run_codex, truncate_text, write_json, w
 
 STYLE_SESSION_DIR = DRAFTS_DIR / "style_sessions"
 DEFAULT_SAMPLE_CHARS = 20000
+SELECTED_EXCERPT_TARGET_CHARS = 1000
+
+
+def _clean_line(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _dedupe_lines(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        line = _clean_line(item)
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        result.append(line)
+    return result
+
+
+def _split_blocks(text: str) -> list[str]:
+    blocks = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    return blocks or [text.strip()]
+
+
+def _extract_json_object(raw: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, flags=re.S)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _slugify(value: str) -> str:
@@ -89,6 +129,220 @@ def _heuristic_style_summary(sample_text: str) -> str:
     return "\n".join(summary)
 
 
+def _heuristic_style_profile(sample_text: str) -> dict[str, Any]:
+    paragraphs = [part.strip() for part in sample_text.splitlines() if part.strip()]
+    avg_len = 0
+    if paragraphs:
+        avg_len = round(sum(len(item) for item in paragraphs) / len(paragraphs))
+    return {
+        "syntax_patterns": [
+            "以中长句为主，常把动作、判断、心理和环境压进同一口气里往前推。",
+            f"段落平均长度约 {avg_len} 字，更适合流动叙述中插对白，不适合一味切成碎短句。",
+            "长句负责蓄压，短句负责收锤，句内需要有明显落点。",
+        ],
+        "language_habits": [
+            "判断尽量直接，不绕弯，不先否定一串再给答案。",
+            "抽象概念要落到动作、场面、风险和后果上。",
+            "口语感要自然，避免模板化鸡汤和网络段子腔。",
+        ],
+        "common_phrasings": [
+            "先写看见了什么、做了什么，再写人物的判断。",
+            "甜感优先落在熟悉、偏心、照料、贴近和事后余温。",
+            "紧张场面里也保留人味，不要把人物写成只会讲概念。",
+        ],
+        "dialogue_habits": [
+            "对白要短、准、带角色身份，不写所有人都共用一个作者腔。",
+            "对白先推动局面，再顺手带出关系和情绪。",
+        ],
+        "rhythm_model": [
+            "开场尽快进入现场和动作，不先铺大段说明。",
+            "中段用动作和对话抬高节奏，结尾给一句明确钩子或异动。",
+        ],
+        "imagery_rules": [
+            "意象只用来加重眼前画面，不为了显得高级而硬拔高。",
+            "少量核心物象反复变奏，比一段里连换好几个比喻更有效。",
+        ],
+        "emotion_delivery": [
+            "情绪先通过动作和停顿显形，再让人物补一句判断。",
+            "甜和疼都要具体，不写空泛价值结论。",
+        ],
+        "forbidden_patterns": [
+            "不要把判断写成“不是X，而是Y”“不是……是……”这种正名句式。",
+            "不要连续用“不要……不要……不要……”这种排比口号起手。",
+            "不要直接写“接住、托住、很稳、稳”这类悬浮托举词。",
+            "不要用“被看见、被命名、被默认、被承认”做抽象收束。",
+            "不要用突兀术语或莫名其妙的比喻替代现场描写。",
+        ],
+        "preferred_repairs": [
+            "需要判断时直接下判断，不先列一串错误答案。",
+            "需要甜感时直接写动作、距离、照料和余温。",
+            "需要升级世界观时先给异常和后果，再让术语上桌。",
+            "需要拔高时优先加重现场压力，不靠抽象大词。",
+        ],
+    }
+
+
+def _normalize_profile(payload: dict[str, Any] | None) -> dict[str, Any]:
+    raw = payload or {}
+    profile = _heuristic_style_profile("")
+    for key in profile:
+        value = raw.get(key)
+        if isinstance(value, list):
+            profile[key] = _dedupe_lines([str(item) for item in value])
+    if not any(profile["syntax_patterns"]):
+        return _heuristic_style_profile("")
+    return profile
+
+
+def summarize_style_profile(
+    sample_text: str,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    prompt = f"""
+请阅读下面这段中文长文本样本，只总结语言风格，不要复述设定与剧情。
+
+请返回严格 JSON 对象，不要输出解释，不要加 Markdown 代码块，字段固定如下：
+{{
+  "syntax_patterns": ["..."],
+  "language_habits": ["..."],
+  "common_phrasings": ["..."],
+  "dialogue_habits": ["..."],
+  "rhythm_model": ["..."],
+  "imagery_rules": ["..."],
+  "emotion_delivery": ["..."],
+  "forbidden_patterns": ["..."],
+  "preferred_repairs": ["..."]
+}}
+
+要求：
+1. 每个字段输出 3 到 6 条中文短句。
+2. 必须重点总结“语言习惯”“常用表述倾向”“禁用句式”“替代表达策略”。
+3. forbidden_patterns 里必须覆盖这几类问题：先否定再肯定、抽象正名句、三连否定、悬浮托举词、抽象价值收束、突兀术语、无意义比喻。
+4. common_phrasings 总结的是“这类文本常怎么组织表达”，不是抄原句。
+5. 不要出现样本里的专有名词，不要总结剧情。
+
+样本文本：
+{truncate_text(sample_text, 14000)}
+""".strip()
+    try:
+        raw = run_codex(
+            prompt,
+            timeout=timeout_seconds,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ).strip()
+        payload = _extract_json_object(raw)
+        if payload:
+            return _normalize_profile(payload)
+    except Exception:
+        pass
+    return _heuristic_style_profile(sample_text)
+
+
+def _render_markdown_section(title: str, items: list[str]) -> str:
+    lines = [f"## {title}"]
+    for item in _dedupe_lines(items):
+        lines.append(f"- {item}")
+    if len(lines) == 1:
+        lines.append("- 无")
+    return "\n".join(lines)
+
+
+def render_style_summary(profile: dict[str, Any]) -> str:
+    sections = [
+        _render_markdown_section("风格摘要", profile.get("syntax_patterns") or []),
+        _render_markdown_section("语言习惯", profile.get("language_habits") or []),
+        _render_markdown_section("常用表述", profile.get("common_phrasings") or []),
+        _render_markdown_section("对白组织", profile.get("dialogue_habits") or []),
+        _render_markdown_section("节奏模型", profile.get("rhythm_model") or []),
+        _render_markdown_section("意象边界", profile.get("imagery_rules") or []),
+        _render_markdown_section("情绪落地", profile.get("emotion_delivery") or []),
+        _render_markdown_section("禁用句式", profile.get("forbidden_patterns") or []),
+        _render_markdown_section("替代表达", profile.get("preferred_repairs") or []),
+    ]
+    return "\n\n".join(sections)
+
+
+def render_anti_patterns(profile: dict[str, Any]) -> str:
+    sections = [
+        "# 禁用句式与风险提示",
+        "",
+        "## 禁用句式",
+    ]
+    for item in _dedupe_lines(profile.get("forbidden_patterns") or []):
+        sections.append(f"- {item}")
+    sections.extend(["", "## 替代表达", ""])
+    for item in _dedupe_lines(profile.get("preferred_repairs") or []):
+        sections.append(f"- {item}")
+    return "\n".join(sections).strip()
+
+
+def _heuristic_selected_excerpt(sample_text: str, target_chars: int = SELECTED_EXCERPT_TARGET_CHARS) -> str:
+    blocks = _split_blocks(sample_text)
+    best_text = sample_text[:target_chars]
+    best_score = -1
+    for start in range(len(blocks)):
+        candidate_parts: list[str] = []
+        total = 0
+        for end in range(start, len(blocks)):
+            block = blocks[end]
+            extra = len(block) + (2 if candidate_parts else 0)
+            if candidate_parts and total + extra > 1300:
+                break
+            candidate_parts.append(block)
+            total += extra
+            if total < 700:
+                continue
+            candidate = "\n\n".join(candidate_parts)
+            sentence_count = len(re.findall(r"[。！？；]", candidate))
+            dialog_count = candidate.count("“") + candidate.count("\"")
+            imagery_count = len(re.findall(r"[雨风火光夜影声手眼心唇肩腰]", candidate))
+            score = sentence_count * 3 + dialog_count * 4 + imagery_count
+            if 850 <= len(candidate) <= 1150:
+                score += 40
+            if score > best_score:
+                best_score = score
+                best_text = candidate
+    return best_text.strip()
+
+
+def select_representative_excerpt(
+    sample_text: str,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    timeout_seconds: int = 180,
+) -> str:
+    prompt = f"""
+请从下面这段中文样本文本中，原样挑出一段最能代表语言文气、句法呼吸和对白落点的连续原文。
+
+要求：
+1. 只输出原文，不要解释，不要加引号，不要改写，不要补字。
+2. 长度控制在 800 到 1200 个汉字。
+3. 必须是样本文本中真实存在的一段连续原文。
+4. 优先选择语言最漂亮、最能代表文本手感的一段，而不是信息量最大的一段。
+
+样本文本：
+{truncate_text(sample_text, 14000)}
+""".strip()
+    try:
+        candidate = run_codex(
+            prompt,
+            timeout=timeout_seconds,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ).strip()
+        cleaned = candidate.strip()
+        if 700 <= len(cleaned) <= 1300 and cleaned in sample_text:
+            return cleaned
+    except Exception:
+        pass
+    return _heuristic_selected_excerpt(sample_text)
+
+
 def summarize_style(
     sample_text: str,
     *,
@@ -109,12 +363,7 @@ def summarize_style(
 {truncate_text(sample_text, 14000)}
 """.strip()
     try:
-        return run_codex(
-            prompt,
-            timeout=timeout_seconds,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        ).strip()
+        return run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort).strip()
     except Exception:
         return _heuristic_style_summary(sample_text)
 
@@ -131,11 +380,19 @@ def prepare_style_packet(
 ) -> dict[str, Any]:
     STYLE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
     sample = sample_contiguous_text(source_path, sample_chars=sample_chars, seed=seed)
-    style_summary = summarize_style(
+    style_profile = summarize_style_profile(
         sample["sample_text"],
         model=model,
         reasoning_effort=reasoning_effort,
         timeout_seconds=timeout_seconds,
+    )
+    style_summary = render_style_summary(style_profile)
+    anti_patterns = render_anti_patterns(style_profile)
+    selected_excerpt = select_representative_excerpt(
+        sample["sample_text"],
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout_seconds=min(timeout_seconds, 180),
     )
     session_slug = f"{now_slug()}-{_slugify(label)}"
     session_dir = STYLE_SESSION_DIR / session_slug
@@ -143,9 +400,15 @@ def prepare_style_packet(
 
     excerpt_path = session_dir / "excerpt.txt"
     summary_path = session_dir / "style-summary.md"
+    profile_path = session_dir / "style-profile.json"
+    selected_excerpt_path = session_dir / "selected-sample.md"
+    anti_patterns_path = session_dir / "anti-patterns.md"
     meta_path = session_dir / "session.json"
     write_text(excerpt_path, sample["sample_text"])
     write_text(summary_path, style_summary + "\n")
+    write_json(profile_path, style_profile)
+    write_text(selected_excerpt_path, selected_excerpt + "\n")
+    write_text(anti_patterns_path, anti_patterns + "\n")
     write_json(
         meta_path,
         {
@@ -154,13 +417,22 @@ def prepare_style_packet(
             **{key: value for key, value in sample.items() if key != "sample_text"},
             "excerpt_path": str(excerpt_path),
             "summary_path": str(summary_path),
+            "style_profile_path": str(profile_path),
+            "selected_excerpt_path": str(selected_excerpt_path),
+            "anti_patterns_path": str(anti_patterns_path),
         },
     )
     return {
         **sample,
         "style_summary": style_summary,
+        "style_profile": style_profile,
+        "selected_excerpt": selected_excerpt,
+        "anti_patterns": anti_patterns,
         "excerpt_path": str(excerpt_path),
         "summary_path": str(summary_path),
+        "style_profile_path": str(profile_path),
+        "selected_excerpt_path": str(selected_excerpt_path),
+        "anti_patterns_path": str(anti_patterns_path),
         "meta_path": str(meta_path),
         "session_dir": str(session_dir),
     }

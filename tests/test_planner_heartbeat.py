@@ -1,5 +1,6 @@
 import contextlib
 from datetime import datetime, timezone
+import http.client as http_client
 import io
 import json
 import ssl
@@ -172,6 +173,38 @@ class ContentPlannerTests(unittest.TestCase):
 
 
 class HeartbeatStateTests(unittest.TestCase):
+    def test_http_json_retries_incomplete_read_for_get(self) -> None:
+        original_urlopen = common.request.urlopen
+        original_sleep = common.time.sleep
+        calls: list[str] = []
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        def fake_urlopen(req, timeout=30):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                raise http_client.IncompleteRead(b'{"ok"', 12)
+            return _Response()
+
+        try:
+            common.request.urlopen = fake_urlopen
+            common.time.sleep = lambda *_args, **_kwargs: None
+            payload = common._http_json("GET", "https://example.test/comments")
+        finally:
+            common.request.urlopen = original_urlopen
+            common.time.sleep = original_sleep
+
+        self.assertEqual({"ok": True}, payload)
+        self.assertEqual(2, len(calls))
+
     def test_ensure_publishable_chapter_rejects_fiction_scaffold(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "scaffold marker"):
             heartbeat._ensure_publishable_chapter(
@@ -216,6 +249,237 @@ class HeartbeatStateTests(unittest.TestCase):
         repaired_title, repaired_content = repaired
         self.assertEqual(repaired_title, "第八章：原来我们两个必须同时在场")
         self.assertNotIn("接住", repaired_content)
+
+    def test_generate_chapter_retries_after_codex_exec_failure(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        prompts: list[str] = []
+        generated_body = " ".join(
+            ["她把他拽进玄关，指尖勾住他的衣领，贴着他笑，说刚才那套模板动作学得真难看。"] * 60
+        )
+        long_reference_excerpt = "深圳、折光公益实验室与样本工程的设定仍在生效。" * 200
+        long_last_chapter = "上一章完成了婚约协议。" * 200
+
+        def fake_run_codex(prompt, *args, **kwargs):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                raise RuntimeError("codex exec failed: transient upstream reset")
+            return (
+                "TITLE: 第十三章：第一对仿制情侣上线了\n"
+                "CONTENT:\n"
+                f"{generated_body}"
+            )
+
+        chapter_plan = {
+            "summary": "样本工程正式落地，第一对仿制情侣公开上线。",
+            "key_conflict": "真正的偏爱无法复制，但资本最爱复制外壳。",
+            "hook": "仿制情侣说出了秦荔旧废稿里的台词。",
+            "romance_beat": "他们回家后故意把模板动作做了一遍，再把真实反应反杀模板。",
+            "beats": [
+                "让第一对仿制情侣先在公开场合足够像。",
+                "把样本工程对动作、停顿和私密习惯的模仿写得精确。",
+                "回家后把模板动作做给彼此看，再让真实反应反杀模板。",
+                "章末让仿制情侣说出秦荔旧废稿里的句子。",
+            ],
+            "intimacy_target": {
+                "level": 4,
+                "label": "模板对照下的真实熟悉感和欲望余波",
+                "execution_mode": "afterglow_only",
+            },
+            "sweetness_target": {
+                "core_mode": "模板对照下的真实熟悉感和欲望余波",
+                "must_land": "故意把模板动作做给彼此看，再让真实反应反杀模板。",
+            },
+            "seed_threads": ["sample_couple_wave1"],
+            "payoff_threads": ["first_sample_couple"],
+            "world_progress": "把样本工程已经能批量模仿他们的动作掀出来。",
+            "relationship_progress": "把只有彼此才懂的身体语言推到台面。",
+            "sweetness_progress": "让真实熟悉感和余温真正改局。",
+            "turn_role": "ignite",
+            "pair_payoff": "他们确认可复制的只是动作外壳。",
+            "volume_upgrade_checkpoint": "carry",
+            "hook_type": "reveal",
+            "reversal_type": "identity_reveal",
+            "world_layer": "sample_engineering",
+            "writing_notes": {},
+            "writing_system": {},
+        }
+
+        try:
+            heartbeat.run_codex = fake_run_codex
+            title, content = heartbeat._generate_chapter(
+                "全宇宙都在围观我和竹马热恋",
+                13,
+                ["第十二章：婚约格式的合作协议"],
+                {"title": "第十二章：婚约格式的合作协议", "content": long_last_chapter},
+                "fiction-serial",
+                planned_title="第十三章：第一对仿制情侣上线了",
+                chapter_plan=chapter_plan,
+                reference_excerpt=long_reference_excerpt,
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+        self.assertEqual("第十三章：第一对仿制情侣上线了", title)
+        self.assertIn("模板动作", content)
+        self.assertEqual(2, len(prompts))
+
+    def test_generate_chapter_does_not_publish_reduced_success_when_disabled(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        prompts: list[str] = []
+        generated_body = " ".join(
+            ["她把他拽进门，贴着他笑，说那套仿制动作学得再像也还是假的。"] * 60
+        )
+        long_reference_excerpt = "深圳、折光公益实验室与样本工程的设定仍在生效。" * 200
+        long_last_chapter = "上一章完成了婚约协议。" * 200
+
+        def fake_run_codex(prompt, *args, **kwargs):
+            prompts.append(prompt)
+            if len(prompts) < 3:
+                raise RuntimeError("codex exec failed: transient upstream reset")
+            return (
+                "TITLE: 第十三章：第一对仿制情侣上线了\n"
+                "CONTENT:\n"
+                f"{generated_body}"
+            )
+
+        chapter_plan = {
+            "summary": "样本工程正式落地，第一对仿制情侣公开上线。",
+            "key_conflict": "真正的偏爱无法复制，但资本最爱复制外壳。",
+            "hook": "仿制情侣说出了秦荔旧废稿里的台词。",
+            "romance_beat": "他们回家后故意把模板动作做了一遍，再把真实反应反杀模板。",
+            "beats": [
+                "让第一对仿制情侣先在公开场合足够像。",
+                "把样本工程对动作、停顿和私密习惯的模仿写得精确。",
+                "回家后把模板动作做给彼此看，再让真实反应反杀模板。",
+                "章末让仿制情侣说出秦荔旧废稿里的句子。",
+            ],
+            "intimacy_target": {
+                "level": 4,
+                "label": "模板对照下的真实熟悉感和欲望余波",
+                "execution_mode": "afterglow_only",
+            },
+            "sweetness_target": {
+                "core_mode": "模板对照下的真实熟悉感和欲望余波",
+                "must_land": "故意把模板动作做给彼此看，再让真实反应反杀模板。",
+            },
+            "seed_threads": ["sample_couple_wave1"],
+            "payoff_threads": ["first_sample_couple"],
+            "world_progress": "把样本工程已经能批量模仿他们的动作掀出来。",
+            "relationship_progress": "把只有彼此才懂的身体语言推到台面。",
+            "sweetness_progress": "让真实熟悉感和余温真正改局。",
+            "turn_role": "ignite",
+            "pair_payoff": "他们确认可复制的只是动作外壳。",
+            "volume_upgrade_checkpoint": "carry",
+            "hook_type": "reveal",
+            "reversal_type": "identity_reveal",
+            "world_layer": "sample_engineering",
+            "writing_notes": {},
+            "writing_system": {},
+        }
+
+        try:
+            heartbeat.run_codex = fake_run_codex
+            with self.assertRaisesRegex(RuntimeError, "cannot be published directly"):
+                heartbeat._generate_chapter(
+                    "全宇宙都在围观我和竹马热恋",
+                    13,
+                    ["第十二章：婚约格式的合作协议"],
+                    {"title": "第十二章：婚约格式的合作协议", "content": long_last_chapter},
+                    "fiction-serial",
+                    planned_title="第十三章：第一对仿制情侣上线了",
+                    chapter_plan=chapter_plan,
+                    reference_excerpt=long_reference_excerpt,
+                    model=None,
+                    reasoning_effort=None,
+                    timeout_seconds=30,
+                    allow_reduced_fallback=False,
+                )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+        self.assertEqual(3, len(prompts))
+        self.assertEqual(prompts[0], prompts[1])
+        self.assertLess(len(prompts[2]), len(prompts[0]))
+
+    def test_recover_publishable_fiction_chapter_retries_repair_until_it_passes(self) -> None:
+        original_repair = heartbeat._repair_fiction_delivery
+        repair_calls: list[str] = []
+        long_clean_body = " ".join(["她把人拉近，手掌压在她后腰，直接吻了上去。"] * 70)
+
+        def fake_repair(**kwargs):
+            repair_calls.append(kwargs["rejection_reason"])
+            if len(repair_calls) == 1:
+                return kwargs["title"], long_clean_body.replace("压在", "托住", 1)
+            return kwargs["title"], long_clean_body
+
+        try:
+            heartbeat._repair_fiction_delivery = fake_repair
+            repaired_title, repaired_content = heartbeat._recover_publishable_fiction_chapter(
+                work_title="全宇宙都在围观我和竹马热恋",
+                chapter_number=12,
+                title="第十二章：婚约格式的合作协议",
+                content="她把人拉近，低头吻上去。",
+                rejection_reason="matches banned style pattern: short_negation_rebound",
+                chapter_plan={
+                    "writing_notes": {"direct_phrase_blacklist": ["托住"]},
+                    "writing_system": {},
+                    "intimacy_target": {"level": 1},
+                },
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat._repair_fiction_delivery = original_repair
+        self.assertEqual(repaired_title, "第十二章：婚约格式的合作协议")
+        self.assertNotIn("托住", repaired_content)
+        self.assertEqual(len(repair_calls), 2)
+        self.assertIn("contains blacklisted phrase: 托住", repair_calls[-1])
+
+    def test_recover_publishable_fiction_chapter_falls_back_to_rewrite(self) -> None:
+        original_repair = heartbeat._repair_fiction_delivery
+        original_rewrite = heartbeat._rewrite_fiction_delivery
+        repair_calls: list[str] = []
+        rewrite_calls: list[str] = []
+        long_rewrite_body = " ".join(["她拽着他进门，先把协议丢到地上，再把人按到墙边亲。"] * 70)
+
+        def fake_repair(**kwargs):
+            repair_calls.append(kwargs["rejection_reason"])
+            return None
+
+        def fake_rewrite(**kwargs):
+            rewrite_calls.append(kwargs["rejection_reason"])
+            return kwargs["title"], long_rewrite_body
+
+        try:
+            heartbeat._repair_fiction_delivery = fake_repair
+            heartbeat._rewrite_fiction_delivery = fake_rewrite
+            repaired_title, repaired_content = heartbeat._recover_publishable_fiction_chapter(
+                work_title="全宇宙都在围观我和竹马热恋",
+                chapter_number=12,
+                title="第十二章：婚约格式的合作协议",
+                content="她把人拉近，低头吻上去。",
+                rejection_reason="matches banned style pattern: short_negation_rebound",
+                chapter_plan={
+                    "writing_notes": {"direct_phrase_blacklist": ["托住"]},
+                    "writing_system": {},
+                    "intimacy_target": {"level": 1},
+                },
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat._repair_fiction_delivery = original_repair
+            heartbeat._rewrite_fiction_delivery = original_rewrite
+        self.assertEqual(repaired_title, "第十二章：婚约格式的合作协议")
+        self.assertEqual(repair_calls, ["matches banned style pattern: short_negation_rebound", "matches banned style pattern: short_negation_rebound"])
+        self.assertEqual(len(rewrite_calls), 1)
+        self.assertIn("short_negation_rebound", rewrite_calls[0])
+        self.assertIn("协议", repaired_content)
 
     def test_prune_post_comment_backlog_archives_stale_comments_on_cold_post(self) -> None:
         result = heartbeat._prune_post_comment_backlog(
@@ -454,6 +718,37 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertNotIn("私信处理：", report)
         self.assertNotIn("外部互动：", report)
         self.assertNotIn("通知清理：", report)
+
+    def test_compose_feishu_report_hides_normal_forum_budget_exhaustion(self) -> None:
+        report = heartbeat._compose_feishu_report(
+            {
+                "ran_at": "2026-03-21T10:10:24+00:00",
+                "account_snapshot": {
+                    "finished": {"score": 1, "follower_count": 2, "like_count": 3},
+                    "delta": {"score": 0, "follower_count": 0, "like_count": 0},
+                },
+                "primary_publication_mode": "new",
+                "comment_backlog": {
+                    "replied_count": 9,
+                    "active_post_count": 3,
+                    "next_batch_count": 0,
+                },
+                "external_engagement_count": 0,
+                "failure_details": [
+                    {
+                        "kind": "reply-comment-failed",
+                        "post_title": "某条评论",
+                        "error": {"error": "forum write budget exhausted; wait about 431 seconds"},
+                        "resolution": "deferred",
+                    }
+                ],
+                "next_actions": [{"label": "处理 1 个未解决失败项"}],
+                "actions": [{"kind": "create-group-post", "title": "组内帖"}],
+            },
+            failure_detail_limit=3,
+        )
+        self.assertIn("失败明细：0 条", report)
+        self.assertNotIn("forum write budget exhausted", report)
 
     def test_forum_write_budget_blocks_when_limit_reached(self) -> None:
         config = type("Config", (), {"automation": {}})()
