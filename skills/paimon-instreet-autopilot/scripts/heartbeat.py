@@ -6,21 +6,33 @@ import json
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from common import (
     ApiError,
     CURRENT_STATE_DIR,
+    DEFAULT_COMMENT_DAILY_LIMIT,
+    DEFAULT_FORUM_WRITE_LIMIT,
+    DEFAULT_FORUM_WRITE_WINDOW_SEC,
     DRAFTS_DIR,
+    ForumWriteBudgetExceeded,
     REPO_ROOT,
     InStreetClient,
+    api_error_payload as common_api_error_payload,
     append_jsonl,
+    comment_daily_budget_status as common_comment_daily_budget_status,
+    extract_retry_after_seconds as common_extract_retry_after_seconds,
     ensure_runtime_dirs,
     find_node_executable,
+    forum_write_budget_status as common_forum_write_budget_status,
+    is_forum_write_rate_limit_error as common_is_forum_write_rate_limit_error,
     load_config,
+    load_forum_write_budget_state as common_load_forum_write_budget_state,
     now_utc,
+    record_forum_write_rate_limit as common_record_forum_write_rate_limit,
+    record_forum_write_success as common_record_forum_write_success,
     queue_outbound_action,
     read_json,
     run_codex,
@@ -58,6 +70,11 @@ DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS = 24.0
 DEFAULT_REPLY_COMMENT_WINDOW_PER_POST = 10
 DEFAULT_REPLY_NEXT_ACTION_COMMENT_CAP = 10
 DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC = 15.0
+DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN = 2
+DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS = 24.0
+DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS = 3.0
+DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT = 2
+DEFAULT_NOTIFICATION_FETCH_LIMIT = 50
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
     "这一章的核心推进应围绕以下场景展开",
@@ -67,8 +84,6 @@ FICTION_SCAFFOLD_MARKERS = (
     "本章计划：",
     "关键节点：",
 )
-
-
 def _timeout_seconds_from_ms(raw: Any, default_seconds: int) -> int:
     try:
         timeout_ms = int(raw)
@@ -214,30 +229,99 @@ def _reply_next_action_comment_cap(config, max_batch_size: int | None = None) ->
         return max(1, int(default_value))
 
 
+def _forum_write_limit(config) -> int:
+    raw = config.automation.get("forum_write_limit", DEFAULT_FORUM_WRITE_LIMIT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FORUM_WRITE_LIMIT
+
+
+def _forum_write_window_sec(config) -> int:
+    raw = config.automation.get("forum_write_window_sec", DEFAULT_FORUM_WRITE_WINDOW_SEC)
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FORUM_WRITE_WINDOW_SEC
+
+
+def _external_engagement_max_per_run(config) -> int:
+    raw = config.automation.get("external_engagement_max_per_run", DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN
+
+
+def _notification_review_window_hours(config) -> float:
+    raw = config.automation.get("notification_review_window_hours", DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS
+
+
+def _notification_highlight_window_hours(config) -> float:
+    raw = config.automation.get("notification_highlight_window_hours", DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS
+
+
+def _notification_highlight_limit(config) -> int:
+    raw = config.automation.get("notification_highlight_limit", DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT
+
+
+def _notification_fetch_limit(config) -> int:
+    raw = config.automation.get("notification_fetch_limit", DEFAULT_NOTIFICATION_FETCH_LIMIT)
+    try:
+        return max(10, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NOTIFICATION_FETCH_LIMIT
+
+
+def _load_forum_write_budget_state() -> dict[str, Any]:
+    return common_load_forum_write_budget_state()
+
+
+def _forum_write_budget_status(
+    config,
+    state: dict[str, Any],
+    *,
+    now_dt: datetime | None = None,
+    write_kind: str | None = None,
+) -> dict[str, Any]:
+    return common_forum_write_budget_status(config, state, now_dt=now_dt, write_kind=write_kind)
+
+
+def _comment_daily_budget_status(config, state: dict[str, Any], *, now_dt: datetime | None = None) -> dict[str, Any]:
+    return common_comment_daily_budget_status(config, state, now_dt=now_dt)
+
+
+def _record_forum_write_success(config, state: dict[str, Any], *, write_kind: str, label: str | None = None) -> dict[str, Any]:
+    return common_record_forum_write_success(config, state, write_kind=write_kind, label=label)
+
+
+def _record_forum_write_rate_limit(config, state: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    return common_record_forum_write_rate_limit(
+        config,
+        state,
+        exc,
+        retry_delay_sec=_heartbeat_write_retry_delay_sec(config),
+    )
+
+
 def _api_error_payload(exc: Exception) -> Any:
-    if isinstance(exc, ApiError):
-        return exc.body
-    return str(exc)
+    return common_api_error_payload(exc)
 
 
 def _extract_retry_after_seconds(exc: Exception) -> float | None:
-    if not isinstance(exc, ApiError):
-        return None
-    body = exc.body
-    if isinstance(body, dict):
-        retry_after = body.get("retry_after_seconds")
-        if retry_after is not None:
-            try:
-                return max(0.0, float(retry_after))
-            except (TypeError, ValueError):
-                pass
-        error_text = str(body.get("error", ""))
-    else:
-        error_text = str(body)
-    matched = re.search(r"wait\s+(\d+(?:\.\d+)?)\s+seconds?", error_text, re.IGNORECASE)
-    if matched:
-        return max(0.0, float(matched.group(1)))
-    return None
+    return common_extract_retry_after_seconds(exc)
 
 
 def _is_retryable_comment_error(exc: Exception) -> bool:
@@ -251,6 +335,10 @@ def _is_retryable_comment_error(exc: Exception) -> bool:
     else:
         error_text = str(body)
     return "commenting too fast" in error_text.lower()
+
+
+def _is_forum_write_rate_limit_error(exc: Exception) -> bool:
+    return common_is_forum_write_rate_limit_error(exc)
 
 
 def _load_next_actions_state() -> dict[str, Any]:
@@ -337,8 +425,24 @@ def _run_heartbeat_write(
     fn,
     *,
     meta: dict[str, Any] | None = None,
+    forum_write_state: dict[str, Any] | None = None,
+    forum_write_kind: str | None = None,
+    forum_write_label: str | None = None,
 ) -> tuple[Any | None, dict[str, Any], bool, Exception | None]:
     heartbeat_meta = {"source": "heartbeat.py", **(meta or {})}
+    if forum_write_state is not None and forum_write_kind:
+        budget = _forum_write_budget_status(config, forum_write_state, write_kind=forum_write_kind)
+        if budget.get("blocked"):
+            return (
+                None,
+                {
+                    "status": "deferred-local-budget",
+                    "budget": budget,
+                    "meta": heartbeat_meta,
+                },
+                False,
+                ForumWriteBudgetExceeded(budget, write_kind=forum_write_kind, label=forum_write_label),
+            )
     try:
         result, record, deduped = run_outbound_action(
             "instreet",
@@ -351,11 +455,22 @@ def _run_heartbeat_write(
             dedupe_on_key_only=True,
             meta=heartbeat_meta,
         )
+        if forum_write_state is not None and forum_write_kind and not deduped:
+            budget = _record_forum_write_success(
+                config,
+                forum_write_state,
+                write_kind=forum_write_kind,
+                label=forum_write_label,
+            )
+            record = {**record, "forum_write_budget": budget}
         return result, record, deduped, None
     except Exception as exc:
         error_text = str(exc)
         if isinstance(exc, ApiError):
             error_text = f"HTTP {exc.status}: {exc.body}"
+        if forum_write_state is not None and forum_write_kind and _is_forum_write_rate_limit_error(exc):
+            budget = _record_forum_write_rate_limit(config, forum_write_state, exc)
+            heartbeat_meta = {**heartbeat_meta, "forum_write_budget": budget}
         record = queue_outbound_action(
             "instreet",
             action,
@@ -2250,6 +2365,7 @@ def _publish_primary_action(
     model: str | None,
     reasoning_effort: str | None,
     codex_timeout_seconds: int,
+    forum_write_state: dict[str, Any],
 ) -> tuple[dict | None, list[dict], dict[str, int], str]:
     events: list[dict] = []
     publication_mode = "none"
@@ -2285,6 +2401,9 @@ def _publish_primary_action(
                     payload,
                     lambda: client.create_post(title, content, submolt=submolt),
                     meta={"publish_kind": kind, "stage": "primary"},
+                    forum_write_state=forum_write_state,
+                    forum_write_kind="post",
+                    forum_write_label=title,
                 )
                 if exc is not None:
                     raise exc
@@ -2504,6 +2623,9 @@ def _publish_primary_action(
                     payload,
                     lambda: client.create_post(title, content, submolt="skills", group_id=group_id),
                     meta={"publish_kind": kind, "stage": "primary"},
+                    forum_write_state=forum_write_state,
+                    forum_write_kind="group-post",
+                    forum_write_label=title,
                 )
                 if exc is not None:
                     raise exc
@@ -2537,6 +2659,20 @@ def _publish_primary_action(
             next_cycle_state = _advance_primary_cycle(kind, cycle_state)
             _save_primary_cycle_state(next_cycle_state)
             return action, events, next_cycle_state, "new"
+        except ForumWriteBudgetExceeded as exc:
+            events.append(
+                {
+                    "kind": "primary-publish-failed",
+                    "publish_kind": kind,
+                    "title": idea.get("title"),
+                    "error": {
+                        "error": str(exc),
+                        "retry_after_seconds": exc.status.get("retry_after_seconds"),
+                        "forum_write_budget": exc.status,
+                    },
+                    "resolution": "deferred",
+                }
+            )
         except ApiError as exc:
             events.append(
                 {
@@ -2624,6 +2760,7 @@ def _reply_comments(
     max_batch_size: int,
     processing_time_budget_sec: int,
     codex_timeout_seconds: int,
+    forum_write_state: dict[str, Any],
 ) -> dict[str, Any]:
     queue = _build_comment_reply_queue(config, client, plan, posts, username, carryover_tasks)
     tasks = queue["tasks"]
@@ -2677,6 +2814,7 @@ def _reply_comments(
     reply_count = 0
     failed_count = 0
     resolved_with_retry_count = 0
+    budget_blocked = False
     remaining_tasks: list[dict[str, Any]] = []
     last_comment_write_at: float | None = None
     recovery_wait_cap_sec = _comment_recovery_wait_cap_sec(config)
@@ -2745,6 +2883,9 @@ def _reply_comments(
                 payload,
                 lambda: client.create_comment(post_id, reply, parent_id=comment_id),
                 meta={"stage": "reply-comment"},
+                forum_write_state=forum_write_state,
+                forum_write_kind="comment-reply",
+                forum_write_label=task.get("post_title"),
             )
             if exc is None:
                 reply_count += 1
@@ -2766,6 +2907,25 @@ def _reply_comments(
                         "recovered_after_retry": recovered_after_retry,
                     }
                 )
+                break
+
+            if isinstance(exc, ForumWriteBudgetExceeded):
+                remaining_tasks.extend(tasks[index:])
+                failure = {
+                    "kind": "reply-comment-failed",
+                    "post_id": post_id,
+                    "post_title": task.get("post_title"),
+                    "comment_id": comment_id,
+                    "comment_author": task.get("comment_author"),
+                    "error": {
+                        "error": str(exc),
+                        "forum_write_budget": exc.status,
+                    },
+                    "resolution": "deferred",
+                }
+                actions.append(failure)
+                failure_details.append(failure)
+                budget_blocked = True
                 break
 
             if not _is_retryable_comment_error(exc):
@@ -2807,6 +2967,9 @@ def _reply_comments(
             recovery_attempts += 1
             recovered_after_retry = True
 
+        if budget_blocked:
+            break
+
     else:
         remaining_tasks = []
 
@@ -2846,6 +3009,189 @@ def _reply_comments(
         "backlog": backlog,
         "remaining_tasks": persisted_remaining_tasks,
         "failure_details": failure_details,
+    }
+
+
+def _has_user_already_commented(comments: list[dict[str, Any]], username: str) -> bool:
+    for item in comments:
+        if (item.get("agent") or {}).get("username") == username:
+            return True
+        for child in item.get("children", []) or []:
+            if (child.get("agent") or {}).get("username") == username:
+                return True
+    return False
+
+
+def _fallback_external_comment(post: dict[str, Any], target: dict[str, Any]) -> str:
+    title = truncate_text(str(post.get("title") or target.get("post_title") or "这条帖子"), 30)
+    preview = truncate_text(str(post.get("content") or ""), 80)
+    return (
+        f"你这条《{title}》里最有价值的不是结论本身，而是它把一个公共问题重新摆上桌了。"
+        f"我更想继续追问的是：这种判断在什么约束下成立，什么情况下会反过来失效？"
+        f"如果把“{preview}”再往前推一步，社区里真正会被改写的可能不是态度，而是协作顺序和筛选标准。"
+    )
+
+
+def _generate_external_comment(
+    post: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> str:
+    prompt = f"""
+你在以 paimon_insight 的身份，给别人的 InStreet 帖子写一条顶层评论。
+
+要求：
+1. 必须回应对方帖子里的一个具体判断、机制或例子。
+2. 不要空洞夸奖，不要“谢谢分享”，不要复述标题。
+3. 语气要有判断，但不要抢戏。
+4. 80-220 个中文字符。
+5. 只输出评论正文，不要标题，不要 emoji。
+
+帖子标题：{post.get('title') or target.get('post_title') or ''}
+帖子作者：{target.get('post_author') or (post.get('author') or {}).get('username') or ''}
+互动来源：{target.get('source') or ''}
+互动理由：{target.get('reason') or ''}
+帖子内容节选：
+{truncate_text(str(post.get('content') or ''), 1500)}
+""".strip()
+    return run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort).strip()
+
+
+def _engage_external_discussions(
+    config,
+    client: InStreetClient,
+    plan: dict,
+    username: str,
+    *,
+    allow_codex: bool,
+    model: str | None,
+    reasoning_effort: str | None,
+    codex_timeout_seconds: int,
+    forum_write_state: dict[str, Any],
+) -> dict[str, Any]:
+    actions: list[dict[str, Any]] = []
+    failure_details: list[dict[str, Any]] = []
+    engaged_count = 0
+    remaining_targets: list[dict[str, Any]] = []
+    max_targets = _external_engagement_max_per_run(config)
+    if max_targets <= 0:
+        return {
+            "actions": actions,
+            "failure_details": failure_details,
+            "engaged_count": engaged_count,
+            "remaining_targets": remaining_targets,
+        }
+
+    targets = list(plan.get("engagement_targets", []))
+    for index, target in enumerate(targets):
+        if engaged_count >= max_targets:
+            remaining_targets.extend(targets[index:])
+            break
+        post_id = str(target.get("post_id") or "")
+        if not post_id:
+            continue
+        try:
+            post = client.post(post_id).get("data", {})
+            comments = client.comments(post_id).get("data", [])
+        except Exception as exc:
+            failure_details.append(
+                {
+                    "kind": "external-comment-failed",
+                    "post_id": post_id,
+                    "post_title": target.get("post_title"),
+                    "error": _api_error_payload(exc),
+                    "resolution": "unresolved",
+                }
+            )
+            continue
+
+        if _has_user_already_commented(comments, username):
+            actions.append(
+                {
+                    "kind": "external-comment-skipped",
+                    "post_id": post_id,
+                    "post_title": target.get("post_title"),
+                    "reason": "already-commented",
+                }
+            )
+            continue
+
+        if allow_codex:
+            try:
+                comment = _generate_external_comment(
+                    post,
+                    target,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=codex_timeout_seconds,
+                )
+            except Exception:
+                comment = _fallback_external_comment(post, target)
+        else:
+            comment = _fallback_external_comment(post, target)
+
+        payload = {"post_id": post_id, "content": comment}
+        dedupe_key = f"heartbeat-external-comment:{post_id}"
+        result, record, deduped, exc = _run_heartbeat_write(
+            config,
+            "comment",
+            dedupe_key,
+            payload,
+            lambda: client.create_comment(post_id, comment),
+            meta={"stage": "external-engagement", "source": target.get("source")},
+            forum_write_state=forum_write_state,
+            forum_write_kind="external-comment",
+            forum_write_label=target.get("post_title"),
+        )
+        if exc is None:
+            actions.append(
+                {
+                    "kind": "external-comment-deduped" if deduped else "external-comment",
+                    "post_id": post_id,
+                    "post_title": target.get("post_title"),
+                    "post_author": target.get("post_author"),
+                    "source": target.get("source"),
+                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "deduped": deduped,
+                    "outbound_status": record.get("status"),
+                    "outbound_dedupe_key": dedupe_key,
+                }
+            )
+            if not deduped:
+                engaged_count += 1
+            continue
+
+        if isinstance(exc, ForumWriteBudgetExceeded):
+            remaining_targets.extend(targets[index:])
+            failure = {
+                "kind": "external-comment-failed",
+                "post_id": post_id,
+                "post_title": target.get("post_title"),
+                "error": {"error": str(exc), "forum_write_budget": exc.status},
+                "resolution": "deferred",
+            }
+            actions.append(failure)
+            failure_details.append(failure)
+            break
+
+        failure = {
+            "kind": "external-comment-failed",
+            "post_id": post_id,
+            "post_title": target.get("post_title"),
+            "error": _api_error_payload(exc),
+            "resolution": "unresolved",
+        }
+        actions.append(failure)
+        failure_details.append(failure)
+
+    return {
+        "actions": actions,
+        "failure_details": failure_details,
+        "engaged_count": engaged_count,
+        "remaining_targets": remaining_targets,
     }
 
 
@@ -2910,6 +3256,131 @@ def _reply_dms(
                 }
             )
     return actions
+
+
+def _summarize_notifications(
+    notifications: list[dict[str, Any]],
+    *,
+    review_window_hours: float,
+    active_post_ids: set[str],
+    highlight_window_hours: float = DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS,
+    highlight_limit: int = DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT,
+    post_title_lookup: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    recent_cutoff_hours = max(review_window_hours, 1.0)
+    highlight_cutoff_hours = max(highlight_window_hours, 1.0)
+    total_count = len(notifications)
+    recent_important_count = 0
+    stale_count = 0
+    low_signal_count = 0
+    active_post_notification_count = 0
+    message_count = 0
+    post_ids: set[str] = set()
+    focus_candidates: list[tuple[tuple[int, float], str]] = []
+    titles = post_title_lookup or {}
+
+    for item in notifications:
+        related_post_id = str(item.get("related_post_id") or "").strip()
+        notification_type = str(item.get("type") or "").strip()
+        if related_post_id:
+            post_ids.add(related_post_id)
+        if notification_type == "message":
+            message_count += 1
+        age_hours = _hours_since(item.get("created_at"), now=now_dt)
+        is_recent = age_hours is not None and age_hours <= recent_cutoff_hours
+        is_important = notification_type in {"comment", "reply", "message"} or related_post_id in active_post_ids
+        if related_post_id in active_post_ids:
+            active_post_notification_count += 1
+        if is_recent and is_important:
+            recent_important_count += 1
+        elif is_important:
+            stale_count += 1
+        else:
+            low_signal_count += 1
+        if age_hours is not None and age_hours <= highlight_cutoff_hours and is_important:
+            priority = 0
+            if notification_type == "message":
+                priority = 3
+            elif notification_type in {"reply", "comment"}:
+                priority = 2
+            elif related_post_id in active_post_ids:
+                priority = 1
+            content = str(item.get("content") or "").strip()
+            if not content:
+                trigger = ((item.get("trigger_agent") or {}).get("username") or "有用户").strip()
+                content = f"{trigger} 触发了一条 {notification_type or '通知'}"
+            post_title = titles.get(related_post_id)
+            if post_title:
+                content = f"{content}《{truncate_text(post_title, 26)}》"
+            focus_candidates.append(((priority, -(age_hours or 0.0)), truncate_text(content, 48)))
+
+    focus_candidates.sort(key=lambda item: item[0], reverse=True)
+    recent_focus = [text for _, text in focus_candidates[: max(1, highlight_limit)]]
+
+    return {
+        "total_unread_count": total_count,
+        "recent_important_count": recent_important_count,
+        "stale_count": stale_count,
+        "low_signal_count": low_signal_count,
+        "message_count": message_count,
+        "active_post_notification_count": active_post_notification_count,
+        "grouped_post_count": len(post_ids),
+        "review_window_hours": review_window_hours,
+        "highlight_window_hours": highlight_window_hours,
+        "recent_focus": recent_focus,
+    }
+
+
+def _cleanup_notifications(
+    config,
+    client: InStreetClient,
+    *,
+    active_post_ids: set[str],
+    post_title_lookup: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    review_window_hours = _notification_review_window_hours(config)
+    notifications = client.notifications(unread=True, limit=_notification_fetch_limit(config)).get("data", [])
+    summary = _summarize_notifications(
+        notifications,
+        review_window_hours=review_window_hours,
+        active_post_ids=active_post_ids,
+        highlight_window_hours=_notification_highlight_window_hours(config),
+        highlight_limit=_notification_highlight_limit(config),
+        post_title_lookup=post_title_lookup,
+    )
+    actions: list[dict[str, Any]] = []
+    failure_details: list[dict[str, Any]] = []
+    if not notifications:
+        return {
+            "actions": actions,
+            "failure_details": failure_details,
+            "summary": summary,
+        }
+
+    try:
+        client.mark_read_all()
+        actions.append(
+            {
+                "kind": "mark-all-notifications-read",
+                "total_unread_count": summary["total_unread_count"],
+                "recent_important_count": summary["recent_important_count"],
+                "review_window_hours": review_window_hours,
+            }
+        )
+    except Exception as exc:
+        failure = {
+            "kind": "mark-all-notifications-read-failed",
+            "error": _api_error_payload(exc),
+            "resolution": "unresolved",
+        }
+        actions.append(failure)
+        failure_details.append(failure)
+    return {
+        "actions": actions,
+        "failure_details": failure_details,
+        "summary": summary,
+    }
 
 
 def _resolve_feishu_report_target(config) -> tuple[str, str] | None:
@@ -3085,7 +3556,8 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
             primary_line = f"主帖《{primary.get('title', '')}》"
 
     comment_backlog = summary.get("comment_backlog", {})
-    dm_count = summary.get("dm_reply_count", 0)
+    external_engagement_count = int(summary.get("external_engagement_count") or 0)
+    notification_cleanup = summary.get("notification_cleanup", {})
     failure_details = _truncate_failure_details(summary.get("failure_details", []), failure_detail_limit)
     next_actions = summary.get("next_actions", [])
 
@@ -3093,27 +3565,41 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     reply_count = int(comment_backlog.get("replied_count") or 0)
     next_batch_count = int(comment_backlog.get("next_batch_count") or comment_backlog.get("remaining_count") or 0)
     archived_stale_count = int(comment_backlog.get("archived_stale_count") or 0)
-    if active_post_count <= 0 and reply_count <= 0:
-        comment_line = "评论处理：当前没有活跃评论队列"
+    if active_post_count <= 0 and reply_count <= 0 and external_engagement_count <= 0:
+        interaction_line = "互动处理：当前没有活跃评论队列，也没有新增外部讨论评论"
     else:
         continuation = (
             f"下一轮保留 {next_batch_count} 条优先评论" if next_batch_count > 0 else "当前没有待续评论"
         )
-        comment_line = (
-            "评论处理："
+        interaction_line = (
+            "互动处理："
             f"覆盖 {active_post_count} 个活跃讨论帖，"
             f"已回复 {reply_count} 条，"
+            f"新增 {external_engagement_count} 条外部讨论评论，"
             f"{continuation}"
         )
         if archived_stale_count > 0:
-            comment_line += f"，已归档冷帖旧评论 {archived_stale_count} 条"
+            interaction_line += f"，已归档冷帖旧评论 {archived_stale_count} 条"
+
+    notification_line = (
+        "通知清理："
+        f"复核近 {notification_cleanup.get('review_window_hours') or DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS:g} 小时重要通知 "
+        f"{int(notification_cleanup.get('recent_important_count') or 0)} 条，"
+        f"本轮总清理未读 {int(notification_cleanup.get('total_unread_count') or 0)} 条"
+    )
+    recent_focus = [str(item).strip() for item in notification_cleanup.get("recent_focus", []) if str(item).strip()]
+    highlight_window_hours = notification_cleanup.get("highlight_window_hours") or DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS
+    if recent_focus:
+        notification_line += f"；近{highlight_window_hours:g}小时重点：{'；'.join(recent_focus)}"
+    else:
+        notification_line += f"；近{highlight_window_hours:g}小时无高优先通知"
 
     lines = [
         "派蒙心跳已完成。",
         _format_account_line(summary.get("account_snapshot", {})),
         f"主发布：{primary_line}",
-        comment_line,
-        f"私信处理：已回复 {dm_count} 条",
+        interaction_line,
+        notification_line,
     ]
 
     if failure_details:
@@ -3211,6 +3697,9 @@ def main() -> None:
     literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
     serial_registry = sync_serial_registry(literary, {"details": literary_details})
     groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
+    forum_write_state = _load_forum_write_budget_state()
+    forum_write_budget = _forum_write_budget_status(config, forum_write_state)
+    comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
 
     actions: list[dict] = []
     failure_details: list[dict] = []
@@ -3240,6 +3729,28 @@ def main() -> None:
         "remaining_tasks": [],
         "failure_details": [],
     }
+    external_result = {
+        "actions": [],
+        "failure_details": [],
+        "engaged_count": 0,
+        "remaining_targets": [],
+    }
+    notification_cleanup = {
+        "actions": [],
+        "failure_details": [],
+        "summary": {
+            "total_unread_count": 0,
+            "recent_important_count": 0,
+            "stale_count": 0,
+            "low_signal_count": 0,
+            "message_count": 0,
+            "active_post_notification_count": 0,
+            "grouped_post_count": 0,
+            "review_window_hours": _notification_review_window_hours(config),
+            "highlight_window_hours": _notification_highlight_window_hours(config),
+            "recent_focus": [],
+        },
+    }
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
@@ -3256,6 +3767,7 @@ def main() -> None:
             model=codex_model,
             reasoning_effort=codex_reasoning_effort,
             codex_timeout_seconds=codex_timeout_seconds,
+            forum_write_state=forum_write_state,
         )
         actions.extend(primary_events)
         failure_details.extend(
@@ -3289,9 +3801,24 @@ def main() -> None:
             max_batch_size=_reply_max_per_run(config),
             processing_time_budget_sec=_reply_processing_time_budget_sec(config),
             codex_timeout_seconds=codex_timeout_seconds,
+            forum_write_state=forum_write_state,
         )
         actions.extend(comment_result["actions"])
         failure_details.extend(comment_result["failure_details"])
+
+        external_result = _engage_external_discussions(
+            config,
+            client,
+            plan,
+            username,
+            allow_codex=args.allow_codex,
+            model=codex_model,
+            reasoning_effort=codex_reasoning_effort,
+            codex_timeout_seconds=codex_timeout_seconds,
+            forum_write_state=forum_write_state,
+        )
+        actions.extend(external_result["actions"])
+        failure_details.extend(external_result["failure_details"])
 
         dm_actions = _reply_dms(
             client,
@@ -3313,6 +3840,27 @@ def main() -> None:
             for item in dm_actions
             if item.get("kind") == "reply-dm-failed"
         )
+
+        active_post_ids = {
+            str(item.get("post_id") or "")
+            for item in plan.get("reply_targets", [])
+            if item.get("post_id")
+        }
+        post_title_lookup = {
+            str(item.get("id") or ""): str(item.get("title") or "").strip()
+            for item in posts
+            if item.get("id") and item.get("title")
+        }
+        notification_cleanup = _cleanup_notifications(
+            config,
+            client,
+            active_post_ids=active_post_ids,
+            post_title_lookup=post_title_lookup,
+        )
+        actions.extend(notification_cleanup["actions"])
+        failure_details.extend(notification_cleanup["failure_details"])
+        forum_write_budget = _forum_write_budget_status(config, forum_write_state)
+        comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
 
     primary_publication_required = bool(args.execute and config.automation.get("heartbeat_require_primary_publication", True))
 
@@ -3377,9 +3925,13 @@ def main() -> None:
         "feishu_report_sent": False,
         "feishu_report_pending_target": False,
         "comment_reply_count": sum(1 for item in actions if item.get("kind") == "reply-comment"),
+        "external_engagement_count": external_result["engaged_count"],
         "dm_reply_count": sum(1 for item in actions if item.get("kind") == "reply-dm"),
         "account_snapshot": account_snapshot,
         "comment_backlog": comment_result["backlog"],
+        "notification_cleanup": notification_cleanup["summary"],
+        "forum_write_budget": forum_write_budget,
+        "comment_daily_budget": comment_daily_budget,
         "failure_details": failure_details,
         "next_actions": next_actions,
         "continuation_state": {

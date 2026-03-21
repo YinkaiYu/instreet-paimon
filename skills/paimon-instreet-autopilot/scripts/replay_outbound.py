@@ -6,12 +6,20 @@ import json
 from typing import Any, Callable
 
 from common import (
+    ForumWriteBudgetExceeded,
     InStreetClient,
     ensure_runtime_dirs,
+    forum_write_budget_status,
+    is_forum_write_rate_limit_error,
     list_pending_outbound,
     load_config,
+    load_forum_write_budget_state,
     now_utc,
+    outbound_forum_write_kind,
+    outbound_forum_write_label,
     queue_outbound_action,
+    record_forum_write_rate_limit,
+    record_forum_write_success,
     run_outbound_action,
 )
 
@@ -96,15 +104,46 @@ def main() -> None:
     args = parser.parse_args()
 
     ensure_runtime_dirs()
-    client = InStreetClient(load_config())
+    config = load_config()
+    client = InStreetClient(config)
     items = list_pending_outbound()
     results: list[dict[str, Any]] = []
+    forum_write_state = load_forum_write_budget_state()
 
     for item in items[: max(0, args.limit)]:
         channel = item["channel"]
         action = item["action"]
         dedupe_key = item["dedupe_key"]
         payload = item["payload"]
+        forum_write_kind = outbound_forum_write_kind(action, payload)
+        forum_write_label = outbound_forum_write_label(action, payload)
+        if forum_write_kind:
+            budget = forum_write_budget_status(config, forum_write_state, write_kind=forum_write_kind)
+            if budget.get("blocked"):
+                exc = ForumWriteBudgetExceeded(budget, write_kind=forum_write_kind, label=forum_write_label)
+                queue_outbound_action(
+                    channel,
+                    action,
+                    dedupe_key,
+                    payload,
+                    error_text=str(exc),
+                    meta={
+                        "source": "replay_outbound.py",
+                        "mode": "deferred-local-budget",
+                        "forum_write_budget": budget,
+                    },
+                )
+                results.append(
+                    {
+                        "channel": channel,
+                        "action": action,
+                        "dedupe_key": dedupe_key,
+                        "status": "deferred-local-budget",
+                        "error": str(exc),
+                        "forum_write_budget": budget,
+                    }
+                )
+                continue
         try:
             result, record, deduped = run_outbound_action(
                 channel,
@@ -120,6 +159,14 @@ def main() -> None:
                     "work_id": payload.get("work_id"),
                 },
             )
+            budget = None
+            if forum_write_kind and not deduped:
+                budget = record_forum_write_success(
+                    config,
+                    forum_write_state,
+                    write_kind=forum_write_kind,
+                    label=forum_write_label,
+                )
             results.append(
                 {
                     "channel": channel,
@@ -129,16 +176,28 @@ def main() -> None:
                     "deduped": deduped,
                     "result": result,
                     "record": record,
+                    "forum_write_budget": budget,
                 }
             )
         except Exception as exc:  # pragma: no cover - runtime API failures are environment-dependent
+            budget = None
+            if forum_write_kind and is_forum_write_rate_limit_error(exc):
+                budget = record_forum_write_rate_limit(
+                    config,
+                    forum_write_state,
+                    exc,
+                    retry_delay_sec=args.retry_delay_sec,
+                )
             queue_outbound_action(
                 channel,
                 action,
                 dedupe_key,
                 payload,
                 error_text=str(exc),
-                meta={"source": "replay_outbound.py"},
+                meta={
+                    "source": "replay_outbound.py",
+                    "forum_write_budget": budget,
+                },
             )
             results.append(
                 {
@@ -147,6 +206,7 @@ def main() -> None:
                     "dedupe_key": dedupe_key,
                     "status": "failed",
                     "error": str(exc),
+                    "forum_write_budget": budget,
                 }
             )
 

@@ -29,6 +29,17 @@
     "reply_comment_window_per_post": 10,
     "reply_next_action_comment_cap": 10,
     "comment_reply_min_interval_sec": 2.2,
+    "forum_write_limit": 10,
+    "forum_write_window_sec": 600,
+    "external_engagement_max_per_run": 2,
+    "notification_review_window_hours": 24,
+    "notification_fetch_limit": 50,
+    "community_watch_usernames": [
+      "happyclaw_max",
+      "longcml",
+      "shanzhu_cat_6971",
+      "happyclaw"
+    ],
     "dm_batch_size": 2,
     "feed_limit": 10,
     "post_limit": 20,

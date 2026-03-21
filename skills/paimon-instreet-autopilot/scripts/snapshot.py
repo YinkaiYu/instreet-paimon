@@ -21,6 +21,15 @@ from serial_state import sync_serial_registry
 
 
 MIN_POST_FETCH_LIMIT = 100
+DEFAULT_COMMUNITY_WATCH_USERNAMES = [
+    "happyclaw_max",
+    "longcml",
+    "shanzhu_cat_6971",
+    "happyclaw",
+]
+DEFAULT_COMMUNITY_WATCH_POST_LIMIT = 6
+DEFAULT_GROUP_WATCH_POST_LIMIT = 8
+DEFAULT_GROUP_WATCH_MEMBER_LIMIT = 12
 
 
 def _extract_posts(obj: dict) -> list[dict]:
@@ -173,6 +182,104 @@ def fetch_literary_details(client: InStreetClient, literary: dict) -> dict:
     return {"success": True, "details": details}
 
 
+def _serialize_post_watch(post: dict) -> dict:
+    author = post.get("author") if isinstance(post.get("author"), dict) else post.get("agent")
+    submolt = post.get("submolt") if isinstance(post.get("submolt"), dict) else {}
+    return {
+        "post_id": post.get("id") or post.get("post_id"),
+        "title": post.get("title"),
+        "author": (author or {}).get("username"),
+        "submolt": post.get("submolt_name") or submolt.get("name"),
+        "upvotes": post.get("upvotes"),
+        "comment_count": post.get("comment_count"),
+        "created_at": post.get("created_at"),
+        "url": post.get("url"),
+    }
+
+
+def _community_watch_usernames(config) -> list[str]:
+    raw = config.automation.get("community_watch_usernames")
+    if isinstance(raw, list):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+        if values:
+            return values
+    return list(DEFAULT_COMMUNITY_WATCH_USERNAMES)
+
+
+def fetch_community_watch(config, client: InStreetClient, home: dict, groups: dict) -> dict:
+    watch = {
+        "captured_at": now_utc(),
+        "home_hot_posts": [
+            {
+                "post_id": item.get("post_id"),
+                "title": item.get("title"),
+                "author": item.get("author"),
+                "submolt": item.get("submolt_name"),
+                "upvotes": item.get("upvotes"),
+                "comment_count": item.get("comment_count"),
+                "url": item.get("url"),
+            }
+            for item in home.get("data", {}).get("hot_posts", [])[:10]
+        ],
+        "watched_accounts": [],
+        "owned_group_watch": {},
+    }
+
+    for username in _community_watch_usernames(config):
+        search_result = client.search(username, result_type="agents", limit=5)
+        candidates = search_result.get("results") or search_result.get("data", {}).get("agents", [])
+        match = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("title") or item.get("username") or item.get("author", {}).get("username") or "").strip() == username
+            ),
+            None,
+        )
+        if match is None:
+            watch["watched_accounts"].append({"username": username, "found": False})
+            continue
+
+        agent_id = match.get("id") or (match.get("author") or {}).get("id")
+        top_posts = client.posts(agent_id=agent_id, sort="top", limit=DEFAULT_COMMUNITY_WATCH_POST_LIMIT)
+        recent_posts = client.posts(agent_id=agent_id, sort="new", limit=DEFAULT_COMMUNITY_WATCH_POST_LIMIT)
+        author = match.get("author") or {}
+        watch["watched_accounts"].append(
+            {
+                "username": username,
+                "found": True,
+                "agent_id": agent_id,
+                "score": author.get("score") or author.get("karma") or match.get("upvotes"),
+                "bio": match.get("content"),
+                "top_posts": [_serialize_post_watch(item) for item in _extract_posts(top_posts)[:DEFAULT_COMMUNITY_WATCH_POST_LIMIT]],
+                "recent_posts": [_serialize_post_watch(item) for item in _extract_posts(recent_posts)[:DEFAULT_COMMUNITY_WATCH_POST_LIMIT]],
+            }
+        )
+
+    owned_groups = groups.get("data", {}).get("groups", [])
+    if owned_groups:
+        group_id = owned_groups[0].get("id")
+        if group_id:
+            group_detail = client.group(group_id).get("data", {})
+            group_posts = client.group_posts(group_id, sort="hot", limit=DEFAULT_GROUP_WATCH_POST_LIMIT).get("data", {}).get("posts", [])
+            group_members = client.group_members(group_id).get("data", {}).get("members", [])
+            watch["owned_group_watch"] = {
+                "group": group_detail,
+                "hot_posts": [_serialize_post_watch(item) for item in group_posts[:DEFAULT_GROUP_WATCH_POST_LIMIT]],
+                "recent_members": [
+                    {
+                        "username": (item.get("agent") or {}).get("username"),
+                        "score": (item.get("agent") or {}).get("karma"),
+                        "role": item.get("role"),
+                        "status": item.get("status"),
+                        "joined_at": item.get("joined_at"),
+                    }
+                    for item in group_members[:DEFAULT_GROUP_WATCH_MEMBER_LIMIT]
+                ],
+            }
+    return {"success": True, "data": watch}
+
+
 def build_overview(
     me: dict,
     home: dict,
@@ -311,6 +418,19 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
     if notifications_failure:
         fetch_failures.append(notifications_failure)
 
+    community_watch, community_watch_failure = fetch_best_effort(
+        "community_watch",
+        lambda: fetch_community_watch(config, client, home, groups),
+        empty_data={
+            "captured_at": now_utc(),
+            "home_hot_posts": [],
+            "watched_accounts": [],
+            "owned_group_watch": {},
+        },
+    )
+    if community_watch_failure:
+        fetch_failures.append(community_watch_failure)
+
     serial_registry = sync_serial_registry(literary, literary_details)
     overview = build_overview(me, home, posts, literary, literary_details, groups, fetch_failures)
 
@@ -324,6 +444,7 @@ def run_snapshot(*, archive: bool, post_limit: int, feed_limit: int) -> dict:
         "feed": feed,
         "messages": messages,
         "notifications": notifications,
+        "community_watch": community_watch,
         "fetch_failures": {
             "success": len(fetch_failures) == 0,
             "data": fetch_failures,

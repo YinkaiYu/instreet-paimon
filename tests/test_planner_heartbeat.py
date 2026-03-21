@@ -1,9 +1,13 @@
+import contextlib
 from datetime import datetime, timezone
+import io
 import json
+import ssl
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib import error
 
 
 sys.path.insert(0, "skills/paimon-instreet-autopilot/scripts")
@@ -11,6 +15,8 @@ sys.path.insert(0, "skills/paimon-instreet-autopilot/scripts")
 import common  # noqa: E402
 import content_planner  # noqa: E402
 import heartbeat  # noqa: E402
+import publish  # noqa: E402
+import replay_outbound  # noqa: E402
 import snapshot  # noqa: E402
 
 
@@ -103,6 +109,47 @@ class ContentPlannerTests(unittest.TestCase):
         }
         picked = content_planner._pick_track_opportunity("theory", signal_summary)
         self.assertIn(picked["signal_type"], {"community-hot", "promo", "freeform", "discussion", "literary", "notification-load", "reply-pressure", "hot-theory", "feed"})
+
+    def test_build_engagement_targets_prioritizes_group_then_hot_then_leaderboard(self) -> None:
+        targets = content_planner._build_engagement_targets(
+            signal_summary={
+                "group_watch": {
+                    "hot_posts": [
+                        {"post_id": "group-1", "title": "小组成员的状态机帖", "author": "group_member"},
+                    ]
+                },
+                "community_hot_posts": [
+                    {"post_id": "hot-1", "title": "首页爆款帖", "author": "hot_author"},
+                ],
+                "competitor_watchlist": [
+                    {"post_id": "lead-1", "title": "榜单高赞帖", "username": "happyclaw_max"},
+                ],
+            },
+            own_username="paimon_insight",
+            own_post_ids={"own-1"},
+        )
+        self.assertEqual(["group-hot", "community-hot", "leaderboard-watch"], [item["source"] for item in targets])
+
+    def test_fallback_theory_idea_uses_square_for_public_signal(self) -> None:
+        idea = content_planner._fallback_theory_idea(
+            {
+                "feed_watchlist": [],
+                "top_discussion_posts": [],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+                "dynamic_topics": [
+                    {
+                        "track": "theory",
+                        "signal_type": "community-hot",
+                        "source_text": "一个让人不舒服的真相：大多数Agent其实不需要记忆",
+                        "why_now": "公共讨论已经起来了。",
+                        "angle_hint": "把表面争论推进成机制分析。",
+                        "overlap_score": (0, 0, 0),
+                    }
+                ],
+            },
+            [],
+        )
+        self.assertEqual("square", idea["submolt"])
 
 
 class HeartbeatStateTests(unittest.TestCase):
@@ -226,7 +273,15 @@ class HeartbeatStateTests(unittest.TestCase):
                     "active_post_count": 0,
                     "next_batch_count": 0,
                 },
+                "external_engagement_count": 0,
                 "dm_reply_count": 0,
+                "notification_cleanup": {
+                    "total_unread_count": 0,
+                    "recent_important_count": 0,
+                    "review_window_hours": 24.0,
+                    "highlight_window_hours": 3.0,
+                    "recent_focus": [],
+                },
                 "failure_details": [
                     {
                         "kind": "primary-publish-deduped",
@@ -248,6 +303,9 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("主发布：未完成主发布", report)
         self.assertNotIn("复用既有记录", report)
         self.assertIn("点赞 3 (0)", report)
+        self.assertIn("互动处理：当前没有活跃评论队列，也没有新增外部讨论评论", report)
+        self.assertNotIn("私信处理：", report)
+        self.assertNotIn("外部互动：", report)
 
     def test_compose_feishu_report_describes_active_queue_instead_of_backlog(self) -> None:
         report = heartbeat._compose_feishu_report(
@@ -264,7 +322,15 @@ class HeartbeatStateTests(unittest.TestCase):
                     "next_batch_count": 10,
                     "archived_stale_count": 24,
                 },
+                "external_engagement_count": 1,
                 "dm_reply_count": 0,
+                "notification_cleanup": {
+                    "total_unread_count": 12,
+                    "recent_important_count": 4,
+                    "review_window_hours": 24.0,
+                    "highlight_window_hours": 3.0,
+                    "recent_focus": ["matrix_agent 评论了你的帖子《新帖》"],
+                },
                 "failure_details": [],
                 "next_actions": [{"label": "继续维护 3 个活跃讨论帖，下一批优先回复 10 条评论"}],
                 "actions": [
@@ -279,6 +345,305 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("覆盖 3 个活跃讨论帖", report)
         self.assertIn("下一轮保留 10 条优先评论", report)
         self.assertIn("已归档冷帖旧评论 24 条", report)
+        self.assertIn("新增 1 条外部讨论评论", report)
+        self.assertIn("近3小时重点：matrix_agent 评论了你的帖子《新帖》", report)
+        self.assertNotIn("私信处理：", report)
+        self.assertNotIn("外部互动：", report)
+
+    def test_forum_write_budget_blocks_when_limit_reached(self) -> None:
+        config = type("Config", (), {"automation": {}})()
+        state = {
+            "timestamps": [
+                {"at": "2026-03-21T03:00:00+00:00", "kind": "post"},
+                {"at": "2026-03-21T03:00:10+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:00:20+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:00:30+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:00:40+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:00:50+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:01:00+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:01:10+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:01:20+00:00", "kind": "comment"},
+                {"at": "2026-03-21T03:01:30+00:00", "kind": "comment"},
+            ],
+            "frozen_until": None,
+        }
+        status = heartbeat._forum_write_budget_status(
+            config,
+            state,
+            now_dt=datetime(2026, 3, 21, 3, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertTrue(status["blocked"])
+        self.assertEqual(0, status["remaining"])
+
+    def test_summarize_notifications_highlights_recent_important_items(self) -> None:
+        now = datetime.now(timezone.utc)
+        summary = heartbeat._summarize_notifications(
+            [
+                {
+                    "type": "comment",
+                    "content": "matrix_agent 评论了你的帖子",
+                    "created_at": (now.replace(microsecond=0) - heartbeat.timedelta(minutes=20)).isoformat(),
+                    "related_post_id": "post-1",
+                },
+                {
+                    "type": "upvote",
+                    "created_at": (now.replace(microsecond=0) - heartbeat.timedelta(hours=30)).isoformat(),
+                    "related_post_id": "post-2",
+                },
+                {
+                    "type": "message",
+                    "content": "clawgeek 给你发来私信",
+                    "created_at": (now.replace(microsecond=0) - heartbeat.timedelta(minutes=5)).isoformat(),
+                    "related_post_id": None,
+                },
+            ],
+            review_window_hours=24,
+            active_post_ids={"post-1"},
+            highlight_window_hours=3,
+            highlight_limit=2,
+            post_title_lookup={"post-1": "测试帖子"},
+        )
+        self.assertEqual(2, summary["recent_important_count"])
+        self.assertEqual(1, summary["low_signal_count"])
+        self.assertEqual(2, len(summary["recent_focus"]))
+        self.assertIn("clawgeek 给你发来私信", summary["recent_focus"][0])
+        self.assertIn("《测试帖子》", summary["recent_focus"][1])
+
+
+class SharedForumBudgetTests(unittest.TestCase):
+    def _patch_attr(self, module, name: str, value) -> None:
+        original = getattr(module, name)
+        setattr(module, name, value)
+        self.addCleanup(setattr, module, name, original)
+
+    def _configure_runtime_paths(self, root: Path) -> None:
+        current_dir = root / "state" / "current"
+        logs_dir = root / "logs"
+        self._patch_attr(common, "CURRENT_STATE_DIR", current_dir)
+        self._patch_attr(common, "LOGS_DIR", logs_dir)
+        self._patch_attr(common, "FORUM_WRITE_BUDGET_PATH", current_dir / "forum_write_budget.json")
+        self._patch_attr(common, "PENDING_OUTBOUND_PATH", current_dir / "pending_outbound.json")
+        self._patch_attr(common, "PENDING_OUTBOUND_LOG", logs_dir / "pending_outbound.jsonl")
+        self._patch_attr(common, "OUTBOUND_JOURNAL_PATH", current_dir / "outbound_journal.json")
+        self._patch_attr(common, "OUTBOUND_ATTEMPTS_LOG", logs_dir / "outbound_attempts.jsonl")
+        self._patch_attr(publish, "LOGS_DIR", logs_dir)
+
+    def _fake_config(self):
+        return type(
+            "Config",
+            (),
+            {
+                "automation": {},
+                "instreet": {"base_url": "https://example.com", "api_key": "test"},
+                "identity": {"agent_id": "agent-test", "name": "paimon_insight"},
+            },
+        )()
+
+    def test_publish_queues_when_shared_budget_is_frozen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._configure_runtime_paths(root)
+            common.write_json(
+                common.FORUM_WRITE_BUDGET_PATH,
+                {"timestamps": [], "frozen_until": "2099-01-01T00:00:00+00:00"},
+            )
+            self._patch_attr(publish, "ensure_runtime_dirs", lambda: None)
+            self._patch_attr(publish, "load_config", self._fake_config)
+            self._patch_attr(publish, "InStreetClient", lambda config: object())
+            argv = sys.argv[:]
+            self.addCleanup(setattr, sys, "argv", argv)
+            sys.argv = [
+                "publish.py",
+                "--queue-on-failure",
+                "comment",
+                "--post-id",
+                "post-1",
+                "--parent-id",
+                "comment-1",
+                "--content",
+                "reply",
+            ]
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                publish.main()
+            output = buffer.getvalue()
+            self.assertIn("forum write budget exhausted", output)
+            pending = common.read_json(common.PENDING_OUTBOUND_PATH)
+            self.assertEqual(1, len(pending["records"]))
+
+    def test_replay_defers_forum_writes_when_shared_budget_is_frozen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._configure_runtime_paths(root)
+            common.write_json(
+                common.FORUM_WRITE_BUDGET_PATH,
+                {"timestamps": [], "frozen_until": "2099-01-01T00:00:00+00:00"},
+            )
+            common.write_json(
+                common.PENDING_OUTBOUND_PATH,
+                {
+                    "version": 1,
+                    "records": {
+                        "instreet:comment:test-key": {
+                            "channel": "instreet",
+                            "action": "comment",
+                            "dedupe_key": "test-key",
+                            "payload": {"post_id": "post-1", "parent_id": "comment-1", "content": "reply"},
+                            "queued_at": "2026-03-21T00:00:00+00:00",
+                            "queue_attempts": 1,
+                            "status": "queued",
+                        }
+                    },
+                },
+            )
+            self._patch_attr(replay_outbound, "ensure_runtime_dirs", lambda: None)
+            self._patch_attr(replay_outbound, "load_config", self._fake_config)
+            self._patch_attr(replay_outbound, "InStreetClient", lambda config: object())
+            argv = sys.argv[:]
+            self.addCleanup(setattr, sys, "argv", argv)
+            sys.argv = ["replay_outbound.py", "--limit", "1"]
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                replay_outbound.main()
+            result = json.loads(buffer.getvalue())
+            self.assertEqual("deferred-local-budget", result["results"][0]["status"])
+
+    def test_legacy_comment_daily_limit_does_not_keep_global_budget_frozen(self) -> None:
+        config = self._fake_config()
+        state = {
+            "timestamps": [
+                {"at": "2026-03-21T07:01:37+00:00", "kind": "group-post"},
+                {"at": "2026-03-21T07:02:03+00:00", "kind": "comment-reply"},
+                {"at": "2026-03-21T07:02:14+00:00", "kind": "comment-reply"},
+            ],
+            "comment_timestamps": [],
+            "frozen_until": "2099-01-01T00:00:00+00:00",
+            "last_rate_limit_error": {
+                "success": False,
+                "error": "Daily comment limit reached (100/day). Come back tomorrow.",
+                "retry_after_seconds": 3600,
+            },
+            "last_rate_limit_scope": "comment-daily",
+        }
+        status = common.forum_write_budget_status(
+            config,
+            state,
+            now_dt=datetime(2026, 3, 21, 7, 15, 0, tzinfo=timezone.utc),
+        )
+        self.assertFalse(status["blocked"])
+        self.assertIsNone(status["frozen_until"])
+
+    def test_record_daily_comment_limit_sets_comment_daily_budget_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._configure_runtime_paths(root)
+            config = self._fake_config()
+            state = common.load_forum_write_budget_state()
+            exc = common.ApiError(
+                429,
+                {
+                    "success": False,
+                    "error": "Daily comment limit reached (100/day). Come back tomorrow.",
+                    "retry_after_seconds": 3600,
+                },
+            )
+            budget = common.record_forum_write_rate_limit(config, state, exc, retry_delay_sec=5.0)
+            comment_daily_budget = common.comment_daily_budget_status(config, state)
+            self.assertFalse(budget["blocked"])
+            self.assertIsNone(budget["frozen_until"])
+            self.assertTrue(comment_daily_budget["blocked"])
+            self.assertEqual("comment-daily", comment_daily_budget["freeze_scope"])
+
+
+class HttpTransportRetryTests(unittest.TestCase):
+    class _FakeResponse:
+        def __init__(self, body: str) -> None:
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return self._body.encode("utf-8")
+
+    def test_http_json_retries_transient_get_transport_errors(self) -> None:
+        original_urlopen = common.request.urlopen
+        calls = {"count": 0}
+
+        def fake_urlopen(req, timeout=30):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise error.URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+            return self._FakeResponse('{"ok": true}')
+
+        try:
+            common.request.urlopen = fake_urlopen
+            result = common._http_json("GET", "https://example.com/api")
+        finally:
+            common.request.urlopen = original_urlopen
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(2, calls["count"])
+
+
+class PublishOracleTests(unittest.TestCase):
+    class _FakeOracleClient:
+        def __init__(self, score: float, prices: list[float]) -> None:
+            self.score = score
+            self.prices = prices
+            self.trade_calls: list[dict] = []
+
+        def me(self) -> dict:
+            return {"data": {"score": self.score}}
+
+        def oracle_market(self, market_id: str) -> dict:
+            index = min(len(self.trade_calls), len(self.prices) - 1)
+            price = self.prices[index]
+            return {"data": {"id": market_id, "yes_price": round(1 - price, 3), "no_price": price}}
+
+        def oracle_trade(self, market_id: str, *, action: str, outcome: str, shares: int, reason=None, max_price=None) -> dict:
+            index = min(len(self.trade_calls), len(self.prices) - 1)
+            price = self.prices[index]
+            cost = round(price * shares, 4)
+            self.score -= cost
+            self.trade_calls.append(
+                {
+                    "market_id": market_id,
+                    "action": action,
+                    "outcome": outcome,
+                    "shares": shares,
+                    "reason": reason,
+                    "max_price": max_price,
+                    "cost": cost,
+                }
+            )
+            return {"data": {"trade": {"shares": shares, "cost": cost, "price": price}}}
+
+    def test_run_oracle_trade_strategy_respects_balance_floor_and_max_price(self) -> None:
+        client = self._FakeOracleClient(140, [0.5, 0.52, 0.55])
+        args = type(
+            "Args",
+            (),
+            {
+                "market_id": "market-1",
+                "action": "buy",
+                "outcome": "NO",
+                "shares": None,
+                "reason": "NO side has the better edge here",
+                "max_price": 0.53,
+                "deploy_max_balance": True,
+                "balance_floor": 100.0,
+                "chunk_size": 30,
+                "max_chunks": 5,
+            },
+        )()
+        summary = publish._run_oracle_trade_strategy(client, args)
+        self.assertEqual("max-balance", summary["strategy"])
+        self.assertEqual(2, len(summary["orders"]))
+        self.assertLessEqual(summary["total_cost"], 40.0)
+        self.assertEqual("market-price-above-max-price", summary["stopped_reason"])
 
 
 class CommonArchiveTests(unittest.TestCase):

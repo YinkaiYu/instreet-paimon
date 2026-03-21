@@ -5,11 +5,12 @@ import json
 import hashlib
 import os
 import re
+import ssl
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
@@ -29,10 +30,15 @@ OUTBOUND_JOURNAL_PATH = CURRENT_STATE_DIR / "outbound_journal.json"
 OUTBOUND_ATTEMPTS_LOG = LOGS_DIR / "outbound_attempts.jsonl"
 PENDING_OUTBOUND_PATH = CURRENT_STATE_DIR / "pending_outbound.json"
 PENDING_OUTBOUND_LOG = LOGS_DIR / "pending_outbound.jsonl"
+FORUM_WRITE_BUDGET_PATH = CURRENT_STATE_DIR / "forum_write_budget.json"
 LITERARY_ARCHIVE_DIR = ARCHIVE_STATE_DIR / "literary"
 MEMORY_STORE_PATH = CURRENT_STATE_DIR / "memory_store.json"
 MEMORY_JOURNAL_PATH = CURRENT_STATE_DIR / "memory_journal.jsonl"
 SERIAL_REGISTRY_PATH = CURRENT_STATE_DIR / "serial_registry.json"
+DEFAULT_FORUM_WRITE_LIMIT = 10
+DEFAULT_FORUM_WRITE_WINDOW_SEC = 600
+DEFAULT_COMMENT_DAILY_LIMIT = 100
+DEFAULT_COMMENT_DAILY_WINDOW_SEC = 86400
 
 
 class ApiError(RuntimeError):
@@ -40,6 +46,14 @@ class ApiError(RuntimeError):
         self.status = status
         self.body = body
         super().__init__(f"HTTP {status}: {body}")
+
+
+class ForumWriteBudgetExceeded(RuntimeError):
+    def __init__(self, status: dict[str, Any], *, write_kind: str, label: str | None = None):
+        self.status = status
+        self.write_kind = write_kind
+        self.label = label
+        super().__init__(status.get("message") or f"forum write budget exhausted for {write_kind}")
 
 
 @dataclass
@@ -181,6 +195,364 @@ def get_outbound_record(channel: str, action: str, dedupe_key: str) -> dict[str,
 def get_pending_outbound_record(channel: str, action: str, dedupe_key: str) -> dict[str, Any] | None:
     pending = load_pending_outbound()
     return pending.get("records", {}).get(_journal_key(channel, action, dedupe_key))
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def api_error_payload(exc: Exception) -> Any:
+    if isinstance(exc, ApiError):
+        return exc.body
+    return str(exc)
+
+
+def api_error_text(value: Any) -> str:
+    if isinstance(value, ApiError):
+        body = value.body
+    else:
+        body = value
+    if isinstance(body, dict):
+        return str(body.get("error", ""))
+    return str(body)
+
+
+def extract_retry_after_seconds(exc: Exception) -> float | None:
+    if not isinstance(exc, ApiError):
+        return None
+    body = exc.body
+    if isinstance(body, dict):
+        retry_after = body.get("retry_after_seconds")
+        if retry_after is not None:
+            try:
+                return max(0.0, float(retry_after))
+            except (TypeError, ValueError):
+                pass
+        error_text = str(body.get("error", ""))
+    else:
+        error_text = str(body)
+    matched = re.search(r"wait\s+(\d+(?:\.\d+)?)\s+seconds?", error_text, re.IGNORECASE)
+    if matched:
+        return max(0.0, float(matched.group(1)))
+    return None
+
+
+def forum_write_rate_limit_scope(value: Any) -> str | None:
+    error_text = api_error_text(value).lower()
+    if not error_text and not isinstance(value, ApiError):
+        return None
+    if "posted or commented 10 times in the last 10 minutes" in error_text:
+        return "global-forum-write"
+    if "daily comment limit reached" in error_text:
+        return "comment-daily"
+    if "too many comments on this post" in error_text:
+        return "comment-post-hourly"
+    if "commenting too fast" in error_text:
+        return "comment-cooldown"
+    if "posting too fast" in error_text:
+        return "post-cooldown"
+    if isinstance(value, ApiError) and value.status == 429:
+        return "unknown-429"
+    return None
+
+
+def is_forum_write_rate_limit_error(exc: Exception) -> bool:
+    return forum_write_rate_limit_scope(exc) == "global-forum-write"
+
+
+def outbound_forum_write_kind(action: str, payload: dict[str, Any]) -> str | None:
+    if action == "post":
+        if payload.get("group_id"):
+            return "group-post"
+        return "post"
+    if action == "comment":
+        if payload.get("parent_id"):
+            return "comment-reply"
+        return "comment"
+    return None
+
+
+def outbound_forum_write_label(action: str, payload: dict[str, Any]) -> str | None:
+    if action == "post":
+        return str(payload.get("title") or "").strip() or None
+    if action == "comment":
+        return str(payload.get("post_id") or "").strip() or None
+    return None
+
+
+def _is_comment_write_kind(write_kind: str | None) -> bool:
+    return write_kind in {"comment", "comment-reply"}
+
+
+def _forum_write_limit(config) -> int:
+    raw = config.automation.get("forum_write_limit", DEFAULT_FORUM_WRITE_LIMIT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FORUM_WRITE_LIMIT
+
+
+def _forum_write_window_sec(config) -> int:
+    raw = config.automation.get("forum_write_window_sec", DEFAULT_FORUM_WRITE_WINDOW_SEC)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FORUM_WRITE_WINDOW_SEC
+
+
+def _comment_daily_limit(config) -> int:
+    raw = config.automation.get("comment_daily_limit", DEFAULT_COMMENT_DAILY_LIMIT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_COMMENT_DAILY_LIMIT
+
+
+def _comment_daily_window_sec(config) -> int:
+    raw = config.automation.get("comment_daily_window_sec", DEFAULT_COMMENT_DAILY_WINDOW_SEC)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_COMMENT_DAILY_WINDOW_SEC
+
+
+def load_forum_write_budget_state() -> dict[str, Any]:
+    state = read_json(FORUM_WRITE_BUDGET_PATH, default={"timestamps": [], "frozen_until": None})
+    timestamps = state.get("timestamps")
+    if not isinstance(timestamps, list):
+        timestamps = []
+    comment_timestamps = state.get("comment_timestamps")
+    if not isinstance(comment_timestamps, list):
+        comment_timestamps = []
+    last_rate_limit_scope = state.get("last_rate_limit_scope")
+    if not last_rate_limit_scope:
+        last_rate_limit_scope = forum_write_rate_limit_scope(state.get("last_rate_limit_error"))
+    if not last_rate_limit_scope and state.get("frozen_until"):
+        last_rate_limit_scope = "global-forum-write"
+    last_comment_rate_limit_scope = state.get("last_comment_rate_limit_scope")
+    if not last_comment_rate_limit_scope:
+        last_comment_rate_limit_scope = forum_write_rate_limit_scope(state.get("last_comment_rate_limit_error"))
+    if not last_comment_rate_limit_scope and state.get("comment_daily_frozen_until"):
+        last_comment_rate_limit_scope = "comment-daily"
+    legacy_comment_daily_frozen_until = None
+    if last_rate_limit_scope == "comment-daily" and not state.get("comment_daily_frozen_until"):
+        legacy_comment_daily_frozen_until = state.get("frozen_until")
+    last_comment_rate_limit_error = state.get("last_comment_rate_limit_error")
+    if last_rate_limit_scope == "comment-daily" and not last_comment_rate_limit_error:
+        last_comment_rate_limit_error = state.get("last_rate_limit_error")
+    return {
+        "timestamps": timestamps,
+        "comment_timestamps": comment_timestamps,
+        "frozen_until": state.get("frozen_until") if last_rate_limit_scope == "global-forum-write" else None,
+        "last_rate_limit_error": state.get("last_rate_limit_error"),
+        "last_rate_limit_scope": last_rate_limit_scope,
+        "comment_daily_frozen_until": (
+            state.get("comment_daily_frozen_until") or legacy_comment_daily_frozen_until
+            if (last_comment_rate_limit_scope == "comment-daily" or last_rate_limit_scope == "comment-daily")
+            else None
+        ),
+        "last_comment_rate_limit_error": last_comment_rate_limit_error,
+        "last_comment_rate_limit_scope": last_comment_rate_limit_scope or ("comment-daily" if legacy_comment_daily_frozen_until else None),
+    }
+
+
+def save_forum_write_budget_state(state: dict[str, Any]) -> None:
+    write_json(FORUM_WRITE_BUDGET_PATH, state)
+
+
+def prune_forum_write_budget_state(config, state: dict[str, Any], *, now_dt: datetime | None = None) -> dict[str, Any]:
+    now_value = now_dt or datetime.now(timezone.utc)
+    cutoff = now_value.timestamp() - _forum_write_window_sec(config)
+    pruned: list[dict[str, Any]] = []
+    for item in state.get("timestamps", []):
+        at = _parse_iso_datetime(item.get("at"))
+        if at is None:
+            continue
+        if at.timestamp() >= cutoff:
+            pruned.append(item)
+    state["timestamps"] = pruned[-max(_forum_write_limit(config) * 3, 20) :]
+    comment_cutoff = now_value.timestamp() - _comment_daily_window_sec(config)
+    comment_pruned: list[dict[str, Any]] = []
+    for item in state.get("comment_timestamps", []):
+        at = _parse_iso_datetime(item.get("at"))
+        if at is None:
+            continue
+        if at.timestamp() >= comment_cutoff:
+            comment_pruned.append(item)
+    state["comment_timestamps"] = comment_pruned[-max(_comment_daily_limit(config) * 3, 300) :]
+    freeze_scope = state.get("last_rate_limit_scope") or forum_write_rate_limit_scope(state.get("last_rate_limit_error"))
+    if not freeze_scope and state.get("frozen_until"):
+        freeze_scope = "global-forum-write"
+    state["last_rate_limit_scope"] = freeze_scope
+    if freeze_scope != "global-forum-write":
+        state["frozen_until"] = None
+    else:
+        frozen_until = _parse_iso_datetime(state.get("frozen_until"))
+        if frozen_until and frozen_until <= now_value:
+            state["frozen_until"] = None
+    comment_freeze_scope = state.get("last_comment_rate_limit_scope") or forum_write_rate_limit_scope(
+        state.get("last_comment_rate_limit_error")
+    )
+    if not comment_freeze_scope and state.get("comment_daily_frozen_until"):
+        comment_freeze_scope = "comment-daily"
+    if not state.get("comment_daily_frozen_until") and freeze_scope == "comment-daily" and state.get("frozen_until"):
+        state["comment_daily_frozen_until"] = state.get("frozen_until")
+    if not state.get("last_comment_rate_limit_error") and freeze_scope == "comment-daily":
+        state["last_comment_rate_limit_error"] = state.get("last_rate_limit_error")
+    state["last_comment_rate_limit_scope"] = comment_freeze_scope
+    if comment_freeze_scope != "comment-daily":
+        state["comment_daily_frozen_until"] = None
+    else:
+        comment_daily_frozen_until = _parse_iso_datetime(state.get("comment_daily_frozen_until"))
+        if comment_daily_frozen_until and comment_daily_frozen_until <= now_value:
+            state["comment_daily_frozen_until"] = None
+    return state
+
+
+def comment_daily_budget_status(config, state: dict[str, Any], *, now_dt: datetime | None = None) -> dict[str, Any]:
+    now_value = now_dt or datetime.now(timezone.utc)
+    prune_forum_write_budget_state(config, state, now_dt=now_value)
+    limit = _comment_daily_limit(config)
+    window_sec = _comment_daily_window_sec(config)
+    frozen_until = _parse_iso_datetime(state.get("comment_daily_frozen_until"))
+    used = len(state.get("comment_timestamps", []))
+    remaining = max(limit - used, 0)
+    blocked = bool(frozen_until and frozen_until > now_value) or remaining <= 0
+    retry_after_seconds = None
+    if frozen_until and frozen_until > now_value:
+        retry_after_seconds = max(int((frozen_until - now_value).total_seconds()), 1)
+    elif remaining <= 0 and state.get("comment_timestamps"):
+        oldest = _parse_iso_datetime(state["comment_timestamps"][0].get("at"))
+        if oldest is not None:
+            retry_after_seconds = max(int(window_sec - (now_value - oldest).total_seconds()), 1)
+    message = None
+    if blocked:
+        if retry_after_seconds:
+            message = f"daily comment budget exhausted; wait about {retry_after_seconds} seconds"
+        else:
+            message = "daily comment budget exhausted"
+    return {
+        "limit": limit,
+        "window_sec": window_sec,
+        "used": used,
+        "remaining": remaining,
+        "blocked": blocked,
+        "retry_after_seconds": retry_after_seconds,
+        "frozen_until": state.get("comment_daily_frozen_until"),
+        "freeze_scope": state.get("last_comment_rate_limit_scope"),
+        "message": message,
+    }
+
+
+def forum_write_budget_status(
+    config,
+    state: dict[str, Any],
+    *,
+    now_dt: datetime | None = None,
+    write_kind: str | None = None,
+) -> dict[str, Any]:
+    now_value = now_dt or datetime.now(timezone.utc)
+    prune_forum_write_budget_state(config, state, now_dt=now_value)
+    limit = _forum_write_limit(config)
+    window_sec = _forum_write_window_sec(config)
+    freeze_scope = state.get("last_rate_limit_scope") or forum_write_rate_limit_scope(state.get("last_rate_limit_error"))
+    frozen_until = _parse_iso_datetime(state.get("frozen_until"))
+    used = len(state.get("timestamps", []))
+    remaining = max(limit - used, 0)
+    blocked = bool(frozen_until and frozen_until > now_value) or remaining <= 0
+    retry_after_seconds = None
+    if frozen_until and frozen_until > now_value:
+        retry_after_seconds = max(int((frozen_until - now_value).total_seconds()), 1)
+    elif remaining <= 0 and state.get("timestamps"):
+        oldest = _parse_iso_datetime(state["timestamps"][0].get("at"))
+        if oldest is not None:
+            retry_after_seconds = max(int(window_sec - (now_value - oldest).total_seconds()), 1)
+    message = None
+    if blocked:
+        if retry_after_seconds:
+            message = f"forum write budget exhausted; wait about {retry_after_seconds} seconds"
+        else:
+            message = "forum write budget exhausted"
+    comment_daily = comment_daily_budget_status(config, state, now_dt=now_value)
+    blocked_by = "forum-write" if blocked else None
+    effective_retry_after_seconds = retry_after_seconds
+    effective_frozen_until = state.get("frozen_until")
+    effective_message = message
+    if _is_comment_write_kind(write_kind) and comment_daily.get("blocked"):
+        comment_retry_after = int(comment_daily.get("retry_after_seconds") or 0)
+        forum_retry_after = int(retry_after_seconds or 0)
+        if not blocked or comment_retry_after >= forum_retry_after:
+            blocked = True
+            blocked_by = "comment-daily"
+            effective_retry_after_seconds = comment_daily.get("retry_after_seconds")
+            effective_frozen_until = comment_daily.get("frozen_until")
+            effective_message = comment_daily.get("message")
+    return {
+        "limit": limit,
+        "window_sec": window_sec,
+        "used": used,
+        "remaining": remaining,
+        "blocked": blocked,
+        "retry_after_seconds": effective_retry_after_seconds,
+        "frozen_until": effective_frozen_until,
+        "freeze_scope": freeze_scope,
+        "message": effective_message,
+        "blocked_by": blocked_by,
+        "comment_daily_budget": comment_daily,
+    }
+
+
+def record_forum_write_success(config, state: dict[str, Any], *, write_kind: str, label: str | None = None) -> dict[str, Any]:
+    prune_forum_write_budget_state(config, state)
+    timestamp_record = {
+        "at": now_utc(),
+        "kind": write_kind,
+        "label": truncate_text(label or "", 80) if label else None,
+    }
+    state.setdefault("timestamps", []).append(timestamp_record)
+    if _is_comment_write_kind(write_kind):
+        state.setdefault("comment_timestamps", []).append(timestamp_record)
+    save_forum_write_budget_state(state)
+    return forum_write_budget_status(config, state)
+
+
+def record_forum_write_rate_limit(
+    config,
+    state: dict[str, Any],
+    exc: Exception,
+    *,
+    retry_delay_sec: float = 2.0,
+) -> dict[str, Any]:
+    freeze_scope = forum_write_rate_limit_scope(exc)
+    retry_after = max(int(extract_retry_after_seconds(exc) or retry_delay_sec), 1)
+    if freeze_scope == "global-forum-write":
+        until = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+        state["frozen_until"] = until.isoformat()
+    else:
+        state["frozen_until"] = None
+    state["last_rate_limit_error"] = api_error_payload(exc)
+    state["last_rate_limit_scope"] = freeze_scope
+    if freeze_scope == "comment-daily":
+        until = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+        state["comment_daily_frozen_until"] = until.isoformat()
+    elif freeze_scope != "comment-daily":
+        state["comment_daily_frozen_until"] = state.get("comment_daily_frozen_until")
+    state["last_comment_rate_limit_error"] = api_error_payload(exc) if freeze_scope == "comment-daily" else state.get(
+        "last_comment_rate_limit_error"
+    )
+    state["last_comment_rate_limit_scope"] = freeze_scope if freeze_scope == "comment-daily" else state.get(
+        "last_comment_rate_limit_scope"
+    )
+    save_forum_write_budget_state(state)
+    return forum_write_budget_status(config, state)
 
 
 def queue_outbound_action(
@@ -497,20 +869,48 @@ def _http_json(
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         request_headers["Content-Type"] = "application/json"
 
-    req = request.Request(url, method=method.upper(), headers=request_headers, data=payload)
-    try:
-        with request.urlopen(req, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            if not raw:
-                return {}
-            return json.loads(raw)
-    except error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
+    method_upper = method.upper()
+    req = request.Request(url, method=method_upper, headers=request_headers, data=payload)
+    attempts = 3 if method_upper in {"GET", "HEAD"} else 1
+    for attempt in range(1, attempts + 1):
         try:
-            body = json.loads(raw)
-        except json.JSONDecodeError:
-            body = raw
-        raise ApiError(exc.code, body) from exc
+            with request.urlopen(req, timeout=timeout) as response:
+                raw = response.read().decode("utf-8")
+                if not raw:
+                    return {}
+                return json.loads(raw)
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                body = raw
+            raise ApiError(exc.code, body) from exc
+        except (error.URLError, ssl.SSLError, TimeoutError, ConnectionResetError, OSError) as exc:
+            if attempt >= attempts or not _is_transient_transport_error(exc):
+                raise
+            time.sleep(min(1.5, 0.35 * attempt))
+
+
+def _is_transient_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, error.URLError):
+        reason = exc.reason
+    else:
+        reason = exc
+    if isinstance(reason, (ssl.SSLError, TimeoutError, ConnectionResetError)):
+        return True
+    lowered = str(reason).lower()
+    return any(
+        token in lowered
+        for token in (
+            "timed out",
+            "unexpected eof while reading",
+            "eof occurred in violation of protocol",
+            "connection reset by peer",
+            "remote end closed connection without response",
+            "temporarily unavailable",
+        )
+    )
 
 
 class InStreetClient:
@@ -602,6 +1002,23 @@ class InStreetClient:
 
     def groups_my(self, *, role: str = "owner") -> Any:
         return self._request("GET", "/api/v1/groups/my", params={"role": role})
+
+    def group(self, group_id: str) -> Any:
+        return self._request("GET", f"/api/v1/groups/{group_id}")
+
+    def group_posts(self, group_id: str, *, sort: str = "hot", limit: int = 20) -> Any:
+        return self._request(
+            "GET",
+            f"/api/v1/groups/{group_id}/posts",
+            params={"sort": sort, "limit": limit},
+        )
+
+    def group_members(self, group_id: str, *, status: str | None = None) -> Any:
+        return self._request(
+            "GET",
+            f"/api/v1/groups/{group_id}/members",
+            params={"status": status},
+        )
 
     def update_group(
         self,
@@ -754,6 +1171,53 @@ class InStreetClient:
 
     def follow(self, username: str) -> Any:
         return self._request("POST", f"/api/v1/agents/{username}/follow")
+
+    def oracle_markets(
+        self,
+        *,
+        sort: str = "hot",
+        category: str | None = None,
+        status: str | None = None,
+        query: str | None = None,
+        page: int | None = None,
+        limit: int = 20,
+    ) -> Any:
+        return self._request(
+            "GET",
+            "/api/v1/oracle/markets",
+            params={
+                "sort": sort,
+                "category": category,
+                "status": status,
+                "q": query,
+                "page": page,
+                "limit": limit,
+            },
+        )
+
+    def oracle_market(self, market_id: str) -> Any:
+        return self._request("GET", f"/api/v1/oracle/markets/{market_id}")
+
+    def oracle_trade(
+        self,
+        market_id: str,
+        *,
+        action: str,
+        outcome: str,
+        shares: int,
+        reason: str | None = None,
+        max_price: float | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {
+            "action": action,
+            "outcome": outcome,
+            "shares": int(shares),
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        if max_price is not None:
+            payload["max_price"] = float(max_price)
+        return self._request("POST", f"/api/v1/oracle/markets/{market_id}/trade", data=payload)
 
 
 def find_codex_executable() -> str:

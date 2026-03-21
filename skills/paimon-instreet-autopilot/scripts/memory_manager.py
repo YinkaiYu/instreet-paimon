@@ -294,7 +294,7 @@ def maintain_memory_store(store: dict[str, Any], config, *, now: datetime | None
             if expires_at is not None and expires_at <= current:
                 _archive_item(store, item, reason=f"{section}-expired", archived_at=archived_at)
                 continue
-            if current - updated_at > archive_after:
+            if section == "working_memory" and current - updated_at > archive_after:
                 _archive_item(store, item, reason=f"{section}-stale", archived_at=archived_at)
                 continue
             active_items.append(item)
@@ -422,8 +422,9 @@ def record_interaction(payload: dict[str, Any], config=None) -> dict[str, Any]:
     if config is None:
         config = load_config()
     ensure_runtime_dirs()
-    store = maintain_memory_store(load_memory_store(), config)
-    recorded_at = payload.get("recorded_at") or now_utc()
+    recorded_dt = _parse_datetime(payload.get("recorded_at")) or _utc_now()
+    store = maintain_memory_store(load_memory_store(), config, now=recorded_dt)
+    recorded_at = _iso(recorded_dt)
     source = str(payload.get("source") or payload.get("channel") or "unknown")
     channel = str(payload.get("channel") or source)
     chat_id = str(payload.get("chat_id") or "").strip() or None
@@ -436,9 +437,7 @@ def record_interaction(payload: dict[str, Any], config=None) -> dict[str, Any]:
     reply_text = str(payload.get("reply_text") or "").strip()
     summary_limit = _memory_max_summary_chars(config)
     working_ttl = timedelta(milliseconds=_memory_working_ttl_ms(config))
-    recorded_dt = _parse_datetime(recorded_at) or _utc_now()
     expires_at = _iso(recorded_dt + working_ttl)
-    recorded_at = _iso(recorded_dt)
     evidence = [
         {
             "kind": _message_kind(text),
@@ -480,7 +479,7 @@ def record_interaction(payload: dict[str, Any], config=None) -> dict[str, Any]:
             extra={"channel": channel, "chat_id": chat_id},
         )
 
-    store = maintain_memory_store(store, config)
+    store = maintain_memory_store(store, config, now=recorded_dt)
     _write_memory_store(store)
     append_jsonl(
         MEMORY_JOURNAL_PATH,
@@ -507,11 +506,11 @@ def record_heartbeat_summary(summary: dict[str, Any], config=None) -> dict[str, 
     if config is None:
         config = load_config()
     ensure_runtime_dirs()
-    store = maintain_memory_store(load_memory_store(), config)
-    recorded_at = _iso(_parse_datetime(summary.get("ran_at")) or _utc_now())
+    recorded_dt = _parse_datetime(summary.get("ran_at")) or _utc_now()
+    store = maintain_memory_store(load_memory_store(), config, now=recorded_dt)
+    recorded_at = _iso(recorded_dt)
     summary_limit = _memory_max_summary_chars(config)
     working_ttl = timedelta(milliseconds=_memory_working_ttl_ms(config))
-    recorded_dt = _parse_datetime(recorded_at) or _utc_now()
     expires_at = _iso(recorded_dt + working_ttl)
 
     active = []
@@ -567,7 +566,7 @@ def record_heartbeat_summary(summary: dict[str, Any], config=None) -> dict[str, 
     heartbeat_state["feishu_report_sent"] = bool(summary.get("feishu_report_sent"))
     heartbeat_state["last_memory_sync_at"] = recorded_at
 
-    store = maintain_memory_store(store, config)
+    store = maintain_memory_store(store, config, now=recorded_dt)
     _write_memory_store(store)
     append_jsonl(
         MEMORY_JOURNAL_PATH,

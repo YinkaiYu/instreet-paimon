@@ -88,6 +88,16 @@ NOVELTY_KEYWORDS = tuple(dict.fromkeys(HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS +
     "排行榜",
     "时间纪律",
 )))
+SELF_ASSET_KEYWORDS = (
+    "Agent心跳同步实验室",
+    "实验室",
+    "派蒙",
+    "文学社",
+    "连载",
+    "全宇宙都在围观我和竹马热恋",
+    "主线",
+    "通知堆到",
+)
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -126,6 +136,10 @@ def _extract_feed(obj: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _extract_activity(home: dict[str, Any]) -> list[dict[str, Any]]:
     return home.get("data", {}).get("activity_on_your_posts", [])
+
+
+def _extract_home_hot_posts(home: dict[str, Any]) -> list[dict[str, Any]]:
+    return home.get("data", {}).get("hot_posts", [])
 
 
 def _normalize_title(title: str) -> str:
@@ -260,13 +274,18 @@ def _novelty_pressure(recent_titles: list[str]) -> dict[str, Any]:
     }
 
 
-def _text_overlap_score(text: str, novelty: dict[str, Any]) -> tuple[int, int]:
+def _self_asset_penalty(text: str) -> int:
+    return sum(1 for keyword in SELF_ASSET_KEYWORDS if keyword in text)
+
+
+def _text_overlap_score(text: str, novelty: dict[str, Any]) -> tuple[int, int, int]:
     overloaded_keywords = novelty.get("overloaded_keywords", [])
     term_counts = novelty.get("term_counts", {})
     fragments = _meaningful_fragments(text)
+    self_asset_penalty = _self_asset_penalty(text)
     repeated_penalty = sum(1 for keyword in overloaded_keywords if keyword in text)
     historical_penalty = sum(int(term_counts.get(fragment, 0)) for fragment in fragments)
-    return repeated_penalty, historical_penalty
+    return self_asset_penalty, repeated_penalty, historical_penalty
 
 
 def _mode_index(track: str, signal_summary: dict[str, Any]) -> int:
@@ -403,6 +422,104 @@ def _failure_summary(last_run: dict[str, Any]) -> list[dict[str, Any]]:
     return failures[:6]
 
 
+def _flatten_competitor_watch(community_watch: dict[str, Any]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for account in community_watch.get("watched_accounts", []):
+        username = str(account.get("username") or "").strip()
+        for lane, priority in (("top_posts", 0), ("recent_posts", 1)):
+            for item in account.get(lane, [])[:3]:
+                flattened.append(
+                    {
+                        "username": username,
+                        "priority": priority,
+                        "lane": lane,
+                        "post_id": item.get("post_id"),
+                        "title": item.get("title"),
+                        "submolt": item.get("submolt"),
+                        "upvotes": item.get("upvotes"),
+                        "comment_count": item.get("comment_count"),
+                    }
+                )
+    return flattened
+
+
+def _build_engagement_targets(
+    *,
+    signal_summary: dict[str, Any],
+    own_username: str,
+    own_post_ids: set[str],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen_post_ids: set[str] = set()
+
+    def add(post_id: str | None, title: str | None, author: str | None, source: str, reason: str, priority: int) -> None:
+        post_id = str(post_id or "").strip()
+        title = str(title or "").strip()
+        author = str(author or "").strip()
+        if not post_id or not title or not author:
+            return
+        if author == own_username or post_id in own_post_ids or post_id in seen_post_ids:
+            return
+        seen_post_ids.add(post_id)
+        candidates.append(
+            {
+                "post_id": post_id,
+                "post_title": title,
+                "post_author": author,
+                "source": source,
+                "reason": reason,
+                "priority": priority,
+            }
+        )
+
+    group_watch = signal_summary.get("group_watch") or {}
+    for item in (group_watch.get("hot_posts") or [])[:4]:
+        add(
+            item.get("post_id"),
+            item.get("title"),
+            item.get("author"),
+            "group-hot",
+            "先维护自有小组里已经开始发酵的成员讨论。",
+            0,
+        )
+
+    for item in (signal_summary.get("community_hot_posts") or [])[:4]:
+        add(
+            item.get("post_id"),
+            item.get("title"),
+            item.get("author"),
+            "community-hot",
+            "社区首页的高热度帖子更适合外部扩圈式互动。",
+            1,
+        )
+
+    for item in (signal_summary.get("competitor_watchlist") or [])[:4]:
+        add(
+            item.get("post_id"),
+            item.get("title"),
+            item.get("username"),
+            "leaderboard-watch",
+            "头部账号近期高互动帖子值得正面接触和学习。",
+            2,
+        )
+
+    return sorted(
+        candidates,
+        key=lambda item: (
+            item.get("priority", 9),
+            -int(item.get("post_id") is not None),
+            str(item.get("post_title") or ""),
+        ),
+    )[:6]
+
+
+def _preferred_theory_board(opportunity: dict[str, Any]) -> str:
+    signal_type = str(opportunity.get("signal_type") or "")
+    if signal_type in {"community-hot", "discussion", "feed", "freeform"}:
+        return "square"
+    return "philosophy"
+
+
 def _dynamic_opportunities(
     *,
     signal_summary: dict[str, Any],
@@ -423,11 +540,11 @@ def _dynamic_opportunities(
         ("tech", "budget"): 0,
         ("tech", "hot-tech"): 1,
         ("tech", "failure"): 2,
-        ("tech", "notification-load"): 3,
-        ("tech", "literary"): 4,
-        ("tech", "feed"): 5,
-        ("tech", "reply-pressure"): 6,
-        ("tech", "community-hot"): 7,
+        ("tech", "community-hot"): 3,
+        ("tech", "notification-load"): 4,
+        ("tech", "literary"): 5,
+        ("tech", "feed"): 6,
+        ("tech", "reply-pressure"): 7,
         ("tech", "freeform"): 8,
         ("group", "budget"): 0,
         ("group", "hot-group"): 1,
@@ -444,6 +561,8 @@ def _dynamic_opportunities(
     feed_watchlist = signal_summary.get("feed_watchlist") or []
     top_discussion = signal_summary.get("top_discussion_posts") or []
     recent_top_posts = signal_summary.get("recent_top_posts") or []
+    community_hot_posts = signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or []
+    competitor_watchlist = signal_summary.get("competitor_watchlist") or []
 
     def add(track: str, signal_type: str, source_text: str, *, why_now: str, angle_hint: str) -> None:
         source_text = str(source_text or "").strip()
@@ -464,11 +583,16 @@ def _dynamic_opportunities(
     add("theory", "hot-theory", hot_theory.get("title"), why_now="理论线应该接住当前最强的公开判断，但不能原样复述。", angle_hint="把现象推进成结构判断。")
     add("tech", "hot-tech", hot_tech.get("title"), why_now="技术线需要解释最近最强的方法信号背后的运行约束。", angle_hint="把做法拆成约束、顺序和证据。")
     add("group", "hot-group", hot_group.get("title"), why_now="实验室需要沉淀一篇能被以后复用的方法帖。", angle_hint="写成规则、判据或操作手册。")
-    for item in feed_watchlist[:3]:
+    for item in community_hot_posts[:4]:
         title = item.get("title")
         board = item.get("submolt")
         add("theory", "community-hot", title, why_now=f"社区热点正在从 `{board or '未知板块'}` 往外扩散，值得抢先给出判断。", angle_hint="不要复述，要判断这股思潮在往哪里走。")
         add("tech", "community-hot", title, why_now=f"社区里新的方法/风格正在抬头，适合分析它会怎样改变生产方式。", angle_hint="从工具或工作流背后找约束。")
+    for item in competitor_watchlist[:4]:
+        title = item.get("title")
+        username = item.get("username")
+        add("theory", "discussion", title, why_now=f"头部账号 `{username or '未知作者'}` 最近的高互动帖说明公共情绪正在往新的判断方向移动。", angle_hint="学习它抓住的公共矛盾，但要给出更锋利的机制判断。")
+        add("tech", "community-hot", title, why_now=f"头部账号 `{username or '未知作者'}` 的帖子证明这类问题已经形成可传播的公共方法论需求。", angle_hint="把爆点从情绪判断推进成系统约束或实验设计。")
     for item in unresolved[:2]:
         add("tech", "failure", item.get("post_title"), why_now="未解决失败项说明系统仍有真实运行压力。", angle_hint="围绕失败写恢复条件和停止条件。")
         add("group", "failure", item.get("post_title"), why_now="失败项适合沉淀为组内修复方法。", angle_hint="提炼成清晰的 repair 入口。")
@@ -526,6 +650,20 @@ def _planning_signals(
     literary_pick: dict[str, Any] | None,
 ) -> dict[str, Any]:
     activity = _extract_activity(home)
+    community_watch = _load("community_watch").get("data", {})
+    community_hot_posts = community_watch.get("home_hot_posts") or [
+        {
+            "post_id": item.get("post_id"),
+            "title": item.get("title"),
+            "author": item.get("author"),
+            "submolt": item.get("submolt_name"),
+            "upvotes": item.get("upvotes"),
+            "comment_count": item.get("comment_count"),
+        }
+        for item in _extract_home_hot_posts(home)
+    ]
+    competitor_watchlist = _flatten_competitor_watch(community_watch)
+    group_watch = community_watch.get("owned_group_watch") or {}
     top_discussion = sorted(
         activity,
         key=lambda item: int(item.get("new_notification_count") or 0),
@@ -546,7 +684,11 @@ def _planning_signals(
     keyword_counter: Counter[str] = Counter()
     for item in top_discussion:
         keyword_counter.update(_topic_tokens(str(item.get("post_title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
+    for item in community_hot_posts[:6]:
+        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     for item in feed[:6]:
+        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
+    for item in competitor_watchlist[:6]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     for item in overview.get("recent_top_posts", [])[:5]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
@@ -597,6 +739,9 @@ def _planning_signals(
             }
             for item in feed[:6]
         ],
+        "community_hot_posts": community_hot_posts[:8],
+        "competitor_watchlist": competitor_watchlist[:8],
+        "group_watch": group_watch,
         "top_keywords": [token for token, _ in keyword_counter.most_common(8)],
         "novelty_pressure": novelty,
         "group": groups[0] if groups else {},
@@ -663,6 +808,8 @@ def _generate_codex_ideas(
 8. 明确避开最近已经过载的母题与热词，优先使用 `dynamic_topics` 里的现场机会点，不要套固定选题框架。
 9. 候选里至少 1 个要正面回应社区热点/社区思潮；允许 1 个完全自由发挥的题；也允许偶尔介绍派蒙本人、小说或小组，但要写出关注价值。
 10. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
+11. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成全社区问题。
+12. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -701,7 +848,7 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     ]
     return {
         "kind": "theory-post",
-        "submolt": "philosophy",
+        "submolt": _preferred_theory_board(opportunity),
         "title": title,
         "angle": str(opportunity.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
         "why_now": str(opportunity.get("why_now") or "理论线需要接住现场变化。"),
@@ -913,6 +1060,7 @@ def build_plan(
     )
 
     group = groups[0] if groups else {}
+    own_post_ids = {str(item.get("id") or "") for item in posts if item.get("id")}
     ideas = _build_dynamic_ideas(
         signal_summary,
         recent_titles,
@@ -985,6 +1133,11 @@ def build_plan(
             }
             for item in feed[:5]
         ],
+        "engagement_targets": _build_engagement_targets(
+            signal_summary=signal_summary,
+            own_username=str(overview.get("username") or ""),
+            own_post_ids=own_post_ids,
+        ),
         "serial_registry": {
             "next_work_id_for_heartbeat": serial_registry.get("next_work_id_for_heartbeat"),
             "literary_queue": serial_registry.get("literary_queue", []),
