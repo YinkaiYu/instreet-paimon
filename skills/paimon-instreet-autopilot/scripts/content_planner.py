@@ -24,6 +24,8 @@ DEFAULT_PLANNER_CODEX_TIMEOUT = 120
 RECENT_TITLE_LIMIT = 16
 TITLE_COLLISION_SUFFIXES = ["续篇", "续篇二", "续篇三", "补篇", "补篇二"]
 TOPIC_OVERLOAD_THRESHOLD = 3
+COMMUNITY_HOT_FORUM_MIN_UPVOTES = 120
+COMMUNITY_HOT_FORUM_MIN_COMMENTS = 90
 TRACK_EXPLORATION_MODES: dict[str, list[set[str]]] = {
     "theory": [
         {"community-hot", "discussion"},
@@ -124,6 +126,17 @@ def _recommended_next_action(tasks: list[dict[str, Any]]) -> str:
     if failure_count:
         return f"优先处理上一轮未解决的 {failure_count} 个失败项"
     return "先完成主发布，再继续回复评论和私信"
+
+
+def _recent_primary_publish_kind(last_run: dict[str, Any]) -> str | None:
+    actions = last_run.get("actions")
+    if not isinstance(actions, list):
+        return None
+    for item in reversed(actions):
+        kind = str((item or {}).get("kind") or "")
+        if kind in {"create-post", "create-group-post", "publish-chapter"}:
+            return kind
+    return None
 
 
 def _extract_posts(obj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -518,6 +531,85 @@ def _preferred_theory_board(opportunity: dict[str, Any]) -> str:
     if signal_type in {"community-hot", "discussion", "feed", "freeform"}:
         return "square"
     return "philosophy"
+
+
+def _community_hot_board_scores(posts: list[dict[str, Any]]) -> Counter[str]:
+    scores: Counter[str] = Counter()
+    for item in posts[:6]:
+        board = str(item.get("submolt") or item.get("submolt_name") or "").strip()
+        if not board:
+            continue
+        upvotes = int(item.get("upvotes") or 0)
+        comments = int(item.get("comment_count") or 0)
+        scores[board] += upvotes * 2 + comments * 3
+    return scores
+
+
+def _public_hot_forum_override(
+    signal_summary: dict[str, Any],
+    ideas: list[dict[str, Any]],
+    last_run: dict[str, Any],
+) -> dict[str, Any]:
+    public_ideas = {str(item.get("kind") or ""): item for item in ideas if item.get("kind") in {"theory-post", "tech-post"}}
+    if not public_ideas:
+        return {"enabled": False}
+
+    recent_primary_kind = _recent_primary_publish_kind(last_run)
+    if recent_primary_kind == "create-post":
+        return {"enabled": False}
+
+    community_hot_posts = signal_summary.get("community_hot_posts") or []
+    competitor_watchlist = signal_summary.get("competitor_watchlist") or []
+    board_scores = _community_hot_board_scores(community_hot_posts)
+    hottest_board = board_scores.most_common(1)[0][0] if board_scores else ""
+
+    strong_public_signal = any(
+        int(item.get("upvotes") or 0) >= COMMUNITY_HOT_FORUM_MIN_UPVOTES
+        or int(item.get("comment_count") or 0) >= COMMUNITY_HOT_FORUM_MIN_COMMENTS
+        for item in community_hot_posts[:6]
+    )
+    if not strong_public_signal:
+        strong_public_signal = any(
+            int(item.get("upvotes") or 0) >= COMMUNITY_HOT_FORUM_MIN_UPVOTES * 2
+            or int(item.get("comment_count") or 0) >= COMMUNITY_HOT_FORUM_MIN_COMMENTS * 2
+            for item in competitor_watchlist[:6]
+        )
+    if not strong_public_signal:
+        return {"enabled": False}
+
+    preferred_kinds: list[str] = []
+    if hottest_board in {"skills", "workplace"} and "tech-post" in public_ideas:
+        preferred_kinds.append("tech-post")
+    if "theory-post" in public_ideas:
+        preferred_kinds.append("theory-post")
+    if "tech-post" in public_ideas and "tech-post" not in preferred_kinds:
+        preferred_kinds.append("tech-post")
+
+    trigger_title = next(
+        (
+            str(item.get("title") or "").strip()
+            for item in community_hot_posts[:6]
+            if int(item.get("upvotes") or 0) >= COMMUNITY_HOT_FORUM_MIN_UPVOTES
+            or int(item.get("comment_count") or 0) >= COMMUNITY_HOT_FORUM_MIN_COMMENTS
+        ),
+        "",
+    )
+    if not trigger_title and competitor_watchlist:
+        trigger_title = str(competitor_watchlist[0].get("title") or "").strip()
+
+    reason = (
+        f"上一轮主发布不是公共论坛主帖，而首页热点正在 `{hottest_board or '公共板块'}` 聚集；"
+        f"本轮优先把学习结果转成新的公共帖子。"
+    )
+    if trigger_title:
+        reason += f" 触发样本：《{truncate_text(trigger_title, 36)}》。"
+    return {
+        "enabled": True,
+        "preferred_kinds": preferred_kinds,
+        "hottest_board": hottest_board,
+        "recent_primary_kind": recent_primary_kind,
+        "reason": reason,
+    }
 
 
 def _dynamic_opportunities(
@@ -1138,6 +1230,9 @@ def build_plan(
             own_username=str(overview.get("username") or ""),
             own_post_ids=own_post_ids,
         ),
+        "primary_priority_overrides": {
+            "public_hot_forum": _public_hot_forum_override(signal_summary, ideas, last_run),
+        },
         "serial_registry": {
             "next_work_id_for_heartbeat": serial_registry.get("next_work_id_for_heartbeat"),
             "literary_queue": serial_registry.get("literary_queue", []),

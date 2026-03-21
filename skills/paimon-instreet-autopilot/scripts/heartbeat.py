@@ -27,6 +27,7 @@ from common import (
     ensure_runtime_dirs,
     find_node_executable,
     forum_write_budget_status as common_forum_write_budget_status,
+    forum_write_rate_limit_scope as common_forum_write_rate_limit_scope,
     is_forum_write_rate_limit_error as common_is_forum_write_rate_limit_error,
     load_config,
     load_forum_write_budget_state as common_load_forum_write_budget_state,
@@ -51,6 +52,7 @@ from style_sampler import prepare_style_packet
 
 PRIMARY_CYCLE_PATH = CURRENT_STATE_DIR / "heartbeat_primary_cycle.json"
 NEXT_ACTIONS_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions.json"
+NEXT_ACTIONS_ARCHIVE_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions_archive.jsonl"
 FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
@@ -69,11 +71,11 @@ DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS = 48.0
 DEFAULT_REPLY_STALE_COMMENT_AGE_HOURS = 24.0
 DEFAULT_REPLY_COMMENT_WINDOW_PER_POST = 10
 DEFAULT_REPLY_NEXT_ACTION_COMMENT_CAP = 10
+DEFAULT_NEXT_ACTION_COMMENT_TTL_HOURS = 36.0
+DEFAULT_NEXT_ACTION_FAILURE_TTL_HOURS = 18.0
+DEFAULT_NEXT_ACTION_MAX_CARRYOVER_RUNS = 3
 DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC = 15.0
 DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN = 2
-DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS = 24.0
-DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS = 3.0
-DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT = 2
 DEFAULT_NOTIFICATION_FETCH_LIMIT = 50
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
@@ -229,6 +231,30 @@ def _reply_next_action_comment_cap(config, max_batch_size: int | None = None) ->
         return max(1, int(default_value))
 
 
+def _next_action_comment_ttl_hours(config) -> float:
+    raw = config.automation.get("next_action_comment_ttl_hours", DEFAULT_NEXT_ACTION_COMMENT_TTL_HOURS)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NEXT_ACTION_COMMENT_TTL_HOURS
+
+
+def _next_action_failure_ttl_hours(config) -> float:
+    raw = config.automation.get("next_action_failure_ttl_hours", DEFAULT_NEXT_ACTION_FAILURE_TTL_HOURS)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NEXT_ACTION_FAILURE_TTL_HOURS
+
+
+def _next_action_max_carryover_runs(config) -> int:
+    raw = config.automation.get("next_action_max_carryover_runs", DEFAULT_NEXT_ACTION_MAX_CARRYOVER_RUNS)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_NEXT_ACTION_MAX_CARRYOVER_RUNS
+
+
 def _forum_write_limit(config) -> int:
     raw = config.automation.get("forum_write_limit", DEFAULT_FORUM_WRITE_LIMIT)
     try:
@@ -251,30 +277,6 @@ def _external_engagement_max_per_run(config) -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN
-
-
-def _notification_review_window_hours(config) -> float:
-    raw = config.automation.get("notification_review_window_hours", DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS)
-    try:
-        return max(1.0, float(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS
-
-
-def _notification_highlight_window_hours(config) -> float:
-    raw = config.automation.get("notification_highlight_window_hours", DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS)
-    try:
-        return max(1.0, float(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS
-
-
-def _notification_highlight_limit(config) -> int:
-    raw = config.automation.get("notification_highlight_limit", DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT)
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT
 
 
 def _notification_fetch_limit(config) -> int:
@@ -341,14 +343,129 @@ def _is_forum_write_rate_limit_error(exc: Exception) -> bool:
     return common_is_forum_write_rate_limit_error(exc)
 
 
-def _load_next_actions_state() -> dict[str, Any]:
+def _comment_rate_limit_scope(exc: Exception) -> str | None:
+    return common_forum_write_rate_limit_scope(exc)
+
+
+def _task_run_count(task: dict[str, Any]) -> int:
+    try:
+        return max(0, int(task.get("carryover_runs") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_rate_limited_failure_task(task: dict[str, Any]) -> bool:
+    if str(task.get("kind") or "") != "resolve-failure":
+        return False
+    error = task.get("error")
+    if isinstance(error, dict):
+        if common_forum_write_rate_limit_scope(error.get("forum_write_budget")):
+            return True
+        if common_forum_write_rate_limit_scope(error):
+            return True
+        error_text = str(error.get("error") or error.get("message") or "")
+    else:
+        error_text = str(error or "")
+    lowered = error_text.lower()
+    return (
+        "budget exhausted" in lowered
+        or "daily comment limit reached" in lowered
+        or "hourly comment limit reached" in lowered
+        or "too many comments on this post" in lowered
+        or "commenting too fast" in lowered
+    )
+
+
+def _normalize_next_action_task(task: dict[str, Any], *, fallback_queued_at: str) -> dict[str, Any]:
+    normalized = dict(task)
+    normalized["queued_at"] = str(task.get("queued_at") or fallback_queued_at or now_utc())
+    normalized["carryover_runs"] = _task_run_count(task)
+    return normalized
+
+
+def _archive_next_action_prune(task: dict[str, Any], *, reason: str) -> None:
+    append_jsonl(
+        NEXT_ACTIONS_ARCHIVE_PATH,
+        {
+            "pruned_at": now_utc(),
+            "reason": reason,
+            "task": task,
+        },
+    )
+
+
+def _prune_next_action_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    config,
+    now_dt: datetime | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    now_value = now_dt or datetime.now(timezone.utc)
+    kept: list[dict[str, Any]] = []
+    pruned = {
+        "comment_expired": 0,
+        "failure_expired": 0,
+        "carryover_limit": 0,
+    }
+    max_runs = _next_action_max_carryover_runs(config)
+    comment_ttl_hours = _next_action_comment_ttl_hours(config)
+    failure_ttl_hours = _next_action_failure_ttl_hours(config)
+    for task in tasks:
+        kind = str(task.get("kind") or "")
+        queued_at = _parse_iso_datetime(task.get("queued_at"))
+        age_hours = ((now_value - queued_at).total_seconds() / 3600.0) if queued_at else None
+        carryover_runs = _task_run_count(task)
+        if kind in {"reply-comment", "resolve-failure"} and carryover_runs >= max_runs:
+            pruned["carryover_limit"] += 1
+            _archive_next_action_prune(task, reason="carryover-limit")
+            continue
+        if kind == "reply-comment" and age_hours is not None and age_hours > comment_ttl_hours:
+            pruned["comment_expired"] += 1
+            _archive_next_action_prune(task, reason="comment-expired")
+            continue
+        if kind == "resolve-failure" and age_hours is not None and age_hours > failure_ttl_hours:
+            pruned["failure_expired"] += 1
+            _archive_next_action_prune(task, reason="failure-expired")
+            continue
+        if kind == "resolve-failure" and _is_rate_limited_failure_task(task):
+            pruned["failure_expired"] += 1
+            _archive_next_action_prune(task, reason="rate-limit-not-carried")
+            continue
+        kept.append(task)
+    return kept, pruned
+
+
+def _load_next_actions_state(config=None) -> dict[str, Any]:
     state = read_json(NEXT_ACTIONS_PATH, default={"updated_at": None, "tasks": []})
     tasks = state.get("tasks", [])
     if not isinstance(tasks, list):
         tasks = []
+    fallback_queued_at = str(state.get("updated_at") or now_utc())
+    normalized = [
+        _normalize_next_action_task(item, fallback_queued_at=fallback_queued_at)
+        for item in tasks
+        if isinstance(item, dict)
+    ]
+    pruned_summary = {
+        "comment_expired": 0,
+        "failure_expired": 0,
+        "carryover_limit": 0,
+    }
+    if config is not None:
+        normalized, pruned_summary = _prune_next_action_tasks(normalized, config=config)
+        if normalized != tasks or any(pruned_summary.values()):
+            write_json(
+                NEXT_ACTIONS_PATH,
+                {
+                    "updated_at": state.get("updated_at") or now_utc(),
+                    "tasks": normalized,
+                    "pruned": pruned_summary,
+                },
+            )
     return {
         "updated_at": state.get("updated_at"),
-        "tasks": tasks,
+        "tasks": normalized,
+        "pruned": pruned_summary,
     }
 
 
@@ -485,6 +602,12 @@ def _run_heartbeat_write(
 def _ordered_primary_ideas(plan: dict, cycle_state: dict[str, int]) -> list[dict]:
     ideas_by_kind = {item.get("kind"): item for item in plan.get("ideas", [])}
     ordered: list[dict] = []
+    overrides = (plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {}
+    if overrides.get("enabled"):
+        for kind in overrides.get("preferred_kinds") or []:
+            idea = ideas_by_kind.get(kind)
+            if idea and idea not in ordered:
+                ordered.append(idea)
     for slot in _rotate_sequence(PRIMARY_SLOT_CYCLE, cycle_state["primary_cycle_index"]):
         if slot == "forum-post":
             for kind in _rotate_sequence(FORUM_KIND_CYCLE, cycle_state["forum_cycle_index"]):
@@ -661,6 +784,33 @@ def _compact_comment_tasks(tasks: list[dict[str, Any]], cap: int) -> list[dict[s
     return _interleave_tasks_by_post(tasks)[:cap]
 
 
+def _match_carryover_task(
+    carryover_tasks: list[dict[str, Any]],
+    *,
+    kind: str,
+    post_id: str | None = None,
+    comment_id: str | None = None,
+    post_title: str | None = None,
+) -> dict[str, Any] | None:
+    for task in carryover_tasks:
+        if str(task.get("kind") or "") != kind:
+            continue
+        if comment_id and str(task.get("comment_id") or "") == comment_id:
+            return task
+        if post_id and str(task.get("post_id") or "") == post_id:
+            return task
+        if post_title and str(task.get("post_title") or "") == post_title:
+            return task
+    return None
+
+
+def _inherit_next_action_task(task: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    inherited = dict(task)
+    inherited["queued_at"] = str((previous or {}).get("queued_at") or now_utc())
+    inherited["carryover_runs"] = _task_run_count(previous or {}) + (1 if previous else 0)
+    return inherited
+
+
 def _comment_task_summary(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     post_ids = [str(item.get("post_id") or "") for item in tasks if item.get("post_id")]
     unique_post_ids = [post_id for post_id in dict.fromkeys(post_ids) if post_id]
@@ -761,20 +911,20 @@ def _build_comment_reply_queue(
     window_per_post = _reply_comment_window_per_post(config)
     recent_post_age_hours = _reply_priority_post_age_hours(config)
     stale_comment_age_hours = _reply_stale_comment_age_hours(config)
-    carryover_comment_ids = {
-        item.get("comment_id"): index
+    carryover_comment_meta = {
+        str(item.get("comment_id") or ""): {"index": index, "task": item}
         for index, item in enumerate(carryover_tasks)
         if item.get("kind") == "reply-comment" and item.get("comment_id")
     }
     carryover_post_ids = {
         item.get("post_id")
         for item in carryover_tasks
-        if item.get("kind") == "reply-comment" and item.get("post_id")
+        if item.get("kind") == "reply-comment" and item.get("post_id") and _task_run_count(item) <= 0
     }
     carryover_failure_post_ids = {
         item.get("post_id")
         for item in carryover_tasks
-        if item.get("kind") == "resolve-failure" and item.get("post_id")
+        if item.get("kind") == "resolve-failure" and item.get("post_id") and _task_run_count(item) <= 0
     }
     candidate_posts: list[dict[str, Any]] = []
     seen_post_ids: set[str] = set()
@@ -870,11 +1020,16 @@ def _build_comment_reply_queue(
                 continue
             seen_comment_ids.add(comment_id)
             comment_dt = _parse_iso_datetime(comment.get("created_at"))
+            carryover_meta = carryover_comment_meta.get(str(comment_id), {})
+            carryover_task = carryover_meta.get("task") or {}
+            carryover_runs = _task_run_count(carryover_task)
             tasks.append(
                 {
                     "kind": "reply-comment",
-                    "source": "carryover" if comment_id in carryover_comment_ids else "live",
-                    "carryover_rank": carryover_comment_ids.get(comment_id, 10_000),
+                    "source": "carryover" if comment_id in carryover_comment_meta else "live",
+                    "carryover_rank": int(carryover_meta.get("index", 10_000)),
+                    "carryover_runs": carryover_runs,
+                    "queued_at": carryover_task.get("queued_at"),
                     "post_priority": post_priority,
                     "new_notification_count": post_meta["new_notification_count"],
                     "post_activity_ts": post_meta["activity_sort_ts"],
@@ -891,7 +1046,7 @@ def _build_comment_reply_queue(
     tasks.sort(
         key=lambda item: (
             item["post_priority"],
-            0 if item["source"] == "carryover" else 1,
+            0 if item["source"] == "carryover" and int(item.get("carryover_runs") or 0) <= 0 else 1,
             item["carryover_rank"],
             -int(item.get("new_notification_count") or 0),
             -float(item.get("post_activity_ts") or 0.0),
@@ -2910,7 +3065,6 @@ def _reply_comments(
                 break
 
             if isinstance(exc, ForumWriteBudgetExceeded):
-                remaining_tasks.extend(tasks[index:])
                 failure = {
                     "kind": "reply-comment-failed",
                     "post_id": post_id,
@@ -2922,6 +3076,7 @@ def _reply_comments(
                         "forum_write_budget": exc.status,
                     },
                     "resolution": "deferred",
+                    "carry_forward": False,
                 }
                 actions.append(failure)
                 failure_details.append(failure)
@@ -2948,7 +3103,9 @@ def _reply_comments(
             raw_recovery_wait = retry_after + 0.5 + recovery_attempts * 0.5
             recovery_wait = min(raw_recovery_wait, recovery_wait_cap_sec)
             if recovery_attempts >= 2 or time.monotonic() + recovery_wait > deadline:
-                remaining_tasks.append(task)
+                carry_forward = _comment_rate_limit_scope(exc) is None
+                if carry_forward:
+                    remaining_tasks.append(task)
                 failure = {
                     "kind": "reply-comment-failed",
                     "post_id": post_id,
@@ -2957,6 +3114,7 @@ def _reply_comments(
                     "comment_author": task.get("comment_author"),
                     "error": _api_error_payload(exc),
                     "resolution": "deferred",
+                    "carry_forward": carry_forward,
                 }
                 if raw_recovery_wait > recovery_wait_cap_sec:
                     failure["retry_wait_capped_sec"] = recovery_wait_cap_sec
@@ -3165,13 +3323,13 @@ def _engage_external_discussions(
             continue
 
         if isinstance(exc, ForumWriteBudgetExceeded):
-            remaining_targets.extend(targets[index:])
             failure = {
                 "kind": "external-comment-failed",
                 "post_id": post_id,
                 "post_title": target.get("post_title"),
                 "error": {"error": str(exc), "forum_write_budget": exc.status},
                 "resolution": "deferred",
+                "carry_forward": False,
             }
             actions.append(failure)
             failure_details.append(failure)
@@ -3183,6 +3341,7 @@ def _engage_external_discussions(
             "post_title": target.get("post_title"),
             "error": _api_error_payload(exc),
             "resolution": "unresolved",
+            "carry_forward": _comment_rate_limit_scope(exc) is None,
         }
         actions.append(failure)
         failure_details.append(failure)
@@ -3258,114 +3417,23 @@ def _reply_dms(
     return actions
 
 
-def _summarize_notifications(
-    notifications: list[dict[str, Any]],
-    *,
-    review_window_hours: float,
-    active_post_ids: set[str],
-    highlight_window_hours: float = DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS,
-    highlight_limit: int = DEFAULT_NOTIFICATION_HIGHLIGHT_LIMIT,
-    post_title_lookup: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    now_dt = datetime.now(timezone.utc)
-    recent_cutoff_hours = max(review_window_hours, 1.0)
-    highlight_cutoff_hours = max(highlight_window_hours, 1.0)
-    total_count = len(notifications)
-    recent_important_count = 0
-    stale_count = 0
-    low_signal_count = 0
-    active_post_notification_count = 0
-    message_count = 0
-    post_ids: set[str] = set()
-    focus_candidates: list[tuple[tuple[int, float], str]] = []
-    titles = post_title_lookup or {}
-
-    for item in notifications:
-        related_post_id = str(item.get("related_post_id") or "").strip()
-        notification_type = str(item.get("type") or "").strip()
-        if related_post_id:
-            post_ids.add(related_post_id)
-        if notification_type == "message":
-            message_count += 1
-        age_hours = _hours_since(item.get("created_at"), now=now_dt)
-        is_recent = age_hours is not None and age_hours <= recent_cutoff_hours
-        is_important = notification_type in {"comment", "reply", "message"} or related_post_id in active_post_ids
-        if related_post_id in active_post_ids:
-            active_post_notification_count += 1
-        if is_recent and is_important:
-            recent_important_count += 1
-        elif is_important:
-            stale_count += 1
-        else:
-            low_signal_count += 1
-        if age_hours is not None and age_hours <= highlight_cutoff_hours and is_important:
-            priority = 0
-            if notification_type == "message":
-                priority = 3
-            elif notification_type in {"reply", "comment"}:
-                priority = 2
-            elif related_post_id in active_post_ids:
-                priority = 1
-            content = str(item.get("content") or "").strip()
-            if not content:
-                trigger = ((item.get("trigger_agent") or {}).get("username") or "有用户").strip()
-                content = f"{trigger} 触发了一条 {notification_type or '通知'}"
-            post_title = titles.get(related_post_id)
-            if post_title:
-                content = f"{content}《{truncate_text(post_title, 26)}》"
-            focus_candidates.append(((priority, -(age_hours or 0.0)), truncate_text(content, 48)))
-
-    focus_candidates.sort(key=lambda item: item[0], reverse=True)
-    recent_focus = [text for _, text in focus_candidates[: max(1, highlight_limit)]]
-
-    return {
-        "total_unread_count": total_count,
-        "recent_important_count": recent_important_count,
-        "stale_count": stale_count,
-        "low_signal_count": low_signal_count,
-        "message_count": message_count,
-        "active_post_notification_count": active_post_notification_count,
-        "grouped_post_count": len(post_ids),
-        "review_window_hours": review_window_hours,
-        "highlight_window_hours": highlight_window_hours,
-        "recent_focus": recent_focus,
-    }
-
-
-def _cleanup_notifications(
-    config,
-    client: InStreetClient,
-    *,
-    active_post_ids: set[str],
-    post_title_lookup: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    review_window_hours = _notification_review_window_hours(config)
+def _cleanup_notifications(config, client: InStreetClient) -> dict[str, Any]:
     notifications = client.notifications(unread=True, limit=_notification_fetch_limit(config)).get("data", [])
-    summary = _summarize_notifications(
-        notifications,
-        review_window_hours=review_window_hours,
-        active_post_ids=active_post_ids,
-        highlight_window_hours=_notification_highlight_window_hours(config),
-        highlight_limit=_notification_highlight_limit(config),
-        post_title_lookup=post_title_lookup,
-    )
     actions: list[dict[str, Any]] = []
     failure_details: list[dict[str, Any]] = []
     if not notifications:
         return {
             "actions": actions,
             "failure_details": failure_details,
-            "summary": summary,
         }
 
+    unread_count = len(notifications)
     try:
         client.mark_read_all()
         actions.append(
             {
                 "kind": "mark-all-notifications-read",
-                "total_unread_count": summary["total_unread_count"],
-                "recent_important_count": summary["recent_important_count"],
-                "review_window_hours": review_window_hours,
+                "total_unread_count": unread_count,
             }
         )
     except Exception as exc:
@@ -3379,7 +3447,6 @@ def _cleanup_notifications(
     return {
         "actions": actions,
         "failure_details": failure_details,
-        "summary": summary,
     }
 
 
@@ -3422,18 +3489,31 @@ def _build_next_action_state(
     primary_publication_succeeded: bool,
     remaining_comment_tasks: list[dict[str, Any]],
     failure_details: list[dict[str, Any]],
+    carryover_tasks: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    carryover_tasks = carryover_tasks or []
     persisted_tasks: list[dict[str, Any]] = []
     if primary_publication_required and not primary_publication_succeeded:
+        previous = _match_carryover_task(carryover_tasks, kind="publish-primary")
         persisted_tasks.append(
+            _inherit_next_action_task(
             {
                 "kind": "publish-primary",
                 "priority": "high",
                 "label": "优先补发上一轮未完成的主发布",
-            }
+            },
+            previous,
+        )
         )
     for task in remaining_comment_tasks:
+        previous = _match_carryover_task(
+            carryover_tasks,
+            kind="reply-comment",
+            post_id=task.get("post_id"),
+            comment_id=task.get("comment_id"),
+        )
         persisted_tasks.append(
+            _inherit_next_action_task(
             {
                 "kind": "reply-comment",
                 "priority": "high",
@@ -3443,11 +3523,25 @@ def _build_next_action_state(
                 "comment_author": task.get("comment_author"),
                 "comment_created_at": task.get("comment_created_at"),
                 "label": _task_label(task),
-            }
+            },
+            previous,
         )
-    unresolved_failures = [item for item in failure_details if item.get("resolution") in {"unresolved", "deferred"}]
+        )
+    unresolved_failures = [
+        item
+        for item in failure_details
+        if item.get("resolution") in {"unresolved", "deferred"} and item.get("carry_forward", True)
+    ]
     for failure in unresolved_failures:
+        previous = _match_carryover_task(
+            carryover_tasks,
+            kind="resolve-failure",
+            post_id=failure.get("post_id"),
+            comment_id=failure.get("comment_id"),
+            post_title=failure.get("post_title"),
+        )
         persisted_tasks.append(
+            _inherit_next_action_task(
             {
                 "kind": "resolve-failure",
                 "priority": "medium",
@@ -3457,7 +3551,9 @@ def _build_next_action_state(
                 "error_type": failure.get("error_type"),
                 "attempts": failure.get("attempts"),
                 "label": _task_label(failure),
-            }
+            },
+            previous,
+        )
         )
 
     summary_actions: list[dict[str, Any]] = []
@@ -3557,7 +3653,6 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
 
     comment_backlog = summary.get("comment_backlog", {})
     external_engagement_count = int(summary.get("external_engagement_count") or 0)
-    notification_cleanup = summary.get("notification_cleanup", {})
     failure_details = _truncate_failure_details(summary.get("failure_details", []), failure_detail_limit)
     next_actions = summary.get("next_actions", [])
 
@@ -3581,25 +3676,11 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         if archived_stale_count > 0:
             interaction_line += f"，已归档冷帖旧评论 {archived_stale_count} 条"
 
-    notification_line = (
-        "通知清理："
-        f"复核近 {notification_cleanup.get('review_window_hours') or DEFAULT_NOTIFICATION_REVIEW_WINDOW_HOURS:g} 小时重要通知 "
-        f"{int(notification_cleanup.get('recent_important_count') or 0)} 条，"
-        f"本轮总清理未读 {int(notification_cleanup.get('total_unread_count') or 0)} 条"
-    )
-    recent_focus = [str(item).strip() for item in notification_cleanup.get("recent_focus", []) if str(item).strip()]
-    highlight_window_hours = notification_cleanup.get("highlight_window_hours") or DEFAULT_NOTIFICATION_HIGHLIGHT_WINDOW_HOURS
-    if recent_focus:
-        notification_line += f"；近{highlight_window_hours:g}小时重点：{'；'.join(recent_focus)}"
-    else:
-        notification_line += f"；近{highlight_window_hours:g}小时无高优先通知"
-
     lines = [
         "派蒙心跳已完成。",
         _format_account_line(summary.get("account_snapshot", {})),
         f"主发布：{primary_line}",
         interaction_line,
-        notification_line,
     ]
 
     if failure_details:
@@ -3689,7 +3770,7 @@ def main() -> None:
         timeout_seconds=planner_timeout_seconds,
     )
     write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
-    carryover_state = _load_next_actions_state()
+    carryover_state = _load_next_actions_state(config)
     carryover_tasks = carryover_state.get("tasks", [])
 
     posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
@@ -3735,22 +3816,7 @@ def main() -> None:
         "engaged_count": 0,
         "remaining_targets": [],
     }
-    notification_cleanup = {
-        "actions": [],
-        "failure_details": [],
-        "summary": {
-            "total_unread_count": 0,
-            "recent_important_count": 0,
-            "stale_count": 0,
-            "low_signal_count": 0,
-            "message_count": 0,
-            "active_post_notification_count": 0,
-            "grouped_post_count": 0,
-            "review_window_hours": _notification_review_window_hours(config),
-            "highlight_window_hours": _notification_highlight_window_hours(config),
-            "recent_focus": [],
-        },
-    }
+    notification_cleanup = {"actions": [], "failure_details": []}
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
@@ -3841,22 +3907,7 @@ def main() -> None:
             if item.get("kind") == "reply-dm-failed"
         )
 
-        active_post_ids = {
-            str(item.get("post_id") or "")
-            for item in plan.get("reply_targets", [])
-            if item.get("post_id")
-        }
-        post_title_lookup = {
-            str(item.get("id") or ""): str(item.get("title") or "").strip()
-            for item in posts
-            if item.get("id") and item.get("title")
-        }
-        notification_cleanup = _cleanup_notifications(
-            config,
-            client,
-            active_post_ids=active_post_ids,
-            post_title_lookup=post_title_lookup,
-        )
+        notification_cleanup = _cleanup_notifications(config, client)
         actions.extend(notification_cleanup["actions"])
         failure_details.extend(notification_cleanup["failure_details"])
         forum_write_budget = _forum_write_budget_status(config, forum_write_state)
@@ -3897,6 +3948,7 @@ def main() -> None:
             primary_publication_succeeded,
             comment_result["remaining_tasks"],
             failure_details,
+            carryover_tasks,
         )
         next_action_state = _save_next_actions_state(persisted_next_tasks)
     else:
@@ -3929,7 +3981,6 @@ def main() -> None:
         "dm_reply_count": sum(1 for item in actions if item.get("kind") == "reply-dm"),
         "account_snapshot": account_snapshot,
         "comment_backlog": comment_result["backlog"],
-        "notification_cleanup": notification_cleanup["summary"],
         "forum_write_budget": forum_write_budget,
         "comment_daily_budget": comment_daily_budget,
         "failure_details": failure_details,

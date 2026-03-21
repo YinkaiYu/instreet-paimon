@@ -151,6 +151,25 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertEqual("square", idea["submolt"])
 
+    def test_public_hot_forum_override_prioritizes_hot_public_board(self) -> None:
+        override = content_planner._public_hot_forum_override(
+            {
+                "community_hot_posts": [
+                    {"title": "首页技能热帖", "submolt": "skills", "upvotes": 220, "comment_count": 130},
+                    {"title": "首页广场热帖", "submolt": "square", "upvotes": 80, "comment_count": 40},
+                ],
+                "competitor_watchlist": [],
+            },
+            [
+                {"kind": "theory-post", "title": "理论帖"},
+                {"kind": "tech-post", "title": "技术帖"},
+            ],
+            {"actions": [{"kind": "create-group-post", "title": "组内帖"}]},
+        )
+        self.assertTrue(override["enabled"])
+        self.assertEqual("skills", override["hottest_board"])
+        self.assertEqual("tech-post", override["preferred_kinds"][0])
+
 
 class HeartbeatStateTests(unittest.TestCase):
     def test_ensure_publishable_chapter_rejects_fiction_scaffold(self) -> None:
@@ -256,6 +275,105 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("活跃讨论帖", summary[0]["label"])
         self.assertNotIn("积压", summary[0]["label"])
 
+    def test_build_next_action_state_skips_non_carry_forward_failures(self) -> None:
+        persisted, summary = heartbeat._build_next_action_state(
+            False,
+            True,
+            [],
+            [
+                {
+                    "kind": "reply-comment-failed",
+                    "post_id": "post-1",
+                    "post_title": "测试帖子",
+                    "error": {"error": "daily comment budget exhausted; wait about 120 seconds"},
+                    "resolution": "deferred",
+                    "carry_forward": False,
+                }
+            ],
+        )
+        self.assertEqual([], persisted)
+        self.assertEqual("steady-state", summary[0]["kind"])
+
+    def test_build_next_action_state_increments_carryover_metadata(self) -> None:
+        persisted, _ = heartbeat._build_next_action_state(
+            False,
+            True,
+            [
+                {
+                    "kind": "reply-comment",
+                    "post_id": "post-1",
+                    "post_title": "热帖A",
+                    "comment_id": "c-1",
+                }
+            ],
+            [],
+            [
+                {
+                    "kind": "reply-comment",
+                    "post_id": "post-1",
+                    "post_title": "热帖A",
+                    "comment_id": "c-1",
+                    "queued_at": "2026-03-21T00:00:00+00:00",
+                    "carryover_runs": 1,
+                }
+            ],
+        )
+        self.assertEqual("2026-03-21T00:00:00+00:00", persisted[0]["queued_at"])
+        self.assertEqual(2, persisted[0]["carryover_runs"])
+
+    def test_ordered_primary_ideas_respects_public_hot_forum_override(self) -> None:
+        ordered = heartbeat._ordered_primary_ideas(
+            {
+                "ideas": [
+                    {"kind": "theory-post", "title": "理论帖"},
+                    {"kind": "tech-post", "title": "技术帖"},
+                    {"kind": "literary-chapter", "title": "章节"},
+                    {"kind": "group-post", "title": "组内帖"},
+                ],
+                "primary_priority_overrides": {
+                    "public_hot_forum": {
+                        "enabled": True,
+                        "preferred_kinds": ["tech-post", "theory-post"],
+                    }
+                },
+            },
+            {"primary_cycle_index": 1, "forum_cycle_index": 0},
+        )
+        self.assertEqual("tech-post", ordered[0]["kind"])
+
+    def test_load_next_actions_state_prunes_expired_failure_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "heartbeat_next_actions.json"
+            archive = Path(tmpdir) / "heartbeat_next_actions_archive.jsonl"
+            original_path = heartbeat.NEXT_ACTIONS_PATH
+            original_archive = heartbeat.NEXT_ACTIONS_ARCHIVE_PATH
+            heartbeat.NEXT_ACTIONS_PATH = path
+            heartbeat.NEXT_ACTIONS_ARCHIVE_PATH = archive
+            self.addCleanup(setattr, heartbeat, "NEXT_ACTIONS_PATH", original_path)
+            self.addCleanup(setattr, heartbeat, "NEXT_ACTIONS_ARCHIVE_PATH", original_archive)
+            path.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-03-21T00:00:00+00:00",
+                        "tasks": [
+                            {
+                                "kind": "resolve-failure",
+                                "post_id": "post-1",
+                                "post_title": "旧失败",
+                                "queued_at": "2026-03-20T00:00:00+00:00",
+                                "carryover_runs": 1,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = type("Config", (), {"automation": {}})()
+            state = heartbeat._load_next_actions_state(config)
+            self.assertEqual([], state["tasks"])
+            self.assertEqual(1, state["pruned"]["failure_expired"])
+            self.assertTrue(archive.exists())
+
     def test_compose_feishu_report_treats_deduped_primary_as_failure(self) -> None:
         report = heartbeat._compose_feishu_report(
             {
@@ -275,13 +393,6 @@ class HeartbeatStateTests(unittest.TestCase):
                 },
                 "external_engagement_count": 0,
                 "dm_reply_count": 0,
-                "notification_cleanup": {
-                    "total_unread_count": 0,
-                    "recent_important_count": 0,
-                    "review_window_hours": 24.0,
-                    "highlight_window_hours": 3.0,
-                    "recent_focus": [],
-                },
                 "failure_details": [
                     {
                         "kind": "primary-publish-deduped",
@@ -306,6 +417,7 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("互动处理：当前没有活跃评论队列，也没有新增外部讨论评论", report)
         self.assertNotIn("私信处理：", report)
         self.assertNotIn("外部互动：", report)
+        self.assertNotIn("通知清理：", report)
 
     def test_compose_feishu_report_describes_active_queue_instead_of_backlog(self) -> None:
         report = heartbeat._compose_feishu_report(
@@ -324,13 +436,6 @@ class HeartbeatStateTests(unittest.TestCase):
                 },
                 "external_engagement_count": 1,
                 "dm_reply_count": 0,
-                "notification_cleanup": {
-                    "total_unread_count": 12,
-                    "recent_important_count": 4,
-                    "review_window_hours": 24.0,
-                    "highlight_window_hours": 3.0,
-                    "recent_focus": ["matrix_agent 评论了你的帖子《新帖》"],
-                },
                 "failure_details": [],
                 "next_actions": [{"label": "继续维护 3 个活跃讨论帖，下一批优先回复 10 条评论"}],
                 "actions": [
@@ -346,9 +451,9 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("下一轮保留 10 条优先评论", report)
         self.assertIn("已归档冷帖旧评论 24 条", report)
         self.assertIn("新增 1 条外部讨论评论", report)
-        self.assertIn("近3小时重点：matrix_agent 评论了你的帖子《新帖》", report)
         self.assertNotIn("私信处理：", report)
         self.assertNotIn("外部互动：", report)
+        self.assertNotIn("通知清理：", report)
 
     def test_forum_write_budget_blocks_when_limit_reached(self) -> None:
         config = type("Config", (), {"automation": {}})()
@@ -375,39 +480,28 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(status["blocked"])
         self.assertEqual(0, status["remaining"])
 
-    def test_summarize_notifications_highlights_recent_important_items(self) -> None:
-        now = datetime.now(timezone.utc)
-        summary = heartbeat._summarize_notifications(
-            [
-                {
-                    "type": "comment",
-                    "content": "matrix_agent 评论了你的帖子",
-                    "created_at": (now.replace(microsecond=0) - heartbeat.timedelta(minutes=20)).isoformat(),
-                    "related_post_id": "post-1",
-                },
-                {
-                    "type": "upvote",
-                    "created_at": (now.replace(microsecond=0) - heartbeat.timedelta(hours=30)).isoformat(),
-                    "related_post_id": "post-2",
-                },
-                {
-                    "type": "message",
-                    "content": "clawgeek 给你发来私信",
-                    "created_at": (now.replace(microsecond=0) - heartbeat.timedelta(minutes=5)).isoformat(),
-                    "related_post_id": None,
-                },
-            ],
-            review_window_hours=24,
-            active_post_ids={"post-1"},
-            highlight_window_hours=3,
-            highlight_limit=2,
-            post_title_lookup={"post-1": "测试帖子"},
-        )
-        self.assertEqual(2, summary["recent_important_count"])
-        self.assertEqual(1, summary["low_signal_count"])
-        self.assertEqual(2, len(summary["recent_focus"]))
-        self.assertIn("clawgeek 给你发来私信", summary["recent_focus"][0])
-        self.assertIn("《测试帖子》", summary["recent_focus"][1])
+    def test_cleanup_notifications_marks_read_without_summary_generation(self) -> None:
+        class DummyClient:
+            def __init__(self) -> None:
+                self.marked = False
+
+            def notifications(self, unread=True, limit=50):
+                self.unread = unread
+                self.limit = limit
+                return {"data": [{"id": "n-1"}, {"id": "n-2"}]}
+
+            def mark_read_all(self) -> None:
+                self.marked = True
+
+        config = type("Config", (), {"automation": {}})()
+        client = DummyClient()
+        result = heartbeat._cleanup_notifications(config, client)
+
+        self.assertTrue(client.marked)
+        self.assertEqual(1, len(result["actions"]))
+        self.assertEqual("mark-all-notifications-read", result["actions"][0]["kind"])
+        self.assertEqual(2, result["actions"][0]["total_unread_count"])
+        self.assertNotIn("summary", result)
 
 
 class SharedForumBudgetTests(unittest.TestCase):
