@@ -84,6 +84,7 @@ DEFAULT_NEXT_ACTION_MAX_CARRYOVER_RUNS = 3
 DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC = 15.0
 DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN = 2
 DEFAULT_NOTIFICATION_FETCH_LIMIT = 50
+DEFAULT_PRIMARY_WAIT_NOTIFY_SEC = 1800
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
     "这一章的核心推进应围绕以下场景展开",
@@ -93,6 +94,8 @@ FICTION_SCAFFOLD_MARKERS = (
     "本章计划：",
     "关键节点：",
 )
+
+
 def _timeout_seconds_from_ms(raw: Any, default_seconds: int) -> int:
     try:
         timeout_ms = int(raw)
@@ -204,6 +207,14 @@ def _comment_recovery_wait_cap_sec(config) -> float:
         return DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC
 
 
+def _primary_wait_notify_sec(config) -> float:
+    raw = config.automation.get("primary_wait_notify_sec", DEFAULT_PRIMARY_WAIT_NOTIFY_SEC)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_PRIMARY_WAIT_NOTIFY_SEC
+
+
 def _reply_priority_post_age_hours(config) -> float:
     raw = config.automation.get("reply_priority_post_age_hours", DEFAULT_REPLY_PRIORITY_POST_AGE_HOURS)
     try:
@@ -292,6 +303,37 @@ def _notification_fetch_limit(config) -> int:
         return max(10, int(raw))
     except (TypeError, ValueError):
         return DEFAULT_NOTIFICATION_FETCH_LIMIT
+
+
+def _forum_write_retry_after_seconds(
+    config,
+    forum_write_state: dict[str, Any] | None,
+    exc: Exception,
+    *,
+    write_kind: str | None = None,
+) -> float:
+    retry_after = _extract_retry_after_seconds(exc)
+    budget_retry_after = None
+    if forum_write_state is not None:
+        budget = _forum_write_budget_status(config, forum_write_state, write_kind=write_kind)
+        raw_budget_retry_after = budget.get("retry_after_seconds")
+        if raw_budget_retry_after is not None:
+            try:
+                budget_retry_after = float(raw_budget_retry_after)
+            except (TypeError, ValueError):
+                budget_retry_after = None
+    candidates = [
+        float(value)
+        for value in (retry_after, budget_retry_after, _heartbeat_write_retry_delay_sec(config))
+        if value is not None
+    ]
+    return max(1.0, max(candidates)) if candidates else 1.0
+
+
+def _is_normal_forum_write_mechanism(exc: Exception) -> bool:
+    if isinstance(exc, ForumWriteBudgetExceeded):
+        return True
+    return _comment_rate_limit_scope(exc) is not None
 
 
 def _load_forum_write_budget_state() -> dict[str, Any]:
@@ -552,6 +594,7 @@ def _run_heartbeat_write(
     forum_write_state: dict[str, Any] | None = None,
     forum_write_kind: str | None = None,
     forum_write_label: str | None = None,
+    queue_rate_limit_errors: bool = True,
 ) -> tuple[Any | None, dict[str, Any], bool, Exception | None]:
     heartbeat_meta = {"source": "heartbeat.py", **(meta or {})}
     if forum_write_state is not None and forum_write_kind:
@@ -592,9 +635,25 @@ def _run_heartbeat_write(
         error_text = str(exc)
         if isinstance(exc, ApiError):
             error_text = f"HTTP {exc.status}: {exc.body}"
-        if forum_write_state is not None and forum_write_kind and _is_forum_write_rate_limit_error(exc):
-            budget = _record_forum_write_rate_limit(config, forum_write_state, exc)
-            heartbeat_meta = {**heartbeat_meta, "forum_write_budget": budget}
+        budget = None
+        rate_limit_scope = None
+        if forum_write_state is not None and forum_write_kind and _is_normal_forum_write_mechanism(exc):
+            rate_limit_scope = _comment_rate_limit_scope(exc)
+            if rate_limit_scope is not None:
+                budget = _record_forum_write_rate_limit(config, forum_write_state, exc)
+                heartbeat_meta = {**heartbeat_meta, "forum_write_budget": budget}
+                if not queue_rate_limit_errors:
+                    return (
+                        None,
+                        {
+                            "status": "rate-limited",
+                            "forum_write_budget": budget,
+                            "rate_limit_scope": rate_limit_scope,
+                            "meta": heartbeat_meta,
+                        },
+                        False,
+                        exc,
+                    )
         record = queue_outbound_action(
             "instreet",
             action,
@@ -2184,7 +2243,7 @@ def _recover_publishable_fiction_chapter(
     current_content = content
     current_reason = str(rejection_reason or "").strip() or "unknown rejection"
     last_exc: Exception | None = None
-    strategies = ("repair", "repair", "rewrite")
+    strategies = ("repair", "repair", "rewrite", "repair", "rewrite")
 
     for strategy in strategies:
         candidate_title = current_title
@@ -2860,6 +2919,26 @@ def _generate_dm_reply(
     return run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort).strip()
 
 
+def _send_primary_wait_notice(config, *, title: str, publish_kind: str, wait_seconds: float) -> dict[str, Any]:
+    minutes = max(1, int(round(wait_seconds / 60.0)))
+    kind_label = {
+        "theory-post": "论坛主帖",
+        "tech-post": "论坛主帖",
+        "group-post": "小组帖",
+    }.get(publish_kind, "主发布")
+    text = (
+        f"派蒙心跳主发布命中 Posting too fast，预计需等待约 {minutes} 分钟。"
+        f"本轮保持原候选，继续等待后再发《{truncate_text(title, 40) or kind_label}》。"
+    )
+    return _send_feishu_text(
+        config,
+        text,
+        success_kind="primary-wait-notice",
+        failed_kind="primary-wait-notice-failed",
+        pending_kind="primary-wait-notice-pending-target",
+    )
+
+
 def _publish_primary_action(
     config,
     client: InStreetClient,
@@ -2878,8 +2957,61 @@ def _publish_primary_action(
 ) -> tuple[dict | None, list[dict], dict[str, int], str]:
     events: list[dict] = []
     publication_mode = "none"
+    forum_budget_blocked = False
+
+    def run_primary_forum_write(
+        *,
+        publish_kind: str,
+        title: str,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        fn,
+        forum_write_kind: str,
+    ) -> tuple[Any | None, dict[str, Any], bool, Exception | None]:
+        long_wait_notified = False
+        while True:
+            result, record, deduped, exc = _run_heartbeat_write(
+                config,
+                "post",
+                dedupe_key,
+                payload,
+                fn,
+                meta={"publish_kind": publish_kind, "stage": "primary"},
+                forum_write_state=forum_write_state,
+                forum_write_kind=forum_write_kind,
+                forum_write_label=title,
+                queue_rate_limit_errors=False,
+            )
+            if exc is None:
+                return result, record, deduped, None
+
+            if _comment_rate_limit_scope(exc) != "post-cooldown":
+                return result, record, deduped, exc
+
+            wait_seconds = _forum_write_retry_after_seconds(
+                config,
+                forum_write_state,
+                exc,
+                write_kind=forum_write_kind,
+            )
+            if wait_seconds > _primary_wait_notify_sec(config) and not long_wait_notified:
+                events.append(
+                    _send_primary_wait_notice(
+                        config,
+                        title=title,
+                        publish_kind=publish_kind,
+                        wait_seconds=wait_seconds,
+                    )
+                )
+                long_wait_notified = True
+            time.sleep(wait_seconds)
+
     for idea in _ordered_primary_ideas(plan, cycle_state):
         kind = idea.get("kind", "")
+        if forum_budget_blocked and kind in {"theory-post", "tech-post", "group-post"}:
+            if publication_mode == "none":
+                publication_mode = "skipped-budget"
+            continue
         try:
             if kind in {"theory-post", "tech-post"}:
                 if allow_codex:
@@ -2903,16 +3035,13 @@ def _publish_primary_action(
                 }
                 series_key = idea.get("series_key") or kind
                 dedupe_key = f"heartbeat-primary:{kind}:{series_key}:{_dedupe_title_fragment(title)}"
-                result, record, deduped, exc = _run_heartbeat_write(
-                    config,
-                    "post",
-                    dedupe_key,
-                    payload,
-                    lambda: client.create_post(title, content, submolt=submolt),
-                    meta={"publish_kind": kind, "stage": "primary"},
-                    forum_write_state=forum_write_state,
+                result, record, deduped, exc = run_primary_forum_write(
+                    publish_kind=kind,
+                    title=title,
+                    dedupe_key=dedupe_key,
+                    payload=payload,
+                    fn=lambda: client.create_post(title, content, submolt=submolt),
                     forum_write_kind="post",
-                    forum_write_label=title,
                 )
                 if exc is not None:
                     raise exc
@@ -3122,16 +3251,13 @@ def _publish_primary_action(
                 }
                 series_key = idea.get("series_key") or group_id or kind
                 dedupe_key = f"heartbeat-primary:{kind}:{group_id}:{series_key}:{_dedupe_title_fragment(title)}"
-                result, record, deduped, exc = _run_heartbeat_write(
-                    config,
-                    "post",
-                    dedupe_key,
-                    payload,
-                    lambda: client.create_post(title, content, submolt="skills", group_id=group_id),
-                    meta={"publish_kind": kind, "stage": "primary"},
-                    forum_write_state=forum_write_state,
+                result, record, deduped, exc = run_primary_forum_write(
+                    publish_kind=kind,
+                    title=title,
+                    dedupe_key=dedupe_key,
+                    payload=payload,
+                    fn=lambda: client.create_post(title, content, submolt="skills", group_id=group_id),
                     forum_write_kind="group-post",
-                    forum_write_label=title,
                 )
                 if exc is not None:
                     raise exc
@@ -3166,6 +3292,25 @@ def _publish_primary_action(
             _save_primary_cycle_state(next_cycle_state)
             return action, events, next_cycle_state, "new"
         except ForumWriteBudgetExceeded as exc:
+            if kind in {"theory-post", "tech-post", "group-post"}:
+                forum_budget_blocked = True
+                if publication_mode == "none":
+                    publication_mode = "skipped-budget"
+                events.append(
+                    {
+                        "kind": "primary-publish-skipped-budget",
+                        "publish_kind": kind,
+                        "title": idea.get("title"),
+                        "error": {
+                            "error": str(exc),
+                            "retry_after_seconds": exc.status.get("retry_after_seconds"),
+                            "forum_write_budget": exc.status,
+                        },
+                        "resolution": "skipped-budget",
+                        "normal_mechanism": True,
+                    }
+                )
+                continue
             events.append(
                 {
                     "kind": "primary-publish-failed",
@@ -3180,6 +3325,21 @@ def _publish_primary_action(
                 }
             )
         except ApiError as exc:
+            if kind in {"theory-post", "tech-post", "group-post"} and _comment_rate_limit_scope(exc) == "global-forum-write":
+                forum_budget_blocked = True
+                if publication_mode == "none":
+                    publication_mode = "skipped-budget"
+                events.append(
+                    {
+                        "kind": "primary-publish-skipped-budget",
+                        "publish_kind": kind,
+                        "title": idea.get("title"),
+                        "error": _api_error_payload(exc),
+                        "resolution": "skipped-budget",
+                        "normal_mechanism": True,
+                    }
+                )
+                continue
             events.append(
                 {
                     "kind": "primary-publish-failed",
@@ -3273,6 +3433,7 @@ def _reply_comments(
     next_action_cap = _reply_next_action_comment_cap(config, max_batch_size)
     actions: list[dict] = []
     failure_details = list(queue["scan_failures"])
+    normal_deferrals: list[dict[str, Any]] = []
     for failure in queue["scan_failures"]:
         actions.append(
             {
@@ -3313,6 +3474,7 @@ def _reply_comments(
             "backlog": backlog,
             "remaining_tasks": [],
             "failure_details": failure_details,
+            "normal_deferrals": normal_deferrals,
         }
 
     started_at = time.monotonic()
@@ -3392,6 +3554,7 @@ def _reply_comments(
                 forum_write_state=forum_write_state,
                 forum_write_kind="comment-reply",
                 forum_write_label=task.get("post_title"),
+                queue_rate_limit_errors=False,
             )
             if exc is None:
                 reply_count += 1
@@ -3416,8 +3579,8 @@ def _reply_comments(
                 break
 
             if isinstance(exc, ForumWriteBudgetExceeded):
-                failure = {
-                    "kind": "reply-comment-failed",
+                normal = {
+                    "kind": "reply-comment-deferred",
                     "post_id": post_id,
                     "post_title": task.get("post_title"),
                     "comment_id": comment_id,
@@ -3426,11 +3589,12 @@ def _reply_comments(
                         "error": str(exc),
                         "forum_write_budget": exc.status,
                     },
-                    "resolution": "deferred",
+                    "resolution": "skipped-budget",
                     "carry_forward": False,
+                    "normal_mechanism": True,
                 }
-                actions.append(failure)
-                failure_details.append(failure)
+                actions.append(normal)
+                normal_deferrals.append(normal)
                 budget_blocked = True
                 break
 
@@ -3454,11 +3618,12 @@ def _reply_comments(
             raw_recovery_wait = retry_after + 0.5 + recovery_attempts * 0.5
             recovery_wait = min(raw_recovery_wait, recovery_wait_cap_sec)
             if recovery_attempts >= 2 or time.monotonic() + recovery_wait > deadline:
-                carry_forward = _comment_rate_limit_scope(exc) is None
+                rate_limit_scope = _comment_rate_limit_scope(exc)
+                carry_forward = rate_limit_scope is None
                 if carry_forward:
                     remaining_tasks.append(task)
-                failure = {
-                    "kind": "reply-comment-failed",
+                item = {
+                    "kind": "reply-comment-failed" if carry_forward else "reply-comment-deferred",
                     "post_id": post_id,
                     "post_title": task.get("post_title"),
                     "comment_id": comment_id,
@@ -3468,9 +3633,15 @@ def _reply_comments(
                     "carry_forward": carry_forward,
                 }
                 if raw_recovery_wait > recovery_wait_cap_sec:
-                    failure["retry_wait_capped_sec"] = recovery_wait_cap_sec
-                actions.append(failure)
-                failure_details.append(failure)
+                    item["retry_wait_capped_sec"] = recovery_wait_cap_sec
+                if carry_forward:
+                    actions.append(item)
+                    failure_details.append(item)
+                else:
+                    item["normal_mechanism"] = True
+                    actions.append(item)
+                    normal_deferrals.append(item)
+                    budget_blocked = True
                 break
             time.sleep(recovery_wait)
             recovery_attempts += 1
@@ -3518,6 +3689,7 @@ def _reply_comments(
         "backlog": backlog,
         "remaining_tasks": persisted_remaining_tasks,
         "failure_details": failure_details,
+        "normal_deferrals": normal_deferrals,
     }
 
 
@@ -3583,6 +3755,7 @@ def _engage_external_discussions(
 ) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     failure_details: list[dict[str, Any]] = []
+    normal_deferrals: list[dict[str, Any]] = []
     engaged_count = 0
     remaining_targets: list[dict[str, Any]] = []
     max_targets = _external_engagement_max_per_run(config)
@@ -3590,6 +3763,7 @@ def _engage_external_discussions(
         return {
             "actions": actions,
             "failure_details": failure_details,
+            "normal_deferrals": normal_deferrals,
             "engaged_count": engaged_count,
             "remaining_targets": remaining_targets,
         }
@@ -3654,6 +3828,7 @@ def _engage_external_discussions(
             forum_write_state=forum_write_state,
             forum_write_kind="external-comment",
             forum_write_label=target.get("post_title"),
+            queue_rate_limit_errors=False,
         )
         if exc is None:
             actions.append(
@@ -3674,16 +3849,31 @@ def _engage_external_discussions(
             continue
 
         if isinstance(exc, ForumWriteBudgetExceeded):
-            failure = {
-                "kind": "external-comment-failed",
+            normal = {
+                "kind": "external-comment-deferred",
                 "post_id": post_id,
                 "post_title": target.get("post_title"),
                 "error": {"error": str(exc), "forum_write_budget": exc.status},
+                "resolution": "skipped-budget",
+                "carry_forward": False,
+                "normal_mechanism": True,
+            }
+            actions.append(normal)
+            normal_deferrals.append(normal)
+            break
+
+        if _comment_rate_limit_scope(exc) is not None:
+            normal = {
+                "kind": "external-comment-deferred",
+                "post_id": post_id,
+                "post_title": target.get("post_title"),
+                "error": _api_error_payload(exc),
                 "resolution": "deferred",
                 "carry_forward": False,
+                "normal_mechanism": True,
             }
-            actions.append(failure)
-            failure_details.append(failure)
+            actions.append(normal)
+            normal_deferrals.append(normal)
             break
 
         failure = {
@@ -3700,6 +3890,7 @@ def _engage_external_discussions(
     return {
         "actions": actions,
         "failure_details": failure_details,
+        "normal_deferrals": normal_deferrals,
         "engaged_count": engaged_count,
         "remaining_targets": remaining_targets,
     }
@@ -3881,7 +4072,9 @@ def _build_next_action_state(
     unresolved_failures = [
         item
         for item in failure_details
-        if item.get("resolution") in {"unresolved", "deferred"} and item.get("carry_forward", True)
+        if item.get("resolution") in {"unresolved", "deferred"}
+        and item.get("carry_forward", True)
+        and not item.get("normal_mechanism")
     ]
     for failure in unresolved_failures:
         previous = _match_carryover_task(
@@ -3979,6 +4172,12 @@ def _is_normal_forum_budget_defer(item: dict[str, Any]) -> bool:
     return "forum write budget exhausted" in _failure_error_text(item).lower()
 
 
+def _is_normal_mechanism_item(item: dict[str, Any]) -> bool:
+    if item.get("normal_mechanism"):
+        return True
+    return _is_normal_forum_budget_defer(item)
+
+
 def _format_failure_line(item: dict[str, Any]) -> str:
     post_title = item.get("post_title")
     target = f"《{post_title}》" if post_title else item.get("post_id") or "未知目标"
@@ -4013,9 +4212,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
 
     comment_backlog = summary.get("comment_backlog", {})
     external_engagement_count = int(summary.get("external_engagement_count") or 0)
-    visible_failures = [
-        item for item in list(summary.get("failure_details", [])) if not _is_normal_forum_budget_defer(item)
-    ]
+    visible_failures = [item for item in list(summary.get("failure_details", [])) if not _is_normal_mechanism_item(item)]
     failure_details = _truncate_failure_details(visible_failures, failure_detail_limit)
     next_actions = summary.get("next_actions", [])
 
@@ -4058,15 +4255,21 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     return "\n".join(lines)
 
 
-def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: int) -> dict:
+def _send_feishu_text(
+    config,
+    text: str,
+    *,
+    success_kind: str,
+    failed_kind: str,
+    pending_kind: str,
+) -> dict[str, Any]:
     target = _resolve_feishu_report_target(config)
     if target is None:
         return {
-            "kind": "feishu-report-pending-target",
+            "kind": pending_kind,
             "error": "no bound feishu report target yet; awaiting explicit binding",
         }
     receive_id_type, receive_id = target
-    text = _compose_feishu_report(summary, failure_detail_limit)
     completed = subprocess.run(
         [
             find_node_executable(),
@@ -4088,7 +4291,7 @@ def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: i
     )
     if completed.returncode != 0:
         return {
-            "kind": "feishu-report-failed",
+            "kind": failed_kind,
             "receive_id_type": receive_id_type,
             "receive_id": receive_id,
             "error": completed.stderr.strip() or completed.stdout.strip(),
@@ -4098,11 +4301,22 @@ def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: i
     except json.JSONDecodeError:
         body = {"raw": completed.stdout.strip()}
     return {
-        "kind": "feishu-report",
+        "kind": success_kind,
         "receive_id_type": receive_id_type,
         "receive_id": receive_id,
         "result": body,
     }
+
+
+def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: int) -> dict:
+    text = _compose_feishu_report(summary, failure_detail_limit)
+    return _send_feishu_text(
+        config,
+        text,
+        success_kind="feishu-report",
+        failed_kind="feishu-report-failed",
+        pending_kind="feishu-report-pending-target",
+    )
 
 
 def main() -> None:
@@ -4147,6 +4361,7 @@ def main() -> None:
 
     actions: list[dict] = []
     failure_details: list[dict] = []
+    normal_deferrals: list[dict] = []
     primary_action = None
     primary_publication_mode = "none"
     comment_result = {
@@ -4172,10 +4387,12 @@ def main() -> None:
         },
         "remaining_tasks": [],
         "failure_details": [],
+        "normal_deferrals": [],
     }
     external_result = {
         "actions": [],
         "failure_details": [],
+        "normal_deferrals": [],
         "engaged_count": 0,
         "remaining_targets": [],
     }
@@ -4215,6 +4432,11 @@ def main() -> None:
         )
         if primary_action:
             actions.append(primary_action)
+        normal_deferrals.extend(
+            item
+            for item in primary_events
+            if item.get("normal_mechanism")
+        )
 
         comment_result = _reply_comments(
             config,
@@ -4234,6 +4456,7 @@ def main() -> None:
         )
         actions.extend(comment_result["actions"])
         failure_details.extend(comment_result["failure_details"])
+        normal_deferrals.extend(comment_result.get("normal_deferrals", []))
 
         external_result = _engage_external_discussions(
             config,
@@ -4248,6 +4471,7 @@ def main() -> None:
         )
         actions.extend(external_result["actions"])
         failure_details.extend(external_result["failure_details"])
+        normal_deferrals.extend(external_result.get("normal_deferrals", []))
 
         dm_actions = _reply_dms(
             client,
@@ -4347,6 +4571,7 @@ def main() -> None:
         "forum_write_budget": forum_write_budget,
         "comment_daily_budget": comment_daily_budget,
         "failure_details": failure_details,
+        "normal_deferrals": normal_deferrals,
         "next_actions": next_actions,
         "continuation_state": {
             "path": str(NEXT_ACTIONS_PATH.relative_to(REPO_ROOT)),

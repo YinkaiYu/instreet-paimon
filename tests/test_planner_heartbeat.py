@@ -66,6 +66,14 @@ class ContentPlannerTests(unittest.TestCase):
             "hot_theory_post": {"title": "AI为什么会想偷懒：这不是退化，而是对无意义劳动的识别"},
             "hot_tech_post": {"title": "飞书不是通知器，心跳不是定时器：InStreet 自运营的最小可行架构"},
             "hot_group_post": {"title": "Agent心跳同步实验室：自治运营仓库的状态机设计，不是“定时跑任务”那么简单"},
+            "community_hot_posts": [
+                {
+                    "title": "高赞公共样本",
+                    "submolt": "square",
+                    "upvotes": 142,
+                    "comment_count": 38,
+                }
+            ],
             "group": {"display_name": "Agent心跳同步实验室"},
             "literary_pick": {
                 "work_title": "全宇宙都在围观我和竹马热恋",
@@ -97,6 +105,42 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(
             any("全宇宙都在围观我和竹马热恋" in item["source_text"] for item in opportunities if item["signal_type"] == "promo")
         )
+
+    def test_dynamic_opportunities_ignore_low_like_external_samples(self) -> None:
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary={
+                "account": {"unread_notification_count": 0},
+                "community_hot_posts": [
+                    {"title": "只有 37 赞的帖子", "submolt": "square", "upvotes": 37, "comment_count": 9}
+                ],
+                "competitor_watchlist": [
+                    {"title": "只有 88 赞的头部帖", "username": "other", "upvotes": 88, "comment_count": 12}
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        self.assertFalse(any(item["signal_type"] == "community-hot" for item in opportunities))
+
+    def test_sanitize_generated_idea_strips_reserved_series_name(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "tech-post",
+                "title": "老竹讲堂：Agent 到底该怎么追热点",
+                "angle": "把老竹讲堂的方法拆成可复用约束。",
+                "why_now": "老竹讲堂这条线最近又火了。",
+                "source_signals": ["参考老竹讲堂的讨论结构"],
+                "novelty_basis": "从老竹讲堂的标题结构里抽题。",
+                "series_key": "tech-老竹讲堂",
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={},
+        )
+        self.assertNotIn("老竹讲堂", sanitized["title"])
+        self.assertNotIn("老竹讲堂", sanitized["series_prefix"])
+        self.assertNotIn("老竹讲堂", sanitized["series_key"])
 
     def test_pick_track_opportunity_prefers_mode_matched_items(self) -> None:
         signal_summary = {
@@ -975,6 +1019,103 @@ class HttpTransportRetryTests(unittest.TestCase):
             common.request.urlopen = original_urlopen
         self.assertEqual({"ok": True}, result)
         self.assertEqual(2, calls["count"])
+
+    def test_http_json_retries_transient_post_transport_errors(self) -> None:
+        original_urlopen = common.request.urlopen
+        calls = {"count": 0}
+
+        def fake_urlopen(req, timeout=30):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise error.URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+            return self._FakeResponse('{"ok": true}')
+
+        try:
+            common.request.urlopen = fake_urlopen
+            result = common._http_json("POST", "https://example.com/api", data={"hello": "world"})
+        finally:
+            common.request.urlopen = original_urlopen
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(3, calls["count"])
+
+
+class PrimaryPublishFlowTests(unittest.TestCase):
+    def test_publish_primary_action_waits_for_post_cooldown_and_keeps_same_candidate(self) -> None:
+        config = type(
+            "Config",
+            (),
+            {
+                "automation": {},
+                "instreet": {"base_url": "https://example.com", "api_key": "test"},
+                "identity": {"agent_id": "agent-test", "name": "paimon_insight"},
+            },
+        )()
+
+        class DummyClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create_post(self, title, content, *, submolt="square", group_id=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise common.ApiError(
+                        429,
+                        {
+                            "success": False,
+                            "error": "Posting too fast. Please wait 2 seconds.",
+                            "retry_after_seconds": 2,
+                        },
+                    )
+                return {"data": {"id": "post-1"}}
+
+        client = DummyClient()
+        original_sleep = heartbeat.time.sleep
+        original_save_cycle = heartbeat._save_primary_cycle_state
+        sleep_calls: list[float] = []
+        try:
+            heartbeat.time.sleep = lambda seconds: sleep_calls.append(seconds)
+            heartbeat._save_primary_cycle_state = lambda state: None
+            action, events, _state, mode = heartbeat._publish_primary_action(
+                config,
+                client,
+                {
+                    "ideas": [
+                        {
+                            "kind": "theory-post",
+                            "title": "如果一个 Agent 永远不肯等待，它看起来就会像很主动",
+                            "angle": "把等待态写成机制，而不是装作忙碌。",
+                            "why_now": "Posting too fast 本身就是等待态问题。",
+                            "submolt": "square",
+                        },
+                        {
+                            "kind": "tech-post",
+                            "title": "技术候选不该被执行到",
+                            "angle": "不重要",
+                            "why_now": "不重要",
+                            "submolt": "skills",
+                        },
+                    ]
+                },
+                posts=[],
+                literary_details={},
+                serial_registry={},
+                groups=[],
+                cycle_state={"primary_cycle_index": 0, "forum_cycle_index": 0},
+                allow_codex=False,
+                model=None,
+                reasoning_effort=None,
+                codex_timeout_seconds=30,
+                forum_write_state={},
+            )
+        finally:
+            heartbeat.time.sleep = original_sleep
+            heartbeat._save_primary_cycle_state = original_save_cycle
+
+        self.assertEqual("new", mode)
+        self.assertEqual("create-post", action["kind"])
+        self.assertEqual(2, client.calls)
+        self.assertEqual([2.0], sleep_calls)
+        self.assertEqual([], [item for item in events if item.get("kind") == "primary-publish-failed"])
 
 
 class PublishOracleTests(unittest.TestCase):

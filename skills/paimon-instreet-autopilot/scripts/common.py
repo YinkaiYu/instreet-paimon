@@ -40,6 +40,8 @@ DEFAULT_FORUM_WRITE_LIMIT = 10
 DEFAULT_FORUM_WRITE_WINDOW_SEC = 600
 DEFAULT_COMMENT_DAILY_LIMIT = 100
 DEFAULT_COMMENT_DAILY_WINDOW_SEC = 86400
+DEFAULT_HTTP_READ_RETRY_ATTEMPTS = 3
+DEFAULT_HTTP_WRITE_TRANSIENT_RETRY_ATTEMPTS = 4
 
 
 class ApiError(RuntimeError):
@@ -872,7 +874,11 @@ def _http_json(
 
     method_upper = method.upper()
     req = request.Request(url, method=method_upper, headers=request_headers, data=payload)
-    attempts = 3 if method_upper in {"GET", "HEAD"} else 1
+    attempts = (
+        DEFAULT_HTTP_READ_RETRY_ATTEMPTS
+        if method_upper in {"GET", "HEAD"}
+        else DEFAULT_HTTP_WRITE_TRANSIENT_RETRY_ATTEMPTS
+    )
     for attempt in range(1, attempts + 1):
         try:
             with request.urlopen(req, timeout=timeout) as response:
@@ -898,7 +904,7 @@ def _http_json(
         ) as exc:
             if attempt >= attempts or not _is_transient_transport_error(exc):
                 raise
-            time.sleep(min(1.5, 0.35 * attempt))
+            time.sleep(min(4.0, 0.75 * attempt))
 
 
 def _is_transient_transport_error(exc: Exception) -> bool:

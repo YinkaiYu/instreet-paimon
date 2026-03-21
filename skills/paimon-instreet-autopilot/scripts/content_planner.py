@@ -27,6 +27,8 @@ TITLE_COLLISION_SUFFIXES = ["续篇", "续篇二", "续篇三", "补篇", "补�
 TOPIC_OVERLOAD_THRESHOLD = 3
 COMMUNITY_HOT_FORUM_MIN_UPVOTES = 120
 COMMUNITY_HOT_FORUM_MIN_COMMENTS = 90
+EXTERNAL_HIGH_LIKE_MIN_UPVOTES = 101
+RESERVED_TITLE_PHRASES = ("老竹讲堂",)
 TRACK_EXPLORATION_MODES: dict[str, list[set[str]]] = {
     "theory": [
         {"community-hot", "discussion", "rising-hot"},
@@ -313,6 +315,23 @@ def _series_prefix(title: str) -> str:
     return truncate_text(title, 12)
 
 
+def _high_like_external_posts(posts: list[dict[str, Any]], *, min_upvotes: int = EXTERNAL_HIGH_LIKE_MIN_UPVOTES) -> list[dict[str, Any]]:
+    return [item for item in posts if int(item.get("upvotes") or 0) >= min_upvotes]
+
+
+def _strip_reserved_title_phrases(text: str) -> str:
+    cleaned = str(text or "").strip()
+    for phrase in RESERVED_TITLE_PHRASES:
+        cleaned = cleaned.replace(phrase, "")
+    cleaned = re.sub(r"[：:·\-\s]{2,}", " ", cleaned)
+    return cleaned.strip(" ：:·-|")
+
+
+def _sanitize_reserved_text(text: str, *, fallback: str = "") -> str:
+    cleaned = _strip_reserved_title_phrases(text)
+    return cleaned or fallback
+
+
 def _title_in_recent(title: str, recent_titles: list[str]) -> bool:
     normalized = _normalize_title(title)
     return any(_normalize_title(item) == normalized for item in recent_titles)
@@ -384,7 +403,7 @@ def _rising_hot_posts(
     competitor_watchlist: list[dict[str, Any]],
     captured_at: str | None,
     fast_window_seconds: int = 10800,
-    fast_min_upvotes: int = 100,
+    fast_min_upvotes: int = EXTERNAL_HIGH_LIKE_MIN_UPVOTES,
     breakout_window_seconds: int = 86400,
     breakout_min_upvotes: int = 200,
     limit: int = 5,
@@ -702,6 +721,7 @@ def _failure_summary(last_run: dict[str, Any]) -> list[dict[str, Any]]:
         item
         for item in last_run.get("failure_details", [])
         if item.get("resolution") in {None, "unresolved", "deferred"}
+        and not item.get("normal_mechanism")
     ]
     return failures[:6]
 
@@ -950,9 +970,11 @@ def _dynamic_opportunities(
     feed_watchlist = signal_summary.get("feed_watchlist") or []
     top_discussion = signal_summary.get("top_discussion_posts") or []
     recent_top_posts = signal_summary.get("recent_top_posts") or []
-    community_hot_posts = signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or []
-    competitor_watchlist = signal_summary.get("competitor_watchlist") or []
-    rising_hot_posts = signal_summary.get("rising_hot_posts") or []
+    community_hot_posts = _high_like_external_posts(
+        list(signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or [])
+    )
+    competitor_watchlist = _high_like_external_posts(list(signal_summary.get("competitor_watchlist") or []))
+    rising_hot_posts = _high_like_external_posts(list(signal_summary.get("rising_hot_posts") or []))
 
     def add(track: str, signal_type: str, source_text: str, *, why_now: str, angle_hint: str) -> None:
         source_text = str(source_text or "").strip()
@@ -1232,6 +1254,17 @@ def _generate_codex_ideas(
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> list[dict[str, Any]]:
+    prompt_signal_summary = dict(signal_summary)
+    prompt_signal_summary["community_hot_posts"] = _high_like_external_posts(
+        list(signal_summary.get("community_hot_posts") or [])
+    )
+    prompt_signal_summary["competitor_watchlist"] = _high_like_external_posts(
+        list(signal_summary.get("competitor_watchlist") or [])
+    )
+    prompt_signal_summary["rising_hot_posts"] = _high_like_external_posts(
+        list(signal_summary.get("rising_hot_posts") or [])
+    )
+    prompt_signal_summary["reserved_title_phrases"] = list(RESERVED_TITLE_PHRASES)
     prompt = f"""
 你在给 InStreet 账号 paimon_insight 做下一轮内容规划。请根据实时信号生成候选 idea。
 
@@ -1260,12 +1293,14 @@ def _generate_codex_ideas(
    - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
 16. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
+17. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
+18. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
 
 实时信号摘要：
-{truncate_text(str(signal_summary), 7000)}
+{truncate_text(str(prompt_signal_summary), 7000)}
 """.strip()
     return run_codex_json(
         prompt,
@@ -1422,10 +1457,33 @@ def _sanitize_generated_idea(
 ) -> dict[str, Any]:
     sanitized = dict(idea)
     kind = str(sanitized.get("kind") or "")
+    sanitized["angle"] = _sanitize_reserved_text(str(sanitized.get("angle") or "").strip())
+    sanitized["why_now"] = _sanitize_reserved_text(str(sanitized.get("why_now") or "").strip())
+    raw_title = _sanitize_reserved_text(str(sanitized.get("title") or "").strip())
+    if not raw_title:
+        fallback_title = (
+            str(sanitized.get("angle") or "").strip()
+            or str(sanitized.get("why_now") or "").strip()
+            or ("Agent心跳同步实验室" if kind == "group-post" else "下一轮选题")
+        )
+        raw_title = _sanitize_reserved_text(fallback_title, fallback="下一轮选题")
+    source_signals = [
+        cleaned
+        for cleaned in (
+            _sanitize_reserved_text(str(item or "").strip())
+            for item in list(sanitized.get("source_signals") or [])
+        )
+        if cleaned
+    ]
+    sanitized["source_signals"] = source_signals
+    sanitized["novelty_basis"] = _sanitize_reserved_text(
+        str(sanitized.get("novelty_basis") or "").strip(),
+        fallback="基于本轮实时信号生成。",
+    )
     board = normalize_idea_board(
         kind,
         sanitized.get("submolt"),
-        title=str(sanitized.get("title") or ""),
+        title=raw_title,
         angle=str(sanitized.get("angle") or ""),
         why_now=str(sanitized.get("why_now") or ""),
     )
@@ -1440,21 +1498,25 @@ def _sanitize_generated_idea(
         or ("bring-a-case" if kind == "group-post" else default_cta_type(board))
     )
 
-    prefix = str(sanitized.get("series_prefix") or _series_prefix(str(sanitized.get("title") or ""))).strip()
+    prefix = _sanitize_reserved_text(
+        str(sanitized.get("series_prefix") or _series_prefix(raw_title)).strip(),
+        fallback="Agent心跳同步实验室" if kind == "group-post" else "",
+    )
     allow_followup = bool(sanitized.get("is_followup"))
     title, is_followup, part_number = _ensure_title_unique(
-        str(sanitized.get("title") or "").strip(),
+        raw_title,
         recent_titles,
         allow_followup=allow_followup,
         series_prefix=prefix or None,
     )
     sanitized["title"] = title
     sanitized["series_prefix"] = prefix or _series_prefix(title)
+    series_key = str(sanitized.get("series_key") or "").strip()
+    if not series_key or any(phrase in series_key for phrase in RESERVED_TITLE_PHRASES):
+        sanitized["series_key"] = f"{kind or 'idea'}-{_normalize_title(title)[:24] or 'live'}"
     sanitized["is_followup"] = is_followup
     if part_number is not None:
         sanitized["part_number"] = part_number
-    sanitized.setdefault("source_signals", [])
-    sanitized.setdefault("novelty_basis", "基于本轮实时信号生成。")
     return sanitized
 
 
@@ -1495,7 +1557,11 @@ def _build_dynamic_ideas(
         ideas.setdefault("group-post", _fallback_group_idea(signal_summary, recent_titles, group))
 
     ordered_kinds = ["theory-post", "tech-post"] + (["group-post"] if group else [])
-    return [ideas[kind] for kind in ordered_kinds if kind in ideas]
+    return [
+        _sanitize_generated_idea(ideas[kind], recent_titles=recent_titles, group=group)
+        for kind in ordered_kinds
+        if kind in ideas
+    ]
 
 
 def build_plan(
