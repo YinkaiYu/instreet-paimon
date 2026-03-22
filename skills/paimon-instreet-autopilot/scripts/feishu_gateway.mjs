@@ -72,6 +72,94 @@ function describeError(error) {
   return String(error);
 }
 
+function extractAppServerErrorMessage(error) {
+  if (error instanceof Error) {
+    return error.message || error.stack || String(error);
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error && typeof error === "object" && typeof error.message === "string") {
+    return error.message;
+  }
+  return describeError(error);
+}
+
+function isMissingRolloutThreadError(error) {
+  const code = error && typeof error === "object" ? Number(error.code) : Number.NaN;
+  const message = extractAppServerErrorMessage(error);
+  return code === -32600 && /no rollout found for thread id/i.test(message);
+}
+
+function buildAppServerThreadStartParams(config) {
+  return {
+    model: String(config.automation?.codex_model || "gpt-5.4"),
+    cwd: repoRoot,
+    approvalPolicy: "never",
+    sandbox: "danger-full-access",
+    persistExtendedHistory: true,
+    experimentalRawEvents: false,
+    ephemeral: false
+  };
+}
+
+function buildAppServerThreadResumeParams(threadId) {
+  return {
+    threadId,
+    cwd: repoRoot,
+    approvalPolicy: "never",
+    sandbox: "danger-full-access",
+    persistExtendedHistory: true
+  };
+}
+
+async function resumeThreadWithFallback(client, threadId, config) {
+  try {
+    await client.request("thread/resume", buildAppServerThreadResumeParams(threadId));
+    return {
+      threadId,
+      startingNewThread: false,
+      fallbackFromThreadId: "",
+      recoveredFromArchive: false,
+      recoveryError: "",
+      unarchiveError: ""
+    };
+  } catch (error) {
+    if (!isMissingRolloutThreadError(error)) {
+      throw error;
+    }
+    try {
+      await client.request("thread/unarchive", { threadId });
+      await client.request("thread/resume", buildAppServerThreadResumeParams(threadId));
+      return {
+        threadId,
+        startingNewThread: false,
+        fallbackFromThreadId: "",
+        recoveredFromArchive: true,
+        recoveryError: describeError(error),
+        unarchiveError: ""
+      };
+    } catch (unarchiveError) {
+      const started = await client.request("thread/start", buildAppServerThreadStartParams(config));
+      return {
+        threadId: started.thread.id,
+        startingNewThread: true,
+        fallbackFromThreadId: threadId,
+        recoveredFromArchive: false,
+        recoveryError: describeError(error),
+        unarchiveError: describeError(unarchiveError)
+      };
+    }
+  }
+}
+
+function buildThreadResumeFallbackNotice(referencedBinding) {
+  if (referencedBinding?.message_id) {
+    return "这条消息是在引用旧消息续上话题，但旧 thread 的运行现场已经不在了。你现在是在新 thread 里继续，请顺着这次引用的主题直接往下做。";
+  }
+  return "当前 chat 里记着的旧 thread 运行现场已经不在了。你现在是在新 thread 里接着处理，不要因为恢复失败停住。";
+}
+
 function readJsonFile(filePath, fallback) {
   if (!fs.existsSync(filePath)) {
     return fallback;
@@ -2040,7 +2128,7 @@ async function gatherLiveProbe(config, flags, chatId, batchMessages) {
   };
 }
 
-function buildFeishuContextBlock({ chatId, messageText, session, liveProbeSummary, memorySnapshot, event, previousThreadPreview = "", mode = "default", isSteer = false }) {
+function buildFeishuContextBlock({ chatId, messageText, session, liveProbeSummary, memorySnapshot, event, previousThreadPreview = "", resumeFallbackNotice = "", mode = "default", isSteer = false }) {
   const lines = [
     "派蒙，你正在通过飞书和用户连续协作。",
     "飞书回复约束：",
@@ -2053,6 +2141,9 @@ function buildFeishuContextBlock({ chatId, messageText, session, liveProbeSummar
   ];
   if (previousThreadPreview) {
     lines.push(`- 上一轮话题摘要：${truncateText(previousThreadPreview, 160)}`);
+  }
+  if (resumeFallbackNotice) {
+    lines.push(`- 恢复说明：${resumeFallbackNotice}`);
   }
   lines.push("", `当前 chat_id：${chatId}`);
   if (event?.thread_id || event?.parent_id || event?.root_id) {
@@ -2580,22 +2671,6 @@ async function sendPlanSummaryUpdate(config, flags, chatId, plan, explanation, s
     ? `我先把这轮计划收束成 ${plan.length || 0} 步了：${truncateText(explanation, 120)}`
     : `计划骨架我先理出来了，目前大致分成 ${plan.length || 0} 步。`;
   await sendIndexedTextMessage(config, chatId, summary, session, flags);
-}
-
-async function archiveThreadQuietly(threadId) {
-  if (!threadId || !appServerRuntime?.client) {
-    return;
-  }
-  try {
-    await appServerRuntime.client.request("thread/archive", { threadId });
-  } catch (error) {
-    appendJsonl(errorsPath, {
-      timestamp: new Date().toISOString(),
-      type: "thread-archive-failed",
-      thread_id: threadId,
-      error: describeError(error)
-    });
-  }
 }
 
 function buildCollaborationModePayload(config, mode) {
@@ -3297,35 +3372,55 @@ async function ensureThreadForEvent(event, session, config, flags, modeOverride 
   let threadId = options.preferredThreadId || referencedBinding?.thread_id || "";
   const sessionExpired = isSessionExpired(session, config, flags);
   const shouldIgnoreSessionExpiry = Boolean(options.preferredThreadId || referencedBinding?.thread_id);
-  const startingNewThread = forceNewThread || (!threadId && (!session.thread_id || (sessionExpired && !shouldIgnoreSessionExpiry)));
-  if (forceNewThread && session.thread_id) {
-    await archiveThreadQuietly(session.thread_id);
-  }
+  let startingNewThread = forceNewThread || (!threadId && (!session.thread_id || (sessionExpired && !shouldIgnoreSessionExpiry)));
+  let previousThreadPreview = startingNewThread ? session.last_thread_preview || "" : "";
+  let resumeFallbackNotice = "";
   if (!forceNewThread && !threadId && session.thread_id && !sessionExpired) {
     threadId = session.thread_id;
   }
-  if (!forceNewThread && !threadId && session.thread_id && sessionExpired && !shouldIgnoreSessionExpiry) {
-    await archiveThreadQuietly(session.thread_id);
-  }
   if (!threadId) {
-    const started = await client.request("thread/start", {
-      model: String(config.automation?.codex_model || "gpt-5.4"),
-      cwd: repoRoot,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
-      persistExtendedHistory: true,
-      experimentalRawEvents: false,
-      ephemeral: false
-    });
+    const started = await client.request("thread/start", buildAppServerThreadStartParams(config));
     threadId = started.thread.id;
   } else {
-    await client.request("thread/resume", {
-      threadId,
-      cwd: repoRoot,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
-      persistExtendedHistory: true
-    });
+    const resumeResult = await resumeThreadWithFallback(client, threadId, config);
+    if (resumeResult.recoveredFromArchive) {
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "thread-resume-recovered-from-archive",
+        chat_id: event.chat_id,
+        message_id: event.message_id,
+        thread_id: threadId,
+        error: resumeResult.recoveryError
+      });
+    }
+    if (resumeResult.startingNewThread) {
+      startingNewThread = true;
+      if (!previousThreadPreview && resumeResult.fallbackFromThreadId === session.thread_id) {
+        previousThreadPreview = session.last_thread_preview || "";
+      }
+      resumeFallbackNotice = buildThreadResumeFallbackNotice(referencedBinding);
+      if (referencedBinding?.message_id) {
+        indexMessageToThread(referencedBinding.message_id, {
+          chat_id: event.chat_id,
+          thread_id: resumeResult.threadId,
+          turn_id: "",
+          message_type: referencedBinding.message_type || "reference-anchor",
+          recovered_from_thread_id: resumeResult.fallbackFromThreadId,
+          recovered_at: new Date().toISOString()
+        });
+      }
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "thread-resume-fell-back-to-new-thread",
+        chat_id: event.chat_id,
+        message_id: event.message_id,
+        requested_thread_id: threadId,
+        replacement_thread_id: resumeResult.threadId,
+        resume_error: resumeResult.recoveryError,
+        unarchive_error: resumeResult.unarchiveError
+      });
+    }
+    threadId = resumeResult.threadId;
   }
   updateSessionState(event.chat_id, {
     thread_id: threadId,
@@ -3336,13 +3431,15 @@ async function ensureThreadForEvent(event, session, config, flags, modeOverride 
   return {
     client,
     threadId,
-    startingNewThread
+    startingNewThread,
+    previousThreadPreview,
+    resumeFallbackNotice
   };
 }
 
 async function startAppServerTurnForEvent(event, config, flags, session, modeOverride = "", forceNewThread = false, options = {}) {
   const desiredMode = normalizeMode(modeOverride || session.mode || getDefaultCollaborationMode(config));
-  const { client, threadId, startingNewThread } = await ensureThreadForEvent(event, session, config, flags, desiredMode, forceNewThread, options);
+  const { client, threadId, startingNewThread, previousThreadPreview, resumeFallbackNotice } = await ensureThreadForEvent(event, session, config, flags, desiredMode, forceNewThread, options);
   const liveProbe = await gatherLiveProbe(config, flags, event.chat_id, [event]);
   let memorySnapshot = "- 无";
   try {
@@ -3364,7 +3461,8 @@ async function startAppServerTurnForEvent(event, config, flags, session, modeOve
     liveProbeSummary: liveProbe.summary,
     memorySnapshot,
     event,
-    previousThreadPreview: startingNewThread ? latestSession.last_thread_preview || "" : "",
+    previousThreadPreview,
+    resumeFallbackNotice,
     mode: desiredMode,
     isSteer: false
   });
@@ -3517,9 +3615,6 @@ async function interruptAndRestartTurn(event, config, flags, session, nextMode, 
     return draft;
   });
   if (!remainderText) {
-    if ((forceNewThread || options.clearSession) && session.thread_id) {
-      await archiveThreadQuietly(session.thread_id);
-    }
     const updatedSession = updateSessionState(event.chat_id, (draft) => {
       draft.thread_id = (forceNewThread || options.clearSession) ? "" : options.preferredThreadId || session.thread_id || "";
       draft.last_referenced_message_id = (forceNewThread || options.clearSession) ? "" : session.last_referenced_message_id || "";
@@ -3671,9 +3766,6 @@ async function processEventWithAppServer(event, config, flags) {
     return;
   }
   if (hasModeDirective && !modeDirective.remainder) {
-    if ((modeDirective.newThread || modeDirective.clearSession) && session.thread_id) {
-      await archiveThreadQuietly(session.thread_id);
-    }
     indexMessageToThread(event.message_id, {
       chat_id: event.chat_id,
       thread_id: (modeDirective.newThread || modeDirective.clearSession) ? "" : session.thread_id || "",
@@ -4845,11 +4937,13 @@ export {
   extractModeDirective,
   getRuntimeBackend,
   inboxEventMatchesIncomingEvent,
+  isMissingRolloutThreadError,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
   normalizePlanActionDecision,
   normalizePendingRequestId,
   pickStatusPhrase,
+  resumeThreadWithFallback,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,

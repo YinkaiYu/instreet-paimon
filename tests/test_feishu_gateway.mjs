@@ -12,10 +12,12 @@ import {
   extractThreadResumeDirective,
   extractModeDirective,
   inboxEventMatchesIncomingEvent,
+  isMissingRolloutThreadError,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
   normalizePlanActionDecision,
   normalizePendingRequestId,
+  resumeThreadWithFallback,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,
@@ -327,6 +329,114 @@ test("buildFeishuContextBlock keeps identity alignment internal", () => {
   assert.doesNotMatch(prompt, /先对齐内部上下文/);
   assert.doesNotMatch(prompt, /未完成语气/);
   assert.doesNotMatch(prompt, /请先对齐本地/);
+});
+
+test("buildFeishuContextBlock includes resume fallback notice when needed", () => {
+  const prompt = buildFeishuContextBlock({
+    chatId: "oc_test",
+    messageText: "续上这个 thread，继续联调",
+    session: null,
+    liveProbeSummary: "- 无",
+    memorySnapshot: "- 无",
+    event: null,
+    resumeFallbackNotice: "旧 thread 已经被归档了，这一轮需要先恢复再继续。"
+  });
+  assert.match(prompt, /恢复说明：旧 thread 已经被归档了，这一轮需要先恢复再继续。/);
+});
+
+test("isMissingRolloutThreadError recognizes archived-thread resume failures", () => {
+  assert.equal(
+    isMissingRolloutThreadError({ code: -32600, message: "no rollout found for thread id 019d1764-179b-7ad0-97f5-d9d28a4aba1f" }),
+    true
+  );
+  assert.equal(
+    isMissingRolloutThreadError({ code: -32000, message: "no rollout found for thread id 019d1764-179b-7ad0-97f5-d9d28a4aba1f" }),
+    false
+  );
+  assert.equal(
+    isMissingRolloutThreadError({ code: -32600, message: "permission denied" }),
+    false
+  );
+});
+
+test("resumeThreadWithFallback unarchives and resumes an archived thread before falling back", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (method === "thread/resume" && calls.filter((entry) => entry.method === "thread/resume").length === 1) {
+        throw { code: -32600, message: "no rollout found for thread id thread-old" };
+      }
+      if (method === "thread/unarchive") {
+        return { thread: { id: params.threadId } };
+      }
+      if (method === "thread/resume") {
+        return { thread: { id: params.threadId } };
+      }
+      throw new Error(`unexpected method: ${method}`);
+    }
+  };
+
+  const result = await resumeThreadWithFallback(client, "thread-old", { automation: { codex_model: "gpt-test" } });
+  assert.deepEqual(result, {
+    threadId: "thread-old",
+    startingNewThread: false,
+    fallbackFromThreadId: "",
+    recoveredFromArchive: true,
+    recoveryError: "{\"code\":-32600,\"message\":\"no rollout found for thread id thread-old\"}",
+    unarchiveError: ""
+  });
+  assert.deepEqual(
+    calls.map((entry) => entry.method),
+    ["thread/resume", "thread/unarchive", "thread/resume"]
+  );
+});
+
+test("resumeThreadWithFallback falls back to a new thread only after unarchive recovery fails", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (method === "thread/resume") {
+        throw { code: -32600, message: "no rollout found for thread id thread-old" };
+      }
+      if (method === "thread/unarchive") {
+        throw new Error("thread missing");
+      }
+      if (method === "thread/start") {
+        return { thread: { id: "thread-new" } };
+      }
+      throw new Error(`unexpected method: ${method}`);
+    }
+  };
+
+  const result = await resumeThreadWithFallback(client, "thread-old", { automation: { codex_model: "gpt-test" } });
+  assert.equal(result.threadId, "thread-new");
+  assert.equal(result.startingNewThread, true);
+  assert.equal(result.fallbackFromThreadId, "thread-old");
+  assert.equal(result.recoveredFromArchive, false);
+  assert.match(result.recoveryError, /no rollout found/);
+  assert.match(result.unarchiveError, /thread missing/);
+  assert.deepEqual(
+    calls.map((entry) => entry.method),
+    ["thread/resume", "thread/unarchive", "thread/start"]
+  );
+});
+
+test("resumeThreadWithFallback rethrows unrelated resume failures", async () => {
+  const client = {
+    async request(method) {
+      if (method === "thread/resume") {
+        throw new Error("permission denied");
+      }
+      throw new Error(`unexpected method: ${method}`);
+    }
+  };
+
+  await assert.rejects(
+    () => resumeThreadWithFallback(client, "thread-old", { automation: { codex_model: "gpt-test" } }),
+    /permission denied/
+  );
 });
 
 test("listIncomingDedupKeys includes both message id and realtime event id", () => {
