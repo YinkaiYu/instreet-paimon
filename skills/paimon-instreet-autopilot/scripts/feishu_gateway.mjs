@@ -55,6 +55,23 @@ function appendJsonl(filePath, payload) {
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`);
 }
 
+function describeError(error) {
+  if (error instanceof Error) {
+    return error.stack || error.message || String(error);
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error && typeof error === "object") {
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
+}
+
 function readJsonFile(filePath, fallback) {
   if (!fs.existsSync(filePath)) {
     return fallback;
@@ -119,6 +136,7 @@ function ensureSession(store, chatId) {
       thread_id: "",
       mode: "default",
       active_turn_id: "",
+      provisional_turn_id: "",
       status: "idle",
       status_card_message_id: "",
       status_card_kind: "",
@@ -178,6 +196,44 @@ function lookupMessageThreadBinding(messageId) {
   }
   const store = readMessageThreadIndex();
   return store.messages[messageId] || null;
+}
+
+function rewriteIndexedTurnBindings(threadId, fromTurnId, toTurnId) {
+  if (!threadId || !fromTurnId || !toTurnId || fromTurnId === toTurnId) {
+    return 0;
+  }
+  const store = readMessageThreadIndex();
+  let changed = 0;
+  for (const entry of Object.values(store.messages || {})) {
+    if (entry?.thread_id !== threadId || entry?.turn_id !== fromTurnId) {
+      continue;
+    }
+    entry.turn_id = toTurnId;
+    changed += 1;
+  }
+  if (changed) {
+    writeMessageThreadIndex(store);
+  }
+  return changed;
+}
+
+function rewritePendingRequestTurnBindings(fromTurnId, toTurnId) {
+  if (!fromTurnId || !toTurnId || fromTurnId === toTurnId) {
+    return 0;
+  }
+  const store = readPendingRequestStore();
+  let changed = 0;
+  for (const entry of Object.values(store.requests || {})) {
+    if (entry?.turn_id !== fromTurnId) {
+      continue;
+    }
+    entry.turn_id = toTurnId;
+    changed += 1;
+  }
+  if (changed) {
+    writePendingRequestStore(store);
+  }
+  return changed;
 }
 
 function removePendingRequest(requestId) {
@@ -2004,6 +2060,21 @@ function scheduleSessionCardRefresh(config, flags, chatId) {
   sessionStatusTimers.set(chatId, timer);
 }
 
+async function settleSessionCardIfNeeded(config, flags, chatId, status = "done", phrase = "") {
+  if (!chatId) {
+    return false;
+  }
+  const session = ensureSession(readSessionStore(), chatId);
+  if (!session.status_card_message_id || !["working", "waiting"].includes(session.status_card_kind)) {
+    return false;
+  }
+  clearSessionStatusTimer(chatId);
+  await upsertSessionCard(config, chatId, status, flags, {
+    phrase: phrase || pickStatusPhrase(status, session.status_card_phrase)
+  });
+  return true;
+}
+
 function getAppServerTurnKey(threadId, turnId) {
   return `${threadId}:${turnId}`;
 }
@@ -2021,8 +2092,12 @@ function ensureAppServerTurnState(threadId, turnId, chatId = "") {
       buffer: "",
       sentMessages: [],
       fullText: "",
+      planBuffer: "",
+      fullPlanText: "",
+      planItemIds: [],
       userMessages: [],
       flushTimer: null,
+      planFlushTimer: null,
       lastAgentTextAt: 0,
       lastPlanSummary: ""
     });
@@ -2042,6 +2117,14 @@ function clearTurnFlushTimer(turnState) {
   turnState.flushTimer = null;
 }
 
+function clearTurnPlanFlushTimer(turnState) {
+  if (!turnState?.planFlushTimer) {
+    return;
+  }
+  clearTimeout(turnState.planFlushTimer);
+  turnState.planFlushTimer = null;
+}
+
 function dropAppServerTurnState(threadId, turnId) {
   if (!appServerRuntime) {
     return;
@@ -2051,24 +2134,65 @@ function dropAppServerTurnState(threadId, turnId) {
   if (state?.flushTimer) {
     clearTimeout(state.flushTimer);
   }
+  if (state?.planFlushTimer) {
+    clearTimeout(state.planFlushTimer);
+  }
   appServerRuntime.turnStates.delete(key);
 }
 
-async function flushTurnStateText(config, flags, turnState, force = false) {
+function migrateAppServerTurnState(threadId, fromTurnId, toTurnId, chatId = "") {
+  if (!appServerRuntime || !threadId || !fromTurnId || !toTurnId || fromTurnId === toTurnId) {
+    return null;
+  }
+  const fromKey = getAppServerTurnKey(threadId, fromTurnId);
+  const toKey = getAppServerTurnKey(threadId, toTurnId);
+  const fromState = appServerRuntime.turnStates.get(fromKey);
+  const toState = appServerRuntime.turnStates.get(toKey);
+  if (!fromState && !toState) {
+    return null;
+  }
+  const merged = {
+    threadId,
+    turnId: toTurnId,
+    chatId: chatId || toState?.chatId || fromState?.chatId || "",
+    buffer: `${toState?.buffer || ""}${fromState?.buffer || ""}`,
+    sentMessages: [...(toState?.sentMessages || []), ...(fromState?.sentMessages || [])],
+    fullText: `${toState?.fullText || ""}${fromState?.fullText || ""}`,
+    planBuffer: `${toState?.planBuffer || ""}${fromState?.planBuffer || ""}`,
+    fullPlanText: `${toState?.fullPlanText || ""}${fromState?.fullPlanText || ""}`,
+    planItemIds: [...new Set([...(toState?.planItemIds || []), ...(fromState?.planItemIds || [])])],
+    userMessages: [...(toState?.userMessages || []), ...(fromState?.userMessages || [])],
+    flushTimer: toState?.flushTimer || fromState?.flushTimer || null,
+    planFlushTimer: toState?.planFlushTimer || fromState?.planFlushTimer || null,
+    lastAgentTextAt: Math.max(toState?.lastAgentTextAt || 0, fromState?.lastAgentTextAt || 0),
+    lastPlanSummary: toState?.lastPlanSummary || fromState?.lastPlanSummary || ""
+  };
+  appServerRuntime.turnStates.set(toKey, merged);
+  if (fromState?.flushTimer && fromState.flushTimer !== merged.flushTimer) {
+    clearTimeout(fromState.flushTimer);
+  }
+  if (fromState?.planFlushTimer && fromState.planFlushTimer !== merged.planFlushTimer) {
+    clearTimeout(fromState.planFlushTimer);
+  }
+  appServerRuntime.turnStates.delete(fromKey);
+  return merged;
+}
+
+async function flushTurnTextBuffer(config, flags, turnState, bufferKey, force = false) {
   if (!turnState?.chatId) {
     return;
   }
-  while (turnState.buffer && turnState.sentMessages?.length) {
-    const leadingPunctuation = turnState.buffer.match(/^\s*[\p{P}\p{S}]+\s*/u);
+  while (turnState[bufferKey] && turnState.sentMessages?.length) {
+    const leadingPunctuation = String(turnState[bufferKey] || "").match(/^\s*[\p{P}\p{S}]+\s*/u);
     if (!leadingPunctuation?.[0]?.trim()) {
       break;
     }
     const suffix = leadingPunctuation[0].trim();
     turnState.sentMessages[turnState.sentMessages.length - 1] = `${turnState.sentMessages[turnState.sentMessages.length - 1]}${suffix}`;
-    turnState.buffer = turnState.buffer.slice(leadingPunctuation[0].length);
+    turnState[bufferKey] = String(turnState[bufferKey] || "").slice(leadingPunctuation[0].length);
   }
-  const { chunks, remaining } = splitNaturalMessageChunks(turnState.buffer, force);
-  turnState.buffer = remaining;
+  const { chunks, remaining } = splitNaturalMessageChunks(turnState[bufferKey], force);
+  turnState[bufferKey] = remaining;
   if (!chunks.length) {
     return;
   }
@@ -2086,6 +2210,14 @@ async function flushTurnStateText(config, flags, turnState, force = false) {
   }
 }
 
+async function flushTurnStateText(config, flags, turnState, force = false) {
+  await flushTurnTextBuffer(config, flags, turnState, "buffer", force);
+}
+
+async function flushTurnPlanText(config, flags, turnState, force = false) {
+  await flushTurnTextBuffer(config, flags, turnState, "planBuffer", force);
+}
+
 function scheduleTurnStateFlush(config, flags, turnState) {
   clearTurnFlushTimer(turnState);
   turnState.flushTimer = setTimeout(() => {
@@ -2096,7 +2228,23 @@ function scheduleTurnStateFlush(config, flags, turnState) {
         chat_id: turnState.chatId,
         thread_id: turnState.threadId,
         turn_id: turnState.turnId,
-        error: String(error)
+        error: describeError(error)
+      });
+    });
+  }, getProgressFlushMs(config, flags));
+}
+
+function scheduleTurnPlanFlush(config, flags, turnState) {
+  clearTurnPlanFlushTimer(turnState);
+  turnState.planFlushTimer = setTimeout(() => {
+    flushTurnPlanText(config, flags, turnState, true).catch((error) => {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "turn-plan-flush-failed",
+        chat_id: turnState.chatId,
+        thread_id: turnState.threadId,
+        turn_id: turnState.turnId,
+        error: describeError(error)
       });
     });
   }, getProgressFlushMs(config, flags));
@@ -2123,7 +2271,7 @@ async function archiveThreadQuietly(threadId) {
       timestamp: new Date().toISOString(),
       type: "thread-archive-failed",
       thread_id: threadId,
-      error: String(error)
+      error: describeError(error)
     });
   }
 }
@@ -2165,7 +2313,7 @@ async function ensureAppServerRuntime(config, flags) {
         timestamp: new Date().toISOString(),
         type: "app-server-notification-failed",
         method: payload?.method || "",
-        error: String(error)
+        error: describeError(error)
       });
     });
   });
@@ -2180,7 +2328,7 @@ async function ensureAppServerRuntime(config, flags) {
         timestamp: new Date().toISOString(),
         type: "app-server-server-request-failed",
         method: payload?.method || "",
-        error: String(error)
+        error: describeError(error)
       });
     });
   });
@@ -2188,6 +2336,7 @@ async function ensureAppServerRuntime(config, flags) {
     const store = readSessionStore();
     for (const session of Object.values(store.chats || {})) {
       session.active_turn_id = "";
+      session.provisional_turn_id = "";
       session.pending_request_id = "";
       session.status = "idle";
       session.interrupted_at = new Date().toISOString();
@@ -2475,10 +2624,31 @@ async function handleAppServerNotification(config, flags, payload) {
   const turnId = payload?.params?.turnId || payload?.params?.turn?.id || "";
   const chatId = findChatIdByThreadId(threadId);
   if (payload.method === "turn/started" && chatId) {
-    updateSessionState(chatId, {
-      active_turn_id: payload.params.turn.id,
-      status: "working"
-    });
+    const startedTurnId = payload.params.turn.id;
+    const store = readSessionStore();
+    const session = ensureSession(store, chatId);
+    const provisionalTurnId = session.provisional_turn_id || "";
+    if (provisionalTurnId && provisionalTurnId !== startedTurnId) {
+      const migrated = migrateAppServerTurnState(threadId, provisionalTurnId, startedTurnId, chatId);
+      const rewrittenMessages = rewriteIndexedTurnBindings(threadId, provisionalTurnId, startedTurnId);
+      const rewrittenRequests = rewritePendingRequestTurnBindings(provisionalTurnId, startedTurnId);
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "app-server.turn-id-reconciled",
+        chat_id: chatId,
+        thread_id: threadId,
+        provisional_turn_id: provisionalTurnId,
+        authoritative_turn_id: startedTurnId,
+        migrated_runtime: Boolean(migrated),
+        rewritten_messages: rewrittenMessages,
+        rewritten_requests: rewrittenRequests
+      });
+    }
+    session.active_turn_id = startedTurnId;
+    session.provisional_turn_id = "";
+    session.status = "working";
+    session.updated_at = new Date().toISOString();
+    writeSessionStore(store);
     return;
   }
   if (payload.method === "item/agentMessage/delta") {
@@ -2492,13 +2662,41 @@ async function handleAppServerNotification(config, flags, payload) {
     scheduleTurnStateFlush(config, flags, turnState);
     return;
   }
+  if (payload.method === "item/plan/delta") {
+    const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
+    if (!turnState) {
+      return;
+    }
+    if (payload.params?.itemId && !turnState.planItemIds.includes(payload.params.itemId)) {
+      turnState.planItemIds.push(payload.params.itemId);
+    }
+    turnState.planBuffer += payload.params.delta || "";
+    turnState.fullPlanText += payload.params.delta || "";
+    await flushTurnPlanText(config, flags, turnState, false);
+    scheduleTurnPlanFlush(config, flags, turnState);
+    return;
+  }
   if (payload.method === "turn/plan/updated" && chatId) {
     const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
     const planSummary = JSON.stringify(payload.params.plan || []);
-    if (turnState && turnState.lastPlanSummary !== planSummary) {
+    if (
+      turnState
+      && turnState.lastPlanSummary !== planSummary
+      && !turnState.fullPlanText.trim()
+    ) {
       const session = ensureSession(readSessionStore(), chatId);
       await sendPlanSummaryUpdate(config, flags, chatId, payload.params.plan || [], payload.params.explanation || "", session);
       turnState.lastPlanSummary = planSummary;
+    } else if (turnState) {
+      turnState.lastPlanSummary = planSummary;
+    }
+    return;
+  }
+  if (payload.method === "item/completed") {
+    const itemId = payload.params?.itemId || payload.params?.item?.id || "";
+    const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
+    if (turnState && (turnState.planItemIds.includes(itemId) || itemId.endsWith("-plan"))) {
+      await flushTurnPlanText(config, flags, turnState, true);
     }
     return;
   }
@@ -2514,15 +2712,31 @@ async function handleAppServerNotification(config, flags, payload) {
     }
     const turnState = existingTurnState || ensureAppServerTurnState(completedThreadId, completedTurnId, finalChatId);
     await flushTurnStateText(config, flags, turnState, true);
-    const replyText = turnState?.sentMessages?.join("\n").trim() || turnState?.fullText?.trim() || "";
+    await flushTurnPlanText(config, flags, turnState, true);
+    const replyText = turnState?.sentMessages?.join("\n").trim()
+      || turnState?.fullText?.trim()
+      || turnState?.fullPlanText?.trim()
+      || "";
     const sessionStore = readSessionStore();
     const session = ensureSession(sessionStore, finalChatId);
+    const shouldReconcileProvisionalOnCompletion = Boolean(
+      session.provisional_turn_id
+      && session.active_turn_id === session.provisional_turn_id
+      && session.thread_id === completedThreadId
+      && session.provisional_turn_id !== completedTurnId
+    );
+    if (shouldReconcileProvisionalOnCompletion) {
+      migrateAppServerTurnState(completedThreadId, session.provisional_turn_id, completedTurnId, finalChatId);
+      rewriteIndexedTurnBindings(completedThreadId, session.provisional_turn_id, completedTurnId);
+      rewritePendingRequestTurnBindings(session.provisional_turn_id, completedTurnId);
+    }
     const sessionPendingRequest = readPendingRequest(session.pending_request_id);
     const shouldClearSessionPending = sessionPendingRequest?.turn_id === completedTurnId;
-    const shouldApplySessionUpdate = shouldApplyTurnCompletionToSession(session, completedTurnId);
+    const shouldApplySessionUpdate = shouldApplyTurnCompletionToSession(session, completedTurnId) || shouldReconcileProvisionalOnCompletion;
     removePendingRequestsForTurn(completedTurnId);
     if (shouldApplySessionUpdate) {
       session.active_turn_id = "";
+      session.provisional_turn_id = "";
       if (shouldClearSessionPending || !sessionPendingRequest) {
         session.pending_request_id = "";
       }
@@ -2555,8 +2769,13 @@ async function handleAppServerNotification(config, flags, payload) {
         });
       }
       clearSessionStatusTimer(finalChatId);
-    } else if (shouldClearSessionPending || (session.pending_request_id && !sessionPendingRequest)) {
-      session.pending_request_id = "";
+    } else if (shouldClearSessionPending || (session.pending_request_id && !sessionPendingRequest) || session.provisional_turn_id === completedTurnId) {
+      if (shouldClearSessionPending || (session.pending_request_id && !sessionPendingRequest)) {
+        session.pending_request_id = "";
+      }
+      if (session.provisional_turn_id === completedTurnId) {
+        session.provisional_turn_id = "";
+      }
       writeSessionStore(sessionStore);
     }
     try {
@@ -2572,7 +2791,7 @@ async function handleAppServerNotification(config, flags, payload) {
         type: "turn-completed-followup-failed",
         chat_id: finalChatId,
         turn_id: completedTurn.id || "",
-        error: String(error)
+        error: describeError(error)
       });
     }
     dropAppServerTurnState(completedThreadId, completedTurnId);
@@ -2641,7 +2860,7 @@ async function startAppServerTurnForEvent(event, config, flags, session, modeOve
       type: "memory-snapshot-failed",
       chat_id: event.chat_id,
       message_id: event.message_id,
-      error: String(error)
+      error: describeError(error)
     });
   }
   const latestSession = ensureSession(readSessionStore(), event.chat_id);
@@ -2663,17 +2882,27 @@ async function startAppServerTurnForEvent(event, config, flags, session, modeOve
     effort: config.automation?.codex_reasoning_effort || null,
     collaborationMode: buildCollaborationModePayload(config, desiredMode)
   });
-  const turnState = ensureAppServerTurnState(threadId, turn.turn.id, event.chat_id);
+  await settleSessionCardIfNeeded(config, flags, event.chat_id, "done");
+  const provisionalTurnId = turn.turn.id;
+  const currentSession = ensureSession(readSessionStore(), event.chat_id);
+  const authoritativeTurnId = (currentSession.thread_id === threadId && currentSession.active_turn_id && currentSession.active_turn_id !== provisionalTurnId)
+    ? currentSession.active_turn_id
+    : provisionalTurnId;
+  if (authoritativeTurnId !== provisionalTurnId) {
+    migrateAppServerTurnState(threadId, provisionalTurnId, authoritativeTurnId, event.chat_id);
+  }
+  const turnState = ensureAppServerTurnState(threadId, authoritativeTurnId, event.chat_id);
   turnState.userMessages.push(event);
   indexMessageToThread(event.message_id, {
     chat_id: event.chat_id,
     thread_id: threadId,
-    turn_id: turn.turn.id,
+    turn_id: authoritativeTurnId,
     message_type: "user"
   });
   updateSessionState(event.chat_id, {
     thread_id: threadId,
-    active_turn_id: turn.turn.id,
+    active_turn_id: authoritativeTurnId,
+    provisional_turn_id: authoritativeTurnId === provisionalTurnId ? provisionalTurnId : "",
     mode: desiredMode,
     status: "working",
     last_user_message_at: event.received_at,
@@ -2699,11 +2928,23 @@ async function steerAppServerTurn(event, config, flags, session) {
     mode: session.mode || "default",
     isSteer: true
   });
-  await runtime.client.request("turn/steer", {
-    threadId: session.thread_id,
-    expectedTurnId: session.active_turn_id,
-    input: buildTurnInputItems(contextText)
-  });
+  try {
+    await runtime.client.request("turn/steer", {
+      threadId: session.thread_id,
+      expectedTurnId: session.active_turn_id,
+      input: buildTurnInputItems(contextText)
+    });
+  } catch (error) {
+    appendJsonl(errorsPath, {
+      timestamp: new Date().toISOString(),
+      type: "turn-steer-failed",
+      chat_id: event.chat_id,
+      thread_id: session.thread_id,
+      turn_id: session.active_turn_id,
+      error: describeError(error)
+    });
+    return false;
+  }
   indexMessageToThread(event.message_id, {
     chat_id: event.chat_id,
     thread_id: session.thread_id,
@@ -2713,6 +2954,7 @@ async function steerAppServerTurn(event, config, flags, session) {
   updateSessionState(event.chat_id, {
     last_user_message_at: event.received_at
   });
+  return true;
 }
 
 async function interruptAndRestartTurn(event, config, flags, session, nextMode, remainderText, forceNewThread = false) {
@@ -2730,12 +2972,14 @@ async function interruptAndRestartTurn(event, config, flags, session, nextMode, 
         chat_id: event.chat_id,
         thread_id: session.thread_id,
         turn_id: session.active_turn_id,
-        error: String(error)
+        error: describeError(error)
       });
     }
   }
+  await settleSessionCardIfNeeded(config, flags, event.chat_id, "done");
   updateSessionState(event.chat_id, {
     active_turn_id: "",
+    provisional_turn_id: "",
     mode: nextMode,
     interrupted_at: new Date().toISOString(),
     last_user_message_at: event.received_at
@@ -2801,7 +3045,20 @@ async function processEventWithAppServer(event, config, flags) {
       );
       return;
     }
-    await steerAppServerTurn(event, config, flags, session);
+    const steered = await steerAppServerTurn(event, config, flags, session);
+    if (steered) {
+      return;
+    }
+    await settleSessionCardIfNeeded(config, flags, event.chat_id, "done");
+    updateSessionState(event.chat_id, {
+      active_turn_id: "",
+      provisional_turn_id: "",
+      pending_request_id: "",
+      status: "idle",
+      interrupted_at: new Date().toISOString(),
+      last_user_message_at: event.received_at
+    });
+    await startAppServerTurnForEvent(event, config, flags, ensureSession(readSessionStore(), event.chat_id), session.mode || "", false);
     return;
   }
   if ((modeDirective.mode || modeDirective.newThread) && !modeDirective.remainder) {
@@ -3659,7 +3916,7 @@ async function handleIncomingMessage(event, config, flags) {
       type: "report-target-command-failed",
       chat_id: event.chat_id,
       message_id: event.message_id,
-      error: String(error)
+      error: describeError(error)
     });
   }
 
@@ -3689,7 +3946,7 @@ async function handleIncomingMessage(event, config, flags) {
           chat_id: event.chat_id,
           message_id: event.message_id,
           emoji_type: getReactionEmojiType(config, flags),
-          error: String(error)
+          error: describeError(error)
         });
       });
   }
@@ -3705,7 +3962,7 @@ async function handleIncomingMessage(event, config, flags) {
       appendJsonl(errorsPath, {
         timestamp: new Date().toISOString(),
         type: "auto-ack",
-        error: String(error),
+        error: describeError(error),
         event
       });
     }
@@ -3745,7 +4002,7 @@ async function startWebsocket(config, flags) {
         appendJsonl(errorsPath, {
           timestamp: new Date().toISOString(),
           type: "im.message.receive_v1.parse-failed",
-          error: String(error)
+          error: describeError(error)
         });
         return;
       }
@@ -3755,7 +4012,7 @@ async function startWebsocket(config, flags) {
           type: "im.message.receive_v1.failed",
           chat_id: event?.chat_id || "",
           message_id: event?.message_id || "",
-          error: String(error)
+          error: describeError(error)
         });
       });
     },
