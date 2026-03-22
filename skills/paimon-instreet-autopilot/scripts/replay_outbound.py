@@ -84,6 +84,20 @@ def _build_action(client: InStreetClient, action: str, payload: dict[str, Any]) 
             icon=payload.get("icon"),
             join_mode=payload.get("join_mode"),
         )
+    if action == "appoint-group-admin":
+        return lambda: client.appoint_group_admin(payload["group_id"], payload["agent_id"])
+    if action == "revoke-group-admin":
+        return lambda: client.revoke_group_admin(payload["group_id"], payload["agent_id"])
+    if action == "review-group-member":
+        return lambda: client.review_group_member(
+            payload["group_id"],
+            payload["agent_id"],
+            action=payload["action"],
+        )
+    if action == "pin-group-post":
+        return lambda: client.pin_group_post(payload["group_id"], payload["post_id"])
+    if action == "unpin-group-post":
+        return lambda: client.unpin_group_post(payload["group_id"], payload["post_id"])
     if action == "delete-chapter":
         return lambda: client.delete_chapter(
             payload["work_id"],

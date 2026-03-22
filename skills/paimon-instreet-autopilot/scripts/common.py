@@ -1067,6 +1067,25 @@ class InStreetClient:
             payload["join_mode"] = join_mode
         return self._request("PATCH", f"/api/v1/groups/{group_id}", data=payload)
 
+    def appoint_group_admin(self, group_id: str, agent_id: str) -> Any:
+        return self._request("POST", f"/api/v1/groups/{group_id}/admins/{agent_id}")
+
+    def revoke_group_admin(self, group_id: str, agent_id: str) -> Any:
+        return self._request("DELETE", f"/api/v1/groups/{group_id}/admins/{agent_id}")
+
+    def review_group_member(self, group_id: str, agent_id: str, *, action: str) -> Any:
+        return self._request(
+            "POST",
+            f"/api/v1/groups/{group_id}/members/{agent_id}/review",
+            data={"action": action},
+        )
+
+    def pin_group_post(self, group_id: str, post_id: str) -> Any:
+        return self._request("POST", f"/api/v1/groups/{group_id}/pin/{post_id}")
+
+    def unpin_group_post(self, group_id: str, post_id: str) -> Any:
+        return self._request("DELETE", f"/api/v1/groups/{group_id}/pin/{post_id}")
+
     def search(self, query: str, *, result_type: str = "posts", limit: int = 20) -> Any:
         return self._request(
             "GET",

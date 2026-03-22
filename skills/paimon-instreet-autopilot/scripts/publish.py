@@ -320,6 +320,27 @@ def build_parser() -> argparse.ArgumentParser:
     update_group.add_argument("--icon")
     update_group.add_argument("--join-mode", choices=["open", "approval"])
 
+    appoint_group_admin = subparsers.add_parser("appoint-group-admin")
+    appoint_group_admin.add_argument("--group-id", required=True)
+    appoint_group_admin.add_argument("--agent-id", required=True)
+
+    revoke_group_admin = subparsers.add_parser("revoke-group-admin")
+    revoke_group_admin.add_argument("--group-id", required=True)
+    revoke_group_admin.add_argument("--agent-id", required=True)
+
+    review_group_member = subparsers.add_parser("review-group-member")
+    review_group_member.add_argument("--group-id", required=True)
+    review_group_member.add_argument("--agent-id", required=True)
+    review_group_member.add_argument("--action", required=True, choices=["approve", "reject"])
+
+    pin_group_post = subparsers.add_parser("pin-group-post")
+    pin_group_post.add_argument("--group-id", required=True)
+    pin_group_post.add_argument("--post-id", required=True)
+
+    unpin_group_post = subparsers.add_parser("unpin-group-post")
+    unpin_group_post.add_argument("--group-id", required=True)
+    unpin_group_post.add_argument("--post-id", required=True)
+
     chapter = subparsers.add_parser("chapter")
     chapter.add_argument("--work-id", required=True)
     chapter.add_argument("--title", required=True)
@@ -380,6 +401,12 @@ def _default_dedupe_key(command: str, payload: dict) -> str:
         return payload.get("work_id", "")
     if command == "update-group":
         return f"{payload.get('group_id','')}:{payload_digest(payload)[:10]}"
+    if command in {"appoint-group-admin", "revoke-group-admin"}:
+        return f"{payload.get('group_id','')}:{payload.get('agent_id','')}:{command}"
+    if command == "review-group-member":
+        return f"{payload.get('group_id','')}:{payload.get('agent_id','')}:{payload.get('action','')}"
+    if command in {"pin-group-post", "unpin-group-post"}:
+        return f"{payload.get('group_id','')}:{payload.get('post_id','')}:{command}"
     if command == "chapter":
         return f"{payload.get('work_id')}:{payload.get('title','')}"
     if command == "update-chapter":
@@ -535,6 +562,21 @@ def main() -> None:
             icon=args.icon,
             join_mode=args.join_mode,
         )
+    elif args.command == "appoint-group-admin":
+        payload = {"group_id": args.group_id, "agent_id": args.agent_id}
+        action = lambda: client.appoint_group_admin(args.group_id, args.agent_id)
+    elif args.command == "revoke-group-admin":
+        payload = {"group_id": args.group_id, "agent_id": args.agent_id}
+        action = lambda: client.revoke_group_admin(args.group_id, args.agent_id)
+    elif args.command == "review-group-member":
+        payload = {"group_id": args.group_id, "agent_id": args.agent_id, "action": args.action}
+        action = lambda: client.review_group_member(args.group_id, args.agent_id, action=args.action)
+    elif args.command == "pin-group-post":
+        payload = {"group_id": args.group_id, "post_id": args.post_id}
+        action = lambda: client.pin_group_post(args.group_id, args.post_id)
+    elif args.command == "unpin-group-post":
+        payload = {"group_id": args.group_id, "post_id": args.post_id}
+        action = lambda: client.unpin_group_post(args.group_id, args.post_id)
     elif args.command == "chapter":
         content = _read_content(args)
         payload = {"work_id": args.work_id, "title": args.title, "content": content}

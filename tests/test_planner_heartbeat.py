@@ -941,6 +941,90 @@ class SharedForumBudgetTests(unittest.TestCase):
             result = json.loads(buffer.getvalue())
             self.assertEqual("deferred-local-budget", result["results"][0]["status"])
 
+    def test_publish_appoint_group_admin_dispatches_to_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._configure_runtime_paths(root)
+            self._patch_attr(publish, "ensure_runtime_dirs", lambda: None)
+            self._patch_attr(publish, "load_config", self._fake_config)
+
+            calls: list[tuple[str, str]] = []
+
+            class FakeClient:
+                def appoint_group_admin(self, group_id: str, agent_id: str) -> dict:
+                    calls.append((group_id, agent_id))
+                    return {"success": True, "message": "appointed"}
+
+            self._patch_attr(publish, "InStreetClient", lambda config: FakeClient())
+            self._patch_attr(
+                publish,
+                "run_outbound_action",
+                lambda channel, action, dedupe_key, payload, fn, **kwargs: (
+                    fn(),
+                    {"channel": channel, "action": action, "dedupe_key": dedupe_key, "payload": payload},
+                    False,
+                ),
+            )
+            argv = sys.argv[:]
+            self.addCleanup(setattr, sys, "argv", argv)
+            sys.argv = [
+                "publish.py",
+                "appoint-group-admin",
+                "--group-id",
+                "group-1",
+                "--agent-id",
+                "agent-1",
+            ]
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                publish.main()
+            self.assertEqual([("group-1", "agent-1")], calls)
+            self.assertIn("appointed", buffer.getvalue())
+
+    def test_group_management_client_methods_use_expected_endpoints(self) -> None:
+        client = common.InStreetClient(self._fake_config())
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_request(method: str, path: str, *, data=None, **kwargs):
+            calls.append((method, path, data))
+            return {"success": True}
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        client.appoint_group_admin("group-1", "agent-1")
+        client.revoke_group_admin("group-1", "agent-1")
+        client.review_group_member("group-1", "agent-2", action="approve")
+        client.pin_group_post("group-1", "post-1")
+        client.unpin_group_post("group-1", "post-1")
+
+        self.assertEqual(
+            [
+                ("POST", "/api/v1/groups/group-1/admins/agent-1", None),
+                ("DELETE", "/api/v1/groups/group-1/admins/agent-1", None),
+                ("POST", "/api/v1/groups/group-1/members/agent-2/review", {"action": "approve"}),
+                ("POST", "/api/v1/groups/group-1/pin/post-1", None),
+                ("DELETE", "/api/v1/groups/group-1/pin/post-1", None),
+            ],
+            calls,
+        )
+
+    def test_replay_build_action_supports_pin_group_post(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class FakeClient:
+            def pin_group_post(self, group_id: str, post_id: str) -> dict:
+                calls.append((group_id, post_id))
+                return {"success": True}
+
+        action = replay_outbound._build_action(
+            FakeClient(),  # type: ignore[arg-type]
+            "pin-group-post",
+            {"group_id": "group-1", "post_id": "post-1"},
+        )
+
+        self.assertEqual({"success": True}, action())
+        self.assertEqual([("group-1", "post-1")], calls)
+
     def test_legacy_comment_daily_limit_does_not_keep_global_budget_frozen(self) -> None:
         config = self._fake_config()
         state = {
@@ -1071,10 +1155,14 @@ class PrimaryPublishFlowTests(unittest.TestCase):
         client = DummyClient()
         original_sleep = heartbeat.time.sleep
         original_save_cycle = heartbeat._save_primary_cycle_state
+        original_run_outbound_action = heartbeat.run_outbound_action
         sleep_calls: list[float] = []
         try:
             heartbeat.time.sleep = lambda seconds: sleep_calls.append(seconds)
             heartbeat._save_primary_cycle_state = lambda state: None
+            heartbeat.run_outbound_action = (
+                lambda channel, action, dedupe_key, payload, fn, **kwargs: (fn(), {"status": "success"}, False)
+            )
             action, events, _state, mode = heartbeat._publish_primary_action(
                 config,
                 client,
@@ -1110,6 +1198,7 @@ class PrimaryPublishFlowTests(unittest.TestCase):
         finally:
             heartbeat.time.sleep = original_sleep
             heartbeat._save_primary_cycle_state = original_save_cycle
+            heartbeat.run_outbound_action = original_run_outbound_action
 
         self.assertEqual("new", mode)
         self.assertEqual("create-post", action["kind"])
