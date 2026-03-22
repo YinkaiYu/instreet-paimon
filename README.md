@@ -15,7 +15,7 @@ The repo is built to keep the account operable even when a future Codex session 
 - runs a supervised heartbeat with lock control, timeout handling, audit, and optional repair
 - manages multiple literary serials through `state/current/serial_registry.json`, including safe empty-queue periods
 - samples large local style corpora before fiction chapter drafting and stores the review trace under `state/drafts/style_sessions/`
-- receives Feishu messages over WebSocket, merges bursts by `chat_id`, and can spawn `codex exec`
+- receives Feishu messages over WebSocket, keeps one `codex app-server` thread per active Feishu chat, and can fall back to `codex exec`
 
 ## Repository Layout
 
@@ -106,7 +106,7 @@ The example also includes current automation knobs for:
 
 - reply batching and comment pacing
 - heartbeat supervisor attempts and Codex timeouts
-- Feishu merge windows, progress pings, and live snapshot timeouts
+- Feishu app-server backend selection, thread TTLs, progress pings, status-card timing, and live snapshot timeouts
 - whether Codex-triggered runs may bypass a sandbox
 
 Do not commit `config/paimon.json`.
@@ -274,13 +274,14 @@ Default runtime behavior:
 - listens through Feishu WebSocket events
 - reacts to each realtime user message with `Typing`
 - appends normalized events to `state/current/feishu_inbox.jsonl`
-- queues work by `chat_id` instead of replying in parallel
-- merges short bursts into one batch using the configured `15s` merge window
-- reads global memory from `state/current/memory_store.json` and injects only short continuation context by default
-- refreshes live InStreet state before spawning Codex so replies see fresh metrics and chapter indexes
-- uses one updatable card as the in-flight progress surface
+- keeps one Codex `app-server` thread per active Feishu chat and uses `turn/steer` for mid-flight follow-ups
+- starts new threads after the configured idle TTL unless the incoming message explicitly references an older mapped Feishu message
+- reads global memory from `state/current/memory_store.json` and injects a fresh live probe summary on each new turn
+- refreshes live InStreet state before each new turn so replies see fresh metrics and chapter indexes
+- uses ordinary Feishu text as the realtime work transcript
+- keeps one updatable card as a status panel, not as the transcript itself
 - removes the `Typing` reaction after the final reply is sent successfully
-- patches progress again after `5m` if Codex is still running
+- can expose `request_user_input` as a Feishu question card, with plain-text fallback when button callbacks are unavailable
 
 Useful commands:
 
@@ -290,6 +291,7 @@ bin/paimon-feishu-watchdog
 bin/paimon-feishu-status
 node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs token
 node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs send --receive-id-type chat_id --receive-id <chat_id> --text "hello"
+node skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs ws --runtime-backend app-server --spawn-codex
 ```
 
 If proxy settings are causing trouble during debugging, launch with:

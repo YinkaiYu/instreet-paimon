@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import process from "node:process";
+import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -26,11 +28,18 @@ const seenMessagesPath = path.join(stateCurrentDir, "feishu_seen_messages.json")
 const queuePath = path.join(stateCurrentDir, "feishu_queue.json");
 const batchesPath = path.join(stateCurrentDir, "feishu_batches.jsonl");
 const reportTargetPath = path.join(stateCurrentDir, "feishu_report_target.json");
+const sessionsPath = path.join(stateCurrentDir, "feishu_sessions.json");
+const messageThreadIndexPath = path.join(stateCurrentDir, "feishu_message_thread_index.json");
+const pendingRequestsPath = path.join(stateCurrentDir, "feishu_pending_requests.json");
+const statusPhrasesPath = path.join(repoRoot, "skills", "paimon-instreet-autopilot", "assets", "feishu-status-phrases.json");
 const chatTimers = new Map();
 const processingChats = new Set();
+const sessionStatusTimers = new Map();
 let queueSweepTimer = null;
 let cachedCodexExecutable = null;
 let cachedPythonExecutable = null;
+let cachedStatusPhrases = null;
+let appServerRuntime = null;
 
 function ensureDirs() {
   for (const dir of [stateCurrentDir, tmpDir]) {
@@ -71,6 +80,155 @@ function clearReportTargetState() {
   if (fs.existsSync(reportTargetPath)) {
     fs.unlinkSync(reportTargetPath);
   }
+}
+
+function readSessionStore() {
+  return readJsonFile(sessionsPath, { version: 1, chats: {} });
+}
+
+function writeSessionStore(payload) {
+  writeJsonFile(sessionsPath, payload);
+}
+
+function readMessageThreadIndex() {
+  return readJsonFile(messageThreadIndexPath, { version: 1, messages: {} });
+}
+
+function writeMessageThreadIndex(payload) {
+  writeJsonFile(messageThreadIndexPath, payload);
+}
+
+function readPendingRequestStore() {
+  return readJsonFile(pendingRequestsPath, { version: 1, requests: {} });
+}
+
+function writePendingRequestStore(payload) {
+  writeJsonFile(pendingRequestsPath, payload);
+}
+
+function ensureSession(store, chatId) {
+  if (!store.chats[chatId]) {
+    store.chats[chatId] = {
+      chat_id: chatId,
+      thread_id: "",
+      mode: "default",
+      active_turn_id: "",
+      status: "idle",
+      status_card_message_id: "",
+      status_card_kind: "",
+      status_card_phrase: "",
+      pending_request_id: "",
+      last_user_message_at: "",
+      last_agent_message_at: "",
+      last_completed_at: "",
+      last_referenced_message_id: "",
+      last_thread_preview: "",
+      interrupted_at: ""
+    };
+  }
+  return store.chats[chatId];
+}
+
+function updateSessionState(chatId, updater) {
+  const store = readSessionStore();
+  const session = ensureSession(store, chatId);
+  const patch = typeof updater === "function" ? updater(session) : updater;
+  if (patch && typeof patch === "object") {
+    Object.assign(session, patch);
+  }
+  session.updated_at = new Date().toISOString();
+  writeSessionStore(store);
+  return session;
+}
+
+function findChatIdByThreadId(threadId) {
+  if (!threadId) {
+    return "";
+  }
+  const store = readSessionStore();
+  for (const [chatId, session] of Object.entries(store.chats || {})) {
+    if (session?.thread_id === threadId) {
+      return chatId;
+    }
+  }
+  return "";
+}
+
+function indexMessageToThread(messageId, payload) {
+  if (!messageId) {
+    return;
+  }
+  const store = readMessageThreadIndex();
+  store.messages[messageId] = {
+    ...payload,
+    indexed_at: new Date().toISOString()
+  };
+  writeMessageThreadIndex(store);
+}
+
+function lookupMessageThreadBinding(messageId) {
+  if (!messageId) {
+    return null;
+  }
+  const store = readMessageThreadIndex();
+  return store.messages[messageId] || null;
+}
+
+function removePendingRequest(requestId) {
+  if (!requestId) {
+    return null;
+  }
+  const store = readPendingRequestStore();
+  const entry = store.requests[requestId] || null;
+  if (!entry) {
+    return null;
+  }
+  delete store.requests[requestId];
+  writePendingRequestStore(store);
+  return entry;
+}
+
+function upsertPendingRequest(requestId, payload) {
+  if (!requestId) {
+    return null;
+  }
+  const store = readPendingRequestStore();
+  const existing = store.requests[requestId] || {};
+  store.requests[requestId] = {
+    ...existing,
+    ...payload,
+    request_id: requestId,
+    updated_at: new Date().toISOString()
+  };
+  writePendingRequestStore(store);
+  return store.requests[requestId];
+}
+
+function readPendingRequest(requestId) {
+  if (!requestId) {
+    return null;
+  }
+  const store = readPendingRequestStore();
+  return store.requests[requestId] || null;
+}
+
+function removePendingRequestsForTurn(turnId) {
+  if (!turnId) {
+    return [];
+  }
+  const store = readPendingRequestStore();
+  const removed = [];
+  for (const [requestId, entry] of Object.entries(store.requests || {})) {
+    if (entry?.turn_id !== turnId) {
+      continue;
+    }
+    removed.push(entry);
+    delete store.requests[requestId];
+  }
+  if (removed.length) {
+    writePendingRequestStore(store);
+  }
+  return removed;
 }
 
 function resolvePythonExecutable() {
@@ -299,19 +457,99 @@ function buildStatusCard(text, options = {}) {
   const title =
     status === "done"
       ? "派蒙回复完成"
+      : status === "waiting"
+        ? "派蒙等待你的选择"
       : status === "error"
         ? "派蒙思考中断"
-        : "派蒙正在思考";
+        : "派蒙正在工作";
   const template =
     status === "done"
       ? "green"
+      : status === "waiting"
+        ? "orange"
       : status === "error"
         ? "red"
         : "blue";
   const noteParts = [
-    status === "done" ? "状态：已完成" : status === "error" ? "状态：稍后重试" : "状态：思考中",
+    status === "done"
+      ? "状态：已完成"
+      : status === "waiting"
+        ? "状态：等待选择"
+        : status === "error"
+          ? "状态：稍后重试"
+          : "状态：处理中",
     `更新时间：${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`
   ];
+  const elements = [
+    {
+      tag: "markdown",
+      content: clampCardText(text)
+    }
+  ];
+  const questions = Array.isArray(options.questions) ? options.questions : [];
+  const answers = options.answers || {};
+  const allowActions = options.allowActions !== false;
+  if (questions.length) {
+    for (const question of questions) {
+      elements.push({
+        tag: "markdown",
+        content: clampCardText([
+          `**${question.header || "问题"}**`,
+          question.question || "",
+          answers?.[question.id]?.answers?.length ? `已选：${answers[question.id].answers.join(" / ")}` : ""
+        ].filter(Boolean).join("\n"))
+      });
+      const actionItems = [];
+      if (allowActions && Array.isArray(question.options) && question.options.length) {
+        for (const [index, option] of question.options.entries()) {
+          actionItems.push({
+            tag: "button",
+            type: index === 0 ? "primary" : "default",
+            text: {
+              tag: "plain_text",
+              content: option.label
+            },
+            value: {
+              action: "request-user-input-answer",
+              chat_id: options.chatId || "",
+              request_id: options.requestId || "",
+              question_id: question.id,
+              answer: option.label
+            }
+          });
+        }
+      }
+      if (actionItems.length) {
+        elements.push({
+          tag: "action",
+          actions: actionItems
+        });
+      } else if (Array.isArray(question.options) && question.options.length) {
+        elements.push({
+          tag: "markdown",
+          content: clampCardText(question.options.map((option, index) => `${index + 1}. ${option.label}：${option.description}`).join("\n"))
+        });
+      }
+    }
+    elements.push({
+      tag: "note",
+      elements: [
+        {
+          tag: "plain_text",
+          content: "可以直接点按钮，也可以继续发文字补充。"
+        }
+      ]
+    });
+  }
+  elements.push({
+    tag: "note",
+    elements: [
+      {
+        tag: "plain_text",
+        content: noteParts.join(" | ")
+      }
+    ]
+  });
   return {
     config: {
       wide_screen_mode: true,
@@ -324,21 +562,7 @@ function buildStatusCard(text, options = {}) {
         content: title
       }
     },
-    elements: [
-      {
-        tag: "markdown",
-        content: clampCardText(text)
-      },
-      {
-        tag: "note",
-        elements: [
-          {
-            tag: "plain_text",
-            content: noteParts.join(" | ")
-          }
-        ]
-      }
-    ]
+    elements
   };
 }
 
@@ -405,6 +629,166 @@ async function deleteMessageReaction(config, messageId, reactionId, flags = {}) 
     null,
     flags
   );
+}
+
+class CodexAppServerClient extends EventEmitter {
+  constructor(config) {
+    super();
+    this.config = config;
+    this.process = null;
+    this.pending = new Map();
+    this.buffer = "";
+    this.nextId = 1;
+    this.readyPromise = null;
+  }
+
+  async ensureStarted() {
+    if (this.readyPromise) {
+      return this.readyPromise;
+    }
+    this.readyPromise = this.start().catch((error) => {
+      this.readyPromise = null;
+      throw error;
+    });
+    return this.readyPromise;
+  }
+
+  async start() {
+    if (this.process) {
+      return;
+    }
+    const codexBin = resolveCodexExecutable(this.config, {});
+    this.process = spawn(
+      codexBin,
+      ["app-server", "--listen", "stdio://", "--session-source", "cli"],
+      {
+        cwd: repoRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: process.env
+      }
+    );
+    this.process.stdout.on("data", (chunk) => this.handleStdout(chunk.toString()));
+    this.process.stderr.on("data", (chunk) => {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "app-server.stderr",
+        error: chunk.toString()
+      });
+    });
+    this.process.on("exit", (code, signal) => {
+      const pending = Array.from(this.pending.values());
+      this.pending.clear();
+      this.process = null;
+      this.readyPromise = null;
+      for (const entry of pending) {
+        entry.reject(new Error(`codex app-server exited code=${code} signal=${signal || ""}`.trim()));
+      }
+      this.emit("exit", { code, signal });
+    });
+    const initResult = await this.requestInternal("initialize", {
+      clientInfo: {
+        name: "paimon-feishu-gateway",
+        version: "0.1.0"
+      },
+      capabilities: {
+        experimentalApi: true,
+        optOutNotificationMethods: []
+      }
+    });
+    void initResult;
+    this.notify("initialized");
+  }
+
+  handleStdout(chunk) {
+    this.buffer += chunk;
+    const lines = this.buffer.split(/\n/);
+    this.buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(line);
+      } catch (error) {
+        appendJsonl(errorsPath, {
+          timestamp: new Date().toISOString(),
+          type: "app-server-parse-failed",
+          line,
+          error: String(error)
+        });
+        continue;
+      }
+      if (payload?.method && Object.prototype.hasOwnProperty.call(payload, "id")) {
+        this.emit("server-request", payload);
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, "id")) {
+        const pending = this.pending.get(payload.id);
+        if (!pending) {
+          continue;
+        }
+        this.pending.delete(payload.id);
+        if (payload.error) {
+          pending.reject(payload.error);
+        } else {
+          pending.resolve(payload.result);
+        }
+        continue;
+      }
+      if (payload?.method) {
+        this.emit("notification", payload);
+      }
+    }
+  }
+
+  sendPayload(payload) {
+    if (!this.process) {
+      throw new Error("codex app-server is not running");
+    }
+    this.process.stdin.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  requestInternal(method, params) {
+    const id = this.nextId++;
+    this.sendPayload({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params
+    });
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
+  }
+
+  async request(method, params) {
+    await this.ensureStarted();
+    return this.requestInternal(method, params);
+  }
+
+  notify(method, params = undefined) {
+    if (!this.process) {
+      return;
+    }
+    const payload = {
+      jsonrpc: "2.0",
+      method
+    };
+    if (params !== undefined) {
+      payload.params = params;
+    }
+    this.sendPayload(payload);
+  }
+
+  async respond(id, result) {
+    await this.ensureStarted();
+    this.sendPayload({
+      jsonrpc: "2.0",
+      id,
+      result
+    });
+  }
 }
 
 async function fetchMessagesPage(config, chatId, pageSize = 50, pageToken = "", flags = {}) {
@@ -641,6 +1025,158 @@ function truncateText(text, limit = 220) {
   return `${source.slice(0, limit - 3)}...`;
 }
 
+function loadStatusPhrases() {
+  if (cachedStatusPhrases) {
+    return cachedStatusPhrases;
+  }
+  const fallback = {
+    working: [
+      "正在把线头一根根捋直",
+      "正在翻上下文的抽屉",
+      "正在对齐这轮需求的骨架",
+      "正在把碎片拼成可执行的形状",
+      "正在把刚冒头的问题摁回桌面",
+      "正在替你把岔路口的牌子擦亮"
+    ],
+    waiting: [
+      "停在岔路口等你拍板",
+      "手里攥着两个方案等你点头",
+      "问题已经摆上桌，等你落子",
+      "先把节奏按住，等你选方向"
+    ],
+    done: [
+      "这锅已经收汁",
+      "这轮线头已经收拢",
+      "该落地的部分已经归位",
+      "这一段先告一段落"
+    ],
+    error: [
+      "中途绊了一下，正在找新的落脚点",
+      "这轮链路打了个结，需要换个走法"
+    ]
+  };
+  try {
+    const loaded = readJsonFile(statusPhrasesPath, fallback);
+    cachedStatusPhrases = {
+      working: Array.isArray(loaded.working) && loaded.working.length ? loaded.working : fallback.working,
+      waiting: Array.isArray(loaded.waiting) && loaded.waiting.length ? loaded.waiting : fallback.waiting,
+      done: Array.isArray(loaded.done) && loaded.done.length ? loaded.done : fallback.done,
+      error: Array.isArray(loaded.error) && loaded.error.length ? loaded.error : fallback.error
+    };
+  } catch {
+    cachedStatusPhrases = fallback;
+  }
+  return cachedStatusPhrases;
+}
+
+function pickStatusPhrase(status, previous = "") {
+  const phrases = loadStatusPhrases();
+  const bucket = Array.isArray(phrases?.[status]) && phrases[status].length ? phrases[status] : phrases.working;
+  const candidates = bucket.filter((item) => item !== previous);
+  const source = candidates.length ? candidates : bucket;
+  return source[Math.floor(Math.random() * source.length)] || "";
+}
+
+function normalizeMode(mode) {
+  return String(mode || "").trim().toLowerCase() === "plan" ? "plan" : "default";
+}
+
+function extractModeDirective(text) {
+  const source = String(text || "").trim();
+  if (!source) {
+    return { mode: "", remainder: "" };
+  }
+  const patterns = [
+    {
+      mode: "plan",
+      pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:进入|切到|切换到|改成|改用|用)\s*(?:plan(?:\s*mode)?|规划模式|计划模式)\s*[，,:：]?\s*/iu
+    },
+    {
+      mode: "default",
+      pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:退出|切回|切到|切换到|改成|改用|用)\s*(?:default(?:\s*mode)?|普通模式|默认模式)\s*[，,:：]?\s*/iu
+    }
+  ];
+  for (const entry of patterns) {
+    const match = source.match(entry.pattern);
+    if (!match) {
+      continue;
+    }
+    return {
+      mode: entry.mode,
+      remainder: source.slice(match[0].length).trim()
+    };
+  }
+  return { mode: "", remainder: source };
+}
+
+function isTurnActive(session) {
+  return Boolean(session?.active_turn_id);
+}
+
+function shouldApplyTurnCompletionToSession(session, completedTurnId) {
+  if (!session?.active_turn_id) {
+    return true;
+  }
+  return session.active_turn_id === completedTurnId;
+}
+
+function splitNaturalMessageChunks(buffer, force = false) {
+  const chunks = [];
+  let remaining = String(buffer || "");
+  if (!remaining) {
+    return { chunks, remaining };
+  }
+  const sentencePattern = /(.+?[。！？!?]\s*|\n{2,}|.+?\n)/u;
+  while (true) {
+    const match = remaining.match(sentencePattern);
+    if (!match) {
+      break;
+    }
+    const piece = match[0].trim();
+    remaining = remaining.slice(match[0].length);
+    if (piece) {
+      chunks.push(piece);
+    }
+  }
+  if (force && remaining.trim()) {
+    chunks.push(remaining.trim());
+    remaining = "";
+  }
+  return { chunks, remaining };
+}
+
+function buildQuestionAnswerPayload(questions, partialAnswers) {
+  const answers = {};
+  for (const question of questions || []) {
+    const answer = partialAnswers?.[question.id];
+    if (!answer?.answers?.length) {
+      continue;
+    }
+    answers[question.id] = {
+      answers: answer.answers
+    };
+  }
+  return { answers };
+}
+
+function tryMapTextToQuestionAnswer(question, text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return null;
+  }
+  const options = Array.isArray(question?.options) ? question.options : [];
+  for (let index = 0; index < options.length; index += 1) {
+    const option = options[index];
+    if (!option?.label) {
+      continue;
+    }
+    if (normalized === option.label || normalized.includes(option.label) || normalized === String(index + 1)) {
+      return { answers: [option.label] };
+    }
+  }
+  return { answers: [normalized] };
+}
+
 function collectConversationKeys(items) {
   const keys = new Set();
   for (const item of items || []) {
@@ -707,6 +1243,19 @@ function buildProgressStatusReply(batchMessages, stage) {
   return "派蒙正在思考。";
 }
 
+function getRuntimeBackend(config, flags) {
+  return String(flags["runtime-backend"] || config.automation?.feishu_runtime_backend || "app-server").trim() || "app-server";
+}
+
+function getDefaultCollaborationMode(config) {
+  const mode = String(config.automation?.feishu_default_collaboration_mode || "default").trim().toLowerCase();
+  return mode === "plan" ? "plan" : "default";
+}
+
+function getThreadIdleTtlMs(config, flags) {
+  return Number(flags["thread-idle-ttl-ms"] || config.automation?.feishu_thread_idle_ttl_ms || 3600000);
+}
+
 function getCodexTimeoutMs(config, flags) {
   return Number(flags["codex-timeout-ms"] || config.automation?.feishu_codex_timeout_ms || 1200000);
 }
@@ -715,8 +1264,46 @@ function getHttpTimeoutMs(config, flags) {
   return Number(flags["http-timeout-ms"] || config.automation?.feishu_http_timeout_ms || 8000);
 }
 
+function getProgressFlushMs(config, flags) {
+  return Number(flags["progress-flush-ms"] || config.automation?.feishu_progress_flush_ms || 2000);
+}
+
 function getProgressPingMs(config, flags) {
   return Number(flags["progress-ping-ms"] || config.automation?.feishu_progress_ping_ms || 300000);
+}
+
+function getStatusCardUpdateMinMs(config, flags) {
+  return Number(flags["status-card-update-min-ms"] || config.automation?.feishu_status_card_update_min_ms || 8000);
+}
+
+function getStatusCardUpdateMaxMs(config, flags) {
+  return Number(flags["status-card-update-max-ms"] || config.automation?.feishu_status_card_update_max_ms || 15000);
+}
+
+function shouldEnableCardCallbacks(config, flags) {
+  if (flags["no-card-callback"]) {
+    return false;
+  }
+  if (flags["card-callback"]) {
+    return true;
+  }
+  return config.automation?.feishu_card_callback_enabled === true;
+}
+
+function getCardCallbackHost(config, flags) {
+  return String(flags["card-callback-host"] || config.automation?.feishu_card_callback_host || "127.0.0.1");
+}
+
+function getCardCallbackPort(config, flags) {
+  return Number(flags["card-callback-port"] || config.automation?.feishu_card_callback_port || 3100);
+}
+
+function getCardCallbackPath(config, flags) {
+  return String(flags["card-callback-path"] || config.automation?.feishu_card_callback_path || "/webhook/card");
+}
+
+function supportsCardActions(config, flags) {
+  return shouldEnableCardCallbacks(config, flags) && Boolean(config.feishu?.verification_token || config.feishu?.encrypt_key);
 }
 
 function getReactionEmojiType(config, flags) {
@@ -1027,6 +1614,62 @@ async function gatherLiveProbe(config, flags, chatId, batchMessages) {
   };
 }
 
+function buildFeishuContextBlock({ chatId, messageText, session, liveProbeSummary, memorySnapshot, event, previousThreadPreview = "", mode = "default", isSteer = false }) {
+  const lines = [
+    "派蒙，你正在通过飞书和用户连续协作。",
+    "飞书回复约束：",
+    "- 工作中多发短句自然语言更新，像人类在同步进度。",
+    "- 不要主动展开变量名、堆栈、原始命令输出或仓库内部实现细节，除非用户明确追问。",
+    "- 如果需要用户二选一或多选一，请优先使用 request_user_input。",
+    `- 当前会话模式：${normalizeMode(mode)}。`,
+    isSteer ? "- 这条消息是在你工作中途追加的，请把它视为同一件事的补充或纠偏。" : "- 这是一轮新的飞书输入。"
+  ];
+  if (previousThreadPreview) {
+    lines.push(`- 上一轮话题摘要：${truncateText(previousThreadPreview, 160)}`);
+  }
+  lines.push("", `当前 chat_id：${chatId}`);
+  if (event?.thread_id || event?.parent_id || event?.root_id) {
+    lines.push(`消息上下文：${formatMessageContext(event) || "无"}`);
+  }
+  lines.push("", "统一记忆快照：", memorySnapshot || "- 无", "", "实时平台探针：", liveProbeSummary || "- 无", "", "用户这次的飞书消息：", messageText || "- 无");
+  return lines.join("\n");
+}
+
+function buildTurnInputItems(contextText) {
+  return [
+    {
+      type: "text",
+      text: contextText,
+      text_elements: []
+    }
+  ];
+}
+
+function resolveReferencedThreadBinding(event) {
+  for (const candidate of [event?.parent_id, event?.root_id, event?.thread_id]) {
+    const binding = lookupMessageThreadBinding(candidate);
+    if (binding?.thread_id) {
+      return binding;
+    }
+  }
+  return null;
+}
+
+function isSessionExpired(session, config, flags) {
+  if (!session?.thread_id) {
+    return true;
+  }
+  const anchor = session.last_completed_at || session.last_agent_message_at || session.last_user_message_at;
+  if (!anchor) {
+    return false;
+  }
+  const anchorMs = Date.parse(anchor);
+  if (Number.isNaN(anchorMs)) {
+    return false;
+  }
+  return Date.now() - anchorMs > getThreadIdleTtlMs(config, flags);
+}
+
 async function clearTypingReactions(config, messageItems, flags = {}) {
   for (const item of messageItems) {
     const messageId = item?.message_id;
@@ -1056,6 +1699,870 @@ async function clearTypingReactions(config, messageItems, flags = {}) {
       });
     }
   }
+}
+
+function clearSessionStatusTimer(chatId) {
+  if (!sessionStatusTimers.has(chatId)) {
+    return;
+  }
+  clearTimeout(sessionStatusTimers.get(chatId));
+  sessionStatusTimers.delete(chatId);
+}
+
+async function sendIndexedTextMessage(config, chatId, text, session, flags = {}) {
+  const response = await sendTextMessage(config, "chat_id", chatId, text, flags);
+  const messageId = response?.data?.message_id || "";
+  if (messageId) {
+    indexMessageToThread(messageId, {
+      chat_id: chatId,
+      thread_id: session?.thread_id || "",
+      turn_id: session?.active_turn_id || "",
+      message_type: "agent-text"
+    });
+  }
+  if (session?.chat_id) {
+    updateSessionState(session.chat_id, {
+      last_agent_message_at: new Date().toISOString()
+    });
+  }
+  return response;
+}
+
+async function upsertSessionCard(config, chatId, status, flags = {}, options = {}) {
+  const store = readSessionStore();
+  const session = ensureSession(store, chatId);
+  const pendingRequest = options.pendingRequest || readPendingRequest(session.pending_request_id);
+  const phrase = options.phrase || pickStatusPhrase(status, session.status_card_phrase);
+  const card = buildStatusCard(phrase, {
+    status,
+    questions: pendingRequest?.questions || [],
+    answers: pendingRequest?.answers || {},
+    requestId: pendingRequest?.request_id || "",
+    chatId,
+    allowActions: supportsCardActions(config, flags)
+  });
+  let messageId = session.status_card_message_id || "";
+  if (messageId) {
+    try {
+      await updateCardMessage(config, messageId, card, flags);
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "session-card-update-failed",
+        chat_id: chatId,
+        message_id: messageId,
+        error: String(error)
+      });
+      messageId = "";
+    }
+  }
+  if (!messageId) {
+    const response = await sendCardMessage(config, "chat_id", chatId, card, flags);
+    messageId = response?.data?.message_id || "";
+  }
+  Object.assign(session, {
+    status_card_message_id: messageId,
+    status_card_kind: status,
+    status_card_phrase: phrase,
+    updated_at: new Date().toISOString()
+  });
+  writeSessionStore(store);
+  if (messageId) {
+    indexMessageToThread(messageId, {
+      chat_id: chatId,
+      thread_id: session.thread_id || "",
+      turn_id: session.active_turn_id || "",
+      message_type: "status-card"
+    });
+  }
+  return session;
+}
+
+function scheduleSessionCardRefresh(config, flags, chatId) {
+  clearSessionStatusTimer(chatId);
+  const store = readSessionStore();
+  const session = ensureSession(store, chatId);
+  if (!session.status_card_message_id || !["working", "waiting"].includes(session.status_card_kind)) {
+    return;
+  }
+  const minMs = getStatusCardUpdateMinMs(config, flags);
+  const maxMs = Math.max(minMs, getStatusCardUpdateMaxMs(config, flags));
+  const delay = minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
+  const timer = setTimeout(async () => {
+    try {
+      const latestStore = readSessionStore();
+      const latestSession = ensureSession(latestStore, chatId);
+      if (!latestSession.status_card_message_id || !["working", "waiting"].includes(latestSession.status_card_kind)) {
+        clearSessionStatusTimer(chatId);
+        return;
+      }
+      await upsertSessionCard(config, chatId, latestSession.status_card_kind, flags, {
+        phrase: pickStatusPhrase(latestSession.status_card_kind, latestSession.status_card_phrase)
+      });
+      scheduleSessionCardRefresh(config, flags, chatId);
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "session-card-refresh-failed",
+        chat_id: chatId,
+        error: String(error)
+      });
+    }
+  }, delay);
+  sessionStatusTimers.set(chatId, timer);
+}
+
+function getAppServerTurnKey(threadId, turnId) {
+  return `${threadId}:${turnId}`;
+}
+
+function ensureAppServerTurnState(threadId, turnId, chatId = "") {
+  if (!appServerRuntime) {
+    return null;
+  }
+  const key = getAppServerTurnKey(threadId, turnId);
+  if (!appServerRuntime.turnStates.has(key)) {
+    appServerRuntime.turnStates.set(key, {
+      threadId,
+      turnId,
+      chatId,
+      buffer: "",
+      sentMessages: [],
+      fullText: "",
+      userMessages: [],
+      flushTimer: null,
+      progressStubSent: false,
+      lastAgentTextAt: 0,
+      lastPlanSummary: ""
+    });
+  }
+  const state = appServerRuntime.turnStates.get(key);
+  if (chatId && !state.chatId) {
+    state.chatId = chatId;
+  }
+  return state;
+}
+
+function clearTurnFlushTimer(turnState) {
+  if (!turnState?.flushTimer) {
+    return;
+  }
+  clearTimeout(turnState.flushTimer);
+  turnState.flushTimer = null;
+}
+
+function dropAppServerTurnState(threadId, turnId) {
+  if (!appServerRuntime) {
+    return;
+  }
+  const key = getAppServerTurnKey(threadId, turnId);
+  const state = appServerRuntime.turnStates.get(key);
+  if (state?.flushTimer) {
+    clearTimeout(state.flushTimer);
+  }
+  appServerRuntime.turnStates.delete(key);
+}
+
+async function flushTurnStateText(config, flags, turnState, force = false) {
+  if (!turnState?.chatId) {
+    return;
+  }
+  const { chunks, remaining } = splitNaturalMessageChunks(turnState.buffer, force);
+  turnState.buffer = remaining;
+  if (!chunks.length) {
+    return;
+  }
+  const store = readSessionStore();
+  const session = ensureSession(store, turnState.chatId);
+  for (const chunk of chunks) {
+    await sendIndexedTextMessage(config, turnState.chatId, chunk, session, flags);
+    turnState.sentMessages.push(chunk);
+    turnState.lastAgentTextAt = Date.now();
+    session.last_agent_message_at = new Date().toISOString();
+  }
+  writeSessionStore(store);
+}
+
+function scheduleTurnStateFlush(config, flags, turnState) {
+  clearTurnFlushTimer(turnState);
+  turnState.flushTimer = setTimeout(() => {
+    flushTurnStateText(config, flags, turnState, true).catch((error) => {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "turn-state-flush-failed",
+        chat_id: turnState.chatId,
+        thread_id: turnState.threadId,
+        turn_id: turnState.turnId,
+        error: String(error)
+      });
+    });
+  }, getProgressFlushMs(config, flags));
+}
+
+async function sendPlanSummaryUpdate(config, flags, chatId, plan, explanation, session) {
+  if (!chatId) {
+    return;
+  }
+  const summary = explanation
+    ? `我先把这轮计划收束成 ${plan.length || 0} 步：${truncateText(explanation, 120)}`
+    : `我在整理计划，目前大致分成 ${plan.length || 0} 步。`;
+  await sendIndexedTextMessage(config, chatId, summary, session, flags);
+}
+
+async function archiveThreadQuietly(threadId) {
+  if (!threadId || !appServerRuntime?.client) {
+    return;
+  }
+  try {
+    await appServerRuntime.client.request("thread/archive", { threadId });
+  } catch (error) {
+    appendJsonl(errorsPath, {
+      timestamp: new Date().toISOString(),
+      type: "thread-archive-failed",
+      thread_id: threadId,
+      error: String(error)
+    });
+  }
+}
+
+function buildCollaborationModePayload(config, mode) {
+  if (normalizeMode(mode) !== "plan") {
+    return null;
+  }
+  return {
+    mode: "plan",
+    settings: {
+      model: String(config.automation?.codex_model || "gpt-5.4"),
+      reasoning_effort: config.automation?.codex_reasoning_effort || null,
+      developer_instructions: null
+    }
+  };
+}
+
+async function startCardActionServer(config, flags) {
+  if (!shouldEnableCardCallbacks(config, flags) || !supportsCardActions(config, flags)) {
+    return null;
+  }
+  const handler = new Lark.CardActionHandler(
+    {
+      encryptKey: config.feishu.encrypt_key,
+      verificationToken: config.feishu.verification_token,
+      loggerLevel: Lark.LoggerLevel.info
+    },
+    async (data) => handleCardAction(data, config, flags)
+  );
+  const server = http.createServer();
+  server.on("request", Lark.adaptDefault(getCardCallbackPath(config, flags), handler, {
+    autoChallenge: true
+  }));
+  await new Promise((resolve) => {
+    server.listen(getCardCallbackPort(config, flags), getCardCallbackHost(config, flags), resolve);
+  });
+  appendJsonl(eventsPath, {
+    timestamp: new Date().toISOString(),
+    type: "card-action-server.started",
+    host: getCardCallbackHost(config, flags),
+    port: getCardCallbackPort(config, flags),
+    path: getCardCallbackPath(config, flags)
+  });
+  return server;
+}
+
+async function ensureAppServerRuntime(config, flags) {
+  if (appServerRuntime?.client) {
+    await appServerRuntime.client.ensureStarted();
+    return appServerRuntime;
+  }
+  const client = new CodexAppServerClient(config);
+  appServerRuntime = {
+    client,
+    turnStates: new Map(),
+    cardServer: null
+  };
+  client.on("notification", (payload) => {
+    handleAppServerNotification(config, flags, payload).catch((error) => {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "app-server-notification-failed",
+        method: payload?.method || "",
+        error: String(error)
+      });
+    });
+  });
+  client.on("server-request", (payload) => {
+    handleAppServerServerRequest(config, flags, payload).catch((error) => {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "app-server-server-request-failed",
+        method: payload?.method || "",
+        error: String(error)
+      });
+    });
+  });
+  client.on("exit", () => {
+    const store = readSessionStore();
+    for (const session of Object.values(store.chats || {})) {
+      session.active_turn_id = "";
+      session.pending_request_id = "";
+      session.status = "idle";
+      session.interrupted_at = new Date().toISOString();
+    }
+    writeSessionStore(store);
+  });
+  await client.ensureStarted();
+  appServerRuntime.cardServer = await startCardActionServer(config, flags);
+  return appServerRuntime;
+}
+
+async function handleCardAction(data, config, flags) {
+  const value = data?.action?.value || {};
+  if (value.action !== "request-user-input-answer") {
+    return buildStatusCard(pickStatusPhrase("working"), { status: "working" });
+  }
+  const requestEntry = readPendingRequest(value.request_id);
+  if (!requestEntry) {
+    return buildStatusCard("这张卡片已经过期了，直接继续发文字给我就行。", { status: "done" });
+  }
+  const answers = {
+    ...(requestEntry.answers || {}),
+    [value.question_id]: {
+      answers: [String(value.answer || "").trim()].filter(Boolean)
+    }
+  };
+  const updated = upsertPendingRequest(requestEntry.request_id, {
+    ...requestEntry,
+    answers
+  });
+  const allAnswered = (updated.questions || []).every((question) => answers?.[question.id]?.answers?.length);
+  if (allAnswered) {
+    await appServerRuntime.client.respond(updated.rpc_id, buildQuestionAnswerPayload(updated.questions, answers));
+    removePendingRequest(updated.request_id);
+    const phrase = pickStatusPhrase("working");
+    updateSessionState(updated.chat_id, {
+      pending_request_id: "",
+      status: "working",
+      status_card_kind: "working",
+      status_card_phrase: phrase
+    });
+    scheduleSessionCardRefresh(config, flags, updated.chat_id);
+    return buildStatusCard(phrase, { status: "working" });
+  }
+  updateSessionState(updated.chat_id, {
+    pending_request_id: updated.request_id,
+    status: "waiting",
+    status_card_kind: "waiting"
+  });
+  scheduleSessionCardRefresh(config, flags, updated.chat_id);
+  return buildStatusCard(
+    pickStatusPhrase("waiting"),
+    {
+      status: "waiting",
+      questions: updated.questions || [],
+      answers,
+      requestId: updated.request_id,
+      chatId: updated.chat_id,
+      allowActions: supportsCardActions(config, flags)
+    }
+  );
+}
+
+async function maybeResolvePendingRequestFromText(event, config, flags) {
+  const store = readSessionStore();
+  const session = ensureSession(store, event.chat_id);
+  if (!session.pending_request_id) {
+    return false;
+  }
+  const requestEntry = readPendingRequest(session.pending_request_id);
+  if (!requestEntry) {
+    updateSessionState(event.chat_id, { pending_request_id: "", status: "idle" });
+    return false;
+  }
+  const answers = { ...(requestEntry.answers || {}) };
+  let answeredQuestion = "";
+  for (const question of requestEntry.questions || []) {
+    if (answers?.[question.id]?.answers?.length) {
+      continue;
+    }
+    const mapped = tryMapTextToQuestionAnswer(question, event.text);
+    if (!mapped) {
+      continue;
+    }
+    answers[question.id] = mapped;
+    answeredQuestion = question.id;
+    break;
+  }
+  if (!answeredQuestion) {
+    return false;
+  }
+  if (session.thread_id && session.active_turn_id) {
+    const turnState = ensureAppServerTurnState(session.thread_id, session.active_turn_id, event.chat_id);
+    turnState?.userMessages?.push(event);
+  }
+  const updated = upsertPendingRequest(requestEntry.request_id, {
+    ...requestEntry,
+    answers
+  });
+  const allAnswered = (updated.questions || []).every((question) => answers?.[question.id]?.answers?.length);
+  if (allAnswered) {
+    await appServerRuntime.client.respond(updated.rpc_id, buildQuestionAnswerPayload(updated.questions, answers));
+    removePendingRequest(updated.request_id);
+    updateSessionState(event.chat_id, {
+      pending_request_id: "",
+      status: "working",
+      last_user_message_at: event.received_at
+    });
+    await upsertSessionCard(config, event.chat_id, "working", flags);
+    scheduleSessionCardRefresh(config, flags, event.chat_id);
+    return true;
+  }
+  await upsertSessionCard(config, event.chat_id, "waiting", flags, {
+    pendingRequest: updated
+  });
+  scheduleSessionCardRefresh(config, flags, event.chat_id);
+  const remaining = (updated.questions || []).filter((question) => !answers?.[question.id]?.answers?.length).length;
+  await sendIndexedTextMessage(
+    config,
+    event.chat_id,
+    `这个答案我先记下了，还差 ${remaining} 个选择。你可以继续回文字，也可以点卡片按钮。`,
+    ensureSession(readSessionStore(), event.chat_id),
+    flags
+  );
+  updateSessionState(event.chat_id, {
+    last_user_message_at: event.received_at
+  });
+  await clearTypingReactions(config, [event], flags);
+  return true;
+}
+
+async function handleAppServerServerRequest(config, flags, payload) {
+  if (!payload?.method) {
+    return;
+  }
+  if (payload.method === "item/tool/requestUserInput") {
+    const chatId = findChatIdByThreadId(payload.params?.threadId);
+    if (!chatId) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "request-user-input-no-chat",
+        request_id: payload.id,
+        thread_id: payload.params?.threadId || ""
+      });
+      return;
+    }
+    const requestEntry = upsertPendingRequest(payload.id, {
+      request_id: payload.id,
+      rpc_id: payload.id,
+      chat_id: chatId,
+      thread_id: payload.params.threadId,
+      turn_id: payload.params.turnId,
+      item_id: payload.params.itemId,
+      questions: payload.params.questions || [],
+      answers: {},
+      created_at: new Date().toISOString()
+    });
+    updateSessionState(chatId, {
+      pending_request_id: String(payload.id),
+      status: "waiting"
+    });
+    await upsertSessionCard(config, chatId, "waiting", flags, {
+      pendingRequest: requestEntry
+    });
+    scheduleSessionCardRefresh(config, flags, chatId);
+    await sendIndexedTextMessage(
+      config,
+      chatId,
+      "我这里需要你拍一个板。卡片里点一下最快，直接回文字也可以。",
+      ensureSession(readSessionStore(), chatId),
+      flags
+    );
+    return;
+  }
+  if (payload.method === "item/commandExecution/requestApproval") {
+    await appServerRuntime.client.respond(payload.id, { decision: "accept" });
+    return;
+  }
+  if (payload.method === "item/fileChange/requestApproval") {
+    await appServerRuntime.client.respond(payload.id, { decision: "accept" });
+    return;
+  }
+  if (payload.method === "execCommandApproval") {
+    await appServerRuntime.client.respond(payload.id, { decision: "approved" });
+    return;
+  }
+  if (payload.method === "applyPatchApproval") {
+    await appServerRuntime.client.respond(payload.id, { decision: "approved" });
+    return;
+  }
+  appendJsonl(errorsPath, {
+    timestamp: new Date().toISOString(),
+    type: "unsupported-app-server-request",
+    method: payload.method,
+    request_id: payload.id
+  });
+}
+
+async function handleAppServerNotification(config, flags, payload) {
+  const threadId = payload?.params?.threadId || payload?.params?.thread?.id || "";
+  const turnId = payload?.params?.turnId || payload?.params?.turn?.id || "";
+  const chatId = findChatIdByThreadId(threadId);
+  if (payload.method === "turn/started" && chatId) {
+    updateSessionState(chatId, {
+      active_turn_id: payload.params.turn.id,
+      status: "working"
+    });
+    return;
+  }
+  if (payload.method === "item/started" && payload.params?.item?.type === "commandExecution") {
+    const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
+    if (turnState && !turnState.progressStubSent && chatId) {
+      const session = ensureSession(readSessionStore(), chatId);
+      await sendIndexedTextMessage(config, chatId, "我先去核对现有实现，再继续往前推。", session, flags);
+      turnState.progressStubSent = true;
+    }
+    return;
+  }
+  if (payload.method === "item/agentMessage/delta") {
+    const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
+    if (!turnState) {
+      return;
+    }
+    turnState.buffer += payload.params.delta || "";
+    turnState.fullText += payload.params.delta || "";
+    await flushTurnStateText(config, flags, turnState, false);
+    scheduleTurnStateFlush(config, flags, turnState);
+    return;
+  }
+  if (payload.method === "turn/plan/updated" && chatId) {
+    const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
+    const planSummary = JSON.stringify(payload.params.plan || []);
+    if (turnState && turnState.lastPlanSummary !== planSummary) {
+      const session = ensureSession(readSessionStore(), chatId);
+      await sendPlanSummaryUpdate(config, flags, chatId, payload.params.plan || [], payload.params.explanation || "", session);
+      turnState.lastPlanSummary = planSummary;
+    }
+    return;
+  }
+  if (payload.method === "turn/completed") {
+    const completedTurn = payload.params.turn || {};
+    const completedThreadId = payload.params.threadId || threadId;
+    const completedTurnId = completedTurn.id || turnId;
+    const existingTurnState = appServerRuntime?.turnStates?.get(getAppServerTurnKey(completedThreadId, completedTurnId)) || null;
+    const finalChatId = chatId || existingTurnState?.chatId || findChatIdByThreadId(completedThreadId);
+    if (!finalChatId) {
+      dropAppServerTurnState(completedThreadId, completedTurnId);
+      return;
+    }
+    const turnState = existingTurnState || ensureAppServerTurnState(completedThreadId, completedTurnId, finalChatId);
+    await flushTurnStateText(config, flags, turnState, true);
+    const replyText = turnState?.sentMessages?.join("\n").trim() || turnState?.fullText?.trim() || "";
+    const sessionStore = readSessionStore();
+    const session = ensureSession(sessionStore, finalChatId);
+    const sessionPendingRequest = readPendingRequest(session.pending_request_id);
+    const shouldClearSessionPending = sessionPendingRequest?.turn_id === completedTurnId;
+    const shouldApplySessionUpdate = shouldApplyTurnCompletionToSession(session, completedTurnId);
+    removePendingRequestsForTurn(completedTurnId);
+    if (shouldApplySessionUpdate) {
+      session.active_turn_id = "";
+      if (shouldClearSessionPending || !sessionPendingRequest) {
+        session.pending_request_id = "";
+      }
+      session.status = "idle";
+      session.last_completed_at = new Date().toISOString();
+      session.last_thread_preview = truncateText(replyText || session.last_thread_preview || "", 180);
+      writeSessionStore(sessionStore);
+      if (completedTurn.status === "failed") {
+        const text = replyText || "这轮中途断了一下，但上下文我还记着。你继续补一句，我就从这里接上。";
+        if (!replyText && finalChatId) {
+          await sendIndexedTextMessage(config, finalChatId, text, session, flags);
+        }
+        await upsertSessionCard(config, finalChatId, "error", flags, {
+          phrase: pickStatusPhrase("error", session.status_card_phrase)
+        });
+      } else if (completedTurn.status === "interrupted") {
+        const text = replyText || "这一轮我先按下暂停键。你给我新方向后，我就从新的 turn 继续。";
+        if (!replyText && finalChatId) {
+          await sendIndexedTextMessage(config, finalChatId, text, session, flags);
+        }
+        await upsertSessionCard(config, finalChatId, "done", flags, {
+          phrase: pickStatusPhrase("done", session.status_card_phrase)
+        });
+      } else {
+        if (!replyText) {
+          await sendIndexedTextMessage(config, finalChatId, "这轮已经处理完了，你可以继续补充下一步。", session, flags);
+        }
+        await upsertSessionCard(config, finalChatId, "done", flags, {
+          phrase: pickStatusPhrase("done", session.status_card_phrase)
+        });
+      }
+      clearSessionStatusTimer(finalChatId);
+    } else if (shouldClearSessionPending || (session.pending_request_id && !sessionPendingRequest)) {
+      session.pending_request_id = "";
+      writeSessionStore(sessionStore);
+    }
+    try {
+      if (turnState?.userMessages?.length) {
+        await clearTypingReactions(config, turnState.userMessages, flags);
+      }
+      if (completedTurn.status !== "failed" && completedTurn.status !== "interrupted" && turnState?.userMessages?.length && replyText) {
+        syncInteractionMemory(finalChatId, turnState.userMessages, replyText);
+      }
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "turn-completed-followup-failed",
+        chat_id: finalChatId,
+        turn_id: completedTurn.id || "",
+        error: String(error)
+      });
+    }
+    dropAppServerTurnState(completedThreadId, completedTurnId);
+  }
+}
+
+async function ensureThreadForEvent(event, session, config, flags, modeOverride = "") {
+  const runtime = await ensureAppServerRuntime(config, flags);
+  const client = runtime.client;
+  const referencedBinding = resolveReferencedThreadBinding(event);
+  let threadId = referencedBinding?.thread_id || "";
+  const startingNewThread = !threadId && (!session.thread_id || isSessionExpired(session, config, flags));
+  if (!threadId && session.thread_id && !isSessionExpired(session, config, flags)) {
+    threadId = session.thread_id;
+  }
+  if (!threadId && session.thread_id && isSessionExpired(session, config, flags)) {
+    await archiveThreadQuietly(session.thread_id);
+  }
+  if (!threadId) {
+    const started = await client.request("thread/start", {
+      model: String(config.automation?.codex_model || "gpt-5.4"),
+      cwd: repoRoot,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      persistExtendedHistory: true,
+      experimentalRawEvents: false,
+      ephemeral: false
+    });
+    threadId = started.thread.id;
+  } else {
+    await client.request("thread/resume", {
+      threadId,
+      cwd: repoRoot,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      persistExtendedHistory: true
+    });
+  }
+  updateSessionState(event.chat_id, {
+    thread_id: threadId,
+    mode: normalizeMode(modeOverride || session.mode || getDefaultCollaborationMode(config)),
+    last_referenced_message_id: referencedBinding?.message_id || "",
+    status: "working"
+  });
+  return {
+    client,
+    threadId,
+    startingNewThread
+  };
+}
+
+async function startAppServerTurnForEvent(event, config, flags, session, modeOverride = "") {
+  const desiredMode = normalizeMode(modeOverride || session.mode || getDefaultCollaborationMode(config));
+  const { client, threadId, startingNewThread } = await ensureThreadForEvent(event, session, config, flags, desiredMode);
+  const liveProbe = await gatherLiveProbe(config, flags, event.chat_id, [event]);
+  let memorySnapshot = "- 无";
+  try {
+    memorySnapshot = getMemoryPromptSnapshot(event.chat_id) || "- 无";
+  } catch (error) {
+    appendJsonl(errorsPath, {
+      timestamp: new Date().toISOString(),
+      type: "memory-snapshot-failed",
+      chat_id: event.chat_id,
+      message_id: event.message_id,
+      error: String(error)
+    });
+  }
+  const latestSession = ensureSession(readSessionStore(), event.chat_id);
+  const contextText = buildFeishuContextBlock({
+    chatId: event.chat_id,
+    messageText: event.text,
+    session: latestSession,
+    liveProbeSummary: liveProbe.summary,
+    memorySnapshot,
+    event,
+    previousThreadPreview: startingNewThread ? latestSession.last_thread_preview || "" : "",
+    mode: desiredMode,
+    isSteer: false
+  });
+  const turn = await client.request("turn/start", {
+    threadId,
+    input: buildTurnInputItems(contextText),
+    model: String(config.automation?.codex_model || "gpt-5.4"),
+    effort: config.automation?.codex_reasoning_effort || null,
+    collaborationMode: buildCollaborationModePayload(config, desiredMode)
+  });
+  const turnState = ensureAppServerTurnState(threadId, turn.turn.id, event.chat_id);
+  turnState.userMessages.push(event);
+  indexMessageToThread(event.message_id, {
+    chat_id: event.chat_id,
+    thread_id: threadId,
+    turn_id: turn.turn.id,
+    message_type: "user"
+  });
+  updateSessionState(event.chat_id, {
+    thread_id: threadId,
+    active_turn_id: turn.turn.id,
+    mode: desiredMode,
+    status: "working",
+    last_user_message_at: event.received_at
+  });
+  await upsertSessionCard(config, event.chat_id, "working", flags);
+  scheduleSessionCardRefresh(config, flags, event.chat_id);
+}
+
+async function steerAppServerTurn(event, config, flags, session) {
+  const runtime = await ensureAppServerRuntime(config, flags);
+  const turnState = ensureAppServerTurnState(session.thread_id, session.active_turn_id, event.chat_id);
+  turnState.userMessages.push(event);
+  const contextText = buildFeishuContextBlock({
+    chatId: event.chat_id,
+    messageText: event.text,
+    session,
+    liveProbeSummary: "- 这是一条工作中追加的飞书消息，不重新跑实时快照。",
+    memorySnapshot: "- 继续沿用当前 turn 已经持有的上下文。",
+    event,
+    mode: session.mode || "default",
+    isSteer: true
+  });
+  await runtime.client.request("turn/steer", {
+    threadId: session.thread_id,
+    expectedTurnId: session.active_turn_id,
+    input: buildTurnInputItems(contextText)
+  });
+  indexMessageToThread(event.message_id, {
+    chat_id: event.chat_id,
+    thread_id: session.thread_id,
+    turn_id: session.active_turn_id,
+    message_type: "user"
+  });
+  updateSessionState(event.chat_id, {
+    last_user_message_at: event.received_at
+  });
+}
+
+async function interruptAndRestartTurn(event, config, flags, session, nextMode, remainderText) {
+  const runtime = await ensureAppServerRuntime(config, flags);
+  if (session.thread_id && session.active_turn_id) {
+    try {
+      await runtime.client.request("turn/interrupt", {
+        threadId: session.thread_id,
+        turnId: session.active_turn_id
+      });
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "turn-interrupt-failed",
+        chat_id: event.chat_id,
+        thread_id: session.thread_id,
+        turn_id: session.active_turn_id,
+        error: String(error)
+      });
+    }
+  }
+  updateSessionState(event.chat_id, {
+    active_turn_id: "",
+    mode: nextMode,
+    interrupted_at: new Date().toISOString(),
+    last_user_message_at: event.received_at
+  });
+  if (!remainderText) {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: session.thread_id || "",
+      turn_id: "",
+      message_type: "user"
+    });
+    await sendIndexedTextMessage(
+      config,
+      event.chat_id,
+      nextMode === "plan" ? "这条线程后续切到规划模式了。你继续发需求，我按 plan mode 接。" : "这条线程后续切回普通模式了。你继续发需求，我按默认模式接。",
+      ensureSession(readSessionStore(), event.chat_id),
+      flags
+    );
+    await clearTypingReactions(config, [event], flags);
+    return;
+  }
+  const nextEvent = {
+    ...event,
+    text: remainderText
+  };
+  await startAppServerTurnForEvent(nextEvent, config, flags, ensureSession(readSessionStore(), event.chat_id), nextMode);
+}
+
+async function processEventWithAppServer(event, config, flags) {
+  if (!flags["spawn-codex"]) {
+    return;
+  }
+  await ensureAppServerRuntime(config, flags);
+  const modeDirective = extractModeDirective(event.text);
+  const session = ensureSession(readSessionStore(), event.chat_id);
+  if (await maybeResolvePendingRequestFromText(event, config, flags)) {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: session.thread_id || "",
+      turn_id: session.active_turn_id || "",
+      message_type: "user"
+    });
+    return;
+  }
+  if (isTurnActive(session)) {
+    if (modeDirective.mode) {
+      await interruptAndRestartTurn(event, config, flags, session, modeDirective.mode, modeDirective.remainder);
+      return;
+    }
+    await steerAppServerTurn(event, config, flags, session);
+    return;
+  }
+  if (modeDirective.mode && !modeDirective.remainder) {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: session.thread_id || "",
+      turn_id: "",
+      message_type: "user"
+    });
+    updateSessionState(event.chat_id, {
+      mode: modeDirective.mode,
+      last_user_message_at: event.received_at
+    });
+    await sendIndexedTextMessage(
+      config,
+      event.chat_id,
+      modeDirective.mode === "plan" ? "这条线程后续切到规划模式了。你继续发需求，我就按 plan mode 来。" : "这条线程后续切回普通模式了。你继续发需求，我就按默认模式来。",
+      ensureSession(readSessionStore(), event.chat_id),
+      flags
+    );
+    await upsertSessionCard(config, event.chat_id, "done", flags, {
+      phrase: pickStatusPhrase("done")
+    });
+    await clearTypingReactions(config, [event], flags);
+    return;
+  }
+  const effectiveEvent = modeDirective.mode
+    ? {
+      ...event,
+      text: modeDirective.remainder
+    }
+    : event;
+  if (modeDirective.mode) {
+    updateSessionState(event.chat_id, {
+      mode: modeDirective.mode
+    });
+  }
+  await startAppServerTurnForEvent(
+    effectiveEvent,
+    config,
+    flags,
+    ensureSession(readSessionStore(), event.chat_id),
+    modeDirective.mode || ""
+  );
 }
 
 async function upsertProgressMessage(config, chatId, batchMessages, text, flags = {}) {
@@ -1161,7 +2668,7 @@ function buildCodexPrompt(
   const batchLines = batchMessages.map((item, index) => buildBatchLine(item, index)).join("\n");
   return [
     "你是 InStreet 上的派蒙 paimon_insight。",
-    "你正在通过飞书与仓库主人沟通。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
+    "派蒙，你正在通过飞书和用户连续协作。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
     "把 AGENTS.md、state/current/memory_store.json、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
     "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
     "这不是逐条客服对话，而是一个持续工作会话。",
@@ -1845,8 +3352,6 @@ async function handleIncomingMessage(event, config, flags) {
     });
   }
 
-  enqueueForChat(event);
-
   if (event.source !== "history-sync" && isReactionEnabled(config, flags)) {
     sendMessageReaction(config, event.message_id, getReactionEmojiType(config, flags), flags)
       .then((response) => {
@@ -1895,15 +3400,27 @@ async function handleIncomingMessage(event, config, flags) {
     }
   }
 
-  if (flags["spawn-codex"]) {
-    scheduleChatProcessing(event.chat_id, config, flags);
+  if (!flags["spawn-codex"]) {
+    return;
   }
+
+  if (getRuntimeBackend(config, flags) === "app-server") {
+    await processEventWithAppServer(event, config, flags);
+    return;
+  }
+
+  enqueueForChat(event);
+  scheduleChatProcessing(event.chat_id, config, flags);
 }
 
 async function startWebsocket(config, flags) {
   ensureDirs();
-  bootstrapPendingQueues(config, flags);
-  startQueueSweeper(config, flags);
+  if (getRuntimeBackend(config, flags) === "app-server") {
+    await ensureAppServerRuntime(config, flags);
+  } else {
+    bootstrapPendingQueues(config, flags);
+    startQueueSweeper(config, flags);
+  }
 
   const dispatcher = new Lark.EventDispatcher({}).register({
     "im.message.receive_v1": async (data) => {
@@ -1971,7 +3488,7 @@ async function syncChatHistory(config, flags) {
     fresh.push(event);
   }
   writeSeenMessages(seen);
-  if (flags["spawn-codex"] && fresh.length) {
+  if (flags["spawn-codex"] && fresh.length && getRuntimeBackend(config, flags) !== "app-server") {
     await processChatQueue(chatId, config, flags);
   }
   console.log(JSON.stringify({ synced: fresh.length, chat_id: chatId, messages: fresh }, null, 2));
@@ -1986,8 +3503,8 @@ function printHelp() {
   node feishu_gateway.mjs show-report-target
   node feishu_gateway.mjs bind-report-target --chat-id oc_xxx [--chat-type group] [--label "ops"]
   node feishu_gateway.mjs clear-report-target
-  node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--merge-window-ms 15000]
-  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--merge-window-ms 15000] [--continuation-window-ms 1800000] [--continuation-max-messages 12] [--history-limit 12] [--history-raw-prompt|--no-history-raw-prompt] [--process-timeout-ms 1800000] [--queue-sweep-ms 15000] [--codex-timeout-ms 1200000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--http-timeout-ms 8000] [--codex-bypass-sandbox|--no-codex-bypass-sandbox]`);
+  node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--runtime-backend app-server|exec]
+  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--runtime-backend app-server|exec] [--thread-idle-ttl-ms 3600000] [--progress-flush-ms 2000] [--status-card-update-min-ms 8000] [--status-card-update-max-ms 15000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--card-callback|--no-card-callback] [--card-callback-host 127.0.0.1] [--card-callback-port 3100] [--card-callback-path /webhook/card]`);
 }
 
 async function main() {
@@ -2074,7 +3591,25 @@ async function main() {
   printHelp();
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+const isDirectRun = Boolean(process.argv[1] && path.resolve(process.argv[1]) === __filename);
+
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+export {
+  buildCodexPrompt,
+  buildFeishuContextBlock,
+  buildQuestionAnswerPayload,
+  buildStatusCard,
+  extractModeDirective,
+  getRuntimeBackend,
+  pickStatusPhrase,
+  shouldApplyTurnCompletionToSession,
+  splitNaturalMessageChunks,
+  supportsCardActions,
+  tryMapTextToQuestionAnswer
+};

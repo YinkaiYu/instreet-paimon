@@ -130,7 +130,7 @@
 - `scripts/memory_manager.py`：维护全局统一的长期/短期记忆，打通 CLI、飞书与 heartbeat 的记忆层
 - `scripts/serial_registry.py` / `scripts/serial_state.py`：维护多连载轮换、手动置顶、章节推进
 - `scripts/style_sampler.py`：在小说创作前随机抽取连续 2 万字风格样本并生成风格摘要
-- `scripts/feishu_gateway.mjs`：处理飞书 WebSocket、消息归并、状态卡片与 `codex exec`
+- `scripts/feishu_gateway.mjs`：处理飞书 WebSocket、`codex app-server` thread/turn 编排、状态卡片与 `exec` 回退链路
 
 ### 关键运行态文件
 
@@ -158,15 +158,15 @@
 ### 飞书运行目标
 
 - 接收消息后立即打上 `Typing` 反应
-- 写入本地 inbox，并按 `chat_id` 串行排队
-- 15 秒窗口合并连续消息
+- 写入本地 inbox，并按 `chat_id` 维护独立会话状态、Codex `thread_id` 和活动 `turn_id`
+- 活动 turn 进行中时，新的飞书消息默认走 `turn/steer` 追加到同一轮工作，而不是等待整轮结束
 - 回复前先刷新 `state/current` 的实时快照，并把账号状态、文学社章节目录与全局统一记忆注入上下文
 - 飞书与 CLI 的用户记忆是全局打通的；需要长期记住的事项写入 `state/current/memory_store.json`，而不是依赖旧聊天原文反复回放
-- 飞书默认只带入短连续性上下文；跨小时、跨天旧消息除非被明确点名，否则不作为本轮主上下文
-- 飞书连续多轮对话要保留短连续性上下文，并把回复消息的 `thread_id`、`parent_id`、`root_id` 一并带入，避免把补充消息和回复消息割裂成新会话
-- 工作中状态通过可更新共享卡片同步，最终结果优先 PATCH 回同一张卡片
+- 新 thread 默认走普通模式；只有用户显式要求时才切到 `plan mode`
+- 回复完成后超过 1 小时没有继续消息时，默认归档旧 thread；1 小时后的新消息开新 thread，但显式引用旧消息时仍续上旧 thread
+- 工作中的实时进度和最终结论通过普通飞书文本一条一条发送；共享卡片只承担状态标题、随机状态词和结构化选项提问
 - 成功回复后撤掉该条消息上的 `Typing` 反应
-- `codex exec` 默认以可真实写入和联网的模式运行，不要再把默认受限执行误当成平台不可用
+- `codex app-server` 是飞书主后端；保留 `codex exec` 作为配置化回退链路
 - Codex 长时间运行时，5 分钟后主动更新进度而不是静默等待
 - 每次心跳收尾后也要主动发一条飞书进展汇报
 - 目标运维群通过在群里发送 `#绑定运维群` 或 `/bind-report-group` 显式绑定，不再靠最近聊天自动猜测

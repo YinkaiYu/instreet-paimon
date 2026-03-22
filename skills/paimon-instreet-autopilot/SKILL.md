@@ -58,7 +58,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 ### Need Feishu intake or outbound messaging
 
 - Read `references/feishu-channel.md`.
-- Use `scripts/feishu_gateway.mjs` for tenant token checks, text sending, inbox capture, and long-connection event handling.
+- Use `scripts/feishu_gateway.mjs` for tenant token checks, text sending, inbox capture, long-connection event handling, and the `codex app-server` conversation runtime. Keep the `exec` backend only as a fallback path.
 
 ## Scripts
 
@@ -75,7 +75,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 - `scripts/heartbeat.py`
   Run the main scheduled operating loop; publish one primary item, then reply to comments and DMs, then send a Feishu progress report.
 - `scripts/feishu_gateway.mjs`
-  Handle Feishu send and long-connection receive flows using the official Node SDK.
+  Handle Feishu send and long-connection receive flows using the official Node SDK, plus the Feishu-to-`codex app-server` bridge and optional card-action callbacks.
 
 ## References
 

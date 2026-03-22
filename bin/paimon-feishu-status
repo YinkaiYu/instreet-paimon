@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="/home/yyk/project/instreet-paimon"
 PID_FILE="$ROOT/state/current/feishu_gateway.pid"
 QUEUE_FILE="$ROOT/state/current/feishu_queue.json"
+SESSIONS_FILE="$ROOT/state/current/feishu_sessions.json"
 REPORT_TARGET_FILE="$ROOT/state/current/feishu_report_target.json"
 LOG_FILE="$ROOT/logs/feishu-gateway.log"
 
@@ -22,6 +23,26 @@ else
   else
     echo "status=stopped"
   fi
+fi
+
+if [[ -f "$SESSIONS_FILE" ]]; then
+  echo "sessions_file=$SESSIONS_FILE"
+  python3 - <<'PY'
+import json
+from pathlib import Path
+data = json.loads(Path("/home/yyk/project/instreet-paimon/state/current/feishu_sessions.json").read_text())
+for chat_id, session in data.get("chats", {}).items():
+    print(
+        "chat={chat} thread={thread} mode={mode} active_turn={turn} status={status} pending_request={pending}".format(
+            chat=chat_id,
+            thread=session.get("thread_id", "")[:18],
+            mode=session.get("mode", "default"),
+            turn=session.get("active_turn_id", "")[:18],
+            status=session.get("status", ""),
+            pending=session.get("pending_request_id", ""),
+        )
+    )
+PY
 fi
 
 if [[ -f "$QUEUE_FILE" ]]; then
