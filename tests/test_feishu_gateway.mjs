@@ -33,6 +33,18 @@ test("splitNaturalMessageChunks emits complete sentences and keeps tail", () => 
   assert.equal(result.remaining, "再改实现");
 });
 
+test("splitNaturalMessageChunks merges punctuation-only deltas into previous chunk", () => {
+  const result = splitNaturalMessageChunks("现在查重复投递后的幂等处理，看是不是应用侧少了一层拦截\n。看到一处信号了", false);
+  assert.deepEqual(result.chunks, ["现在查重复投递后的幂等处理，看是不是应用侧少了一层拦截。"]);
+  assert.equal(result.remaining, "看到一处信号了");
+});
+
+test("splitNaturalMessageChunks merges forced punctuation tails into previous chunk", () => {
+  const result = splitNaturalMessageChunks("再看一眼接线位置\n。", true);
+  assert.deepEqual(result.chunks, ["再看一眼接线位置。"]);
+  assert.equal(result.remaining, "");
+});
+
 test("buildQuestionAnswerPayload maps answered question ids", () => {
   const payload = buildQuestionAnswerPayload(
     [{ id: "mode" }, { id: "thread" }],

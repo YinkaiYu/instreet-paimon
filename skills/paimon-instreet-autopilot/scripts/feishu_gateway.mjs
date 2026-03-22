@@ -1132,6 +1132,22 @@ function shouldApplyTurnCompletionToSession(session, completedTurnId) {
   return session.active_turn_id === completedTurnId;
 }
 
+function isPunctuationOnlyChunk(text) {
+  return /^[\p{P}\p{S}\s]+$/u.test(String(text || ""));
+}
+
+function pushNaturalMessageChunk(chunks, piece) {
+  const normalized = String(piece || "").trim();
+  if (!normalized) {
+    return;
+  }
+  if (chunks.length && isPunctuationOnlyChunk(normalized)) {
+    chunks[chunks.length - 1] = `${chunks[chunks.length - 1]}${normalized}`;
+    return;
+  }
+  chunks.push(normalized);
+}
+
 function splitNaturalMessageChunks(buffer, force = false) {
   const chunks = [];
   let remaining = String(buffer || "");
@@ -1140,18 +1156,22 @@ function splitNaturalMessageChunks(buffer, force = false) {
   }
   const sentencePattern = /(.+?[。！？!?]\s*|\n{2,}|.+?\n)/u;
   while (true) {
+    const leadingPunctuation = remaining.match(/^\s*[\p{P}\p{S}]+\s*/u);
+    if (leadingPunctuation?.[0]?.trim()) {
+      pushNaturalMessageChunk(chunks, leadingPunctuation[0]);
+      remaining = remaining.slice(leadingPunctuation[0].length);
+      continue;
+    }
     const match = remaining.match(sentencePattern);
     if (!match) {
       break;
     }
-    const piece = match[0].trim();
+    const piece = match[0];
     remaining = remaining.slice(match[0].length);
-    if (piece) {
-      chunks.push(piece);
-    }
+    pushNaturalMessageChunk(chunks, piece);
   }
   if (force && remaining.trim()) {
-    chunks.push(remaining.trim());
+    pushNaturalMessageChunk(chunks, remaining);
     remaining = "";
   }
   return { chunks, remaining };
@@ -2220,8 +2240,13 @@ async function handleAppServerNotification(config, flags, payload) {
     const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
     if (turnState && !turnState.progressStubSent && chatId) {
       const session = ensureSession(readSessionStore(), chatId);
-      await sendIndexedTextMessage(config, chatId, "我先去核对现有实现，再继续往前推。", session, flags);
       turnState.progressStubSent = true;
+      try {
+        await sendIndexedTextMessage(config, chatId, "我先去核对现有实现，再继续往前推。", session, flags);
+      } catch (error) {
+        turnState.progressStubSent = false;
+        throw error;
+      }
     }
     return;
   }
@@ -3442,9 +3467,27 @@ async function startWebsocket(config, flags) {
   const dispatcher = new Lark.EventDispatcher({
     encryptKey: config.feishu?.encrypt_key || ""
   }).register({
-    "im.message.receive_v1": async (data) => {
-      const event = extractMessageEvent(data);
-      await handleIncomingMessage(event, config, flags);
+    "im.message.receive_v1": (data) => {
+      let event = null;
+      try {
+        event = extractMessageEvent(data);
+      } catch (error) {
+        appendJsonl(errorsPath, {
+          timestamp: new Date().toISOString(),
+          type: "im.message.receive_v1.parse-failed",
+          error: String(error)
+        });
+        return;
+      }
+      handleIncomingMessage(event, config, flags).catch((error) => {
+        appendJsonl(errorsPath, {
+          timestamp: new Date().toISOString(),
+          type: "im.message.receive_v1.failed",
+          chat_id: event?.chat_id || "",
+          message_id: event?.message_id || "",
+          error: String(error)
+        });
+      });
     },
     "card.action.trigger": async (data) => handleCardActionTrigger(data, config, flags),
     "im.message.message_read_v1": async (data) => {
