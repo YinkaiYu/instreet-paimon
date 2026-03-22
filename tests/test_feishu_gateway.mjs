@@ -20,13 +20,29 @@ import {
 test("extractModeDirective recognizes explicit plan switch", () => {
   const result = extractModeDirective("切到 plan mode，帮我规划一下飞书重构");
   assert.equal(result.mode, "plan");
+  assert.equal(result.newThread, false);
   assert.equal(result.remainder, "帮我规划一下飞书重构");
 });
 
 test("extractModeDirective recognizes explicit default switch", () => {
   const result = extractModeDirective("切回默认模式，直接实现");
   assert.equal(result.mode, "default");
+  assert.equal(result.newThread, false);
   assert.equal(result.remainder, "直接实现");
+});
+
+test("extractModeDirective recognizes explicit new thread switch", () => {
+  const result = extractModeDirective("开个新 thread，继续做飞书联调");
+  assert.equal(result.mode, "");
+  assert.equal(result.newThread, true);
+  assert.equal(result.remainder, "继续做飞书联调");
+});
+
+test("extractModeDirective supports combined new thread and mode directives", () => {
+  const result = extractModeDirective("开个新thread，切到 plan mode，帮我规划飞书链路");
+  assert.equal(result.mode, "plan");
+  assert.equal(result.newThread, true);
+  assert.equal(result.remainder, "帮我规划飞书链路");
 });
 
 test("splitNaturalMessageChunks emits complete sentences and keeps tail", () => {

@@ -1164,29 +1164,64 @@ function normalizeMode(mode) {
 function extractModeDirective(text) {
   const source = String(text || "").trim();
   if (!source) {
-    return { mode: "", remainder: "" };
+    return { mode: "", newThread: false, remainder: "" };
   }
   const patterns = [
     {
+      kind: "new-thread",
+      pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:重新|直接)?(?:开新|新开|开个新|开一个新|开一条新|另开|另起|重新开|重新起|换个新|切到新的)\s*(?:thread|线程|对话|会话)\s*[，,:：]?\s*/iu
+    },
+    {
+      kind: "mode",
       mode: "plan",
       pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:进入|切到|切换到|改成|改用|用)\s*(?:plan(?:\s*mode)?|规划模式|计划模式)\s*[，,:：]?\s*/iu
     },
     {
+      kind: "mode",
       mode: "default",
       pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:退出|切回|切到|切换到|改成|改用|用)\s*(?:default(?:\s*mode)?|普通模式|默认模式)\s*[，,:：]?\s*/iu
     }
   ];
-  for (const entry of patterns) {
-    const match = source.match(entry.pattern);
-    if (!match) {
-      continue;
+  let remainder = source;
+  let mode = "";
+  let newThread = false;
+  while (remainder) {
+    let matched = false;
+    for (const entry of patterns) {
+      const match = remainder.match(entry.pattern);
+      if (!match) {
+        continue;
+      }
+      if (entry.kind === "mode") {
+        mode = entry.mode;
+      } else if (entry.kind === "new-thread") {
+        newThread = true;
+      }
+      remainder = remainder.slice(match[0].length).trim();
+      matched = true;
+      break;
     }
-    return {
-      mode: entry.mode,
-      remainder: source.slice(match[0].length).trim()
-    };
+    if (!matched) {
+      break;
+    }
   }
-  return { mode: "", remainder: source };
+  return { mode, newThread, remainder };
+}
+
+function buildDirectiveAckText(mode = "", newThread = false) {
+  if (newThread && mode === "plan") {
+    return "后续我会新开一条线程，并切到 plan mode。你继续发需求，我就从新 thread 接。";
+  }
+  if (newThread && mode === "default") {
+    return "后续我会新开一条线程，并按默认模式接。你继续发需求，我就从新 thread 接。";
+  }
+  if (newThread) {
+    return "后续我会新开一条线程。你继续发需求，我就从新 thread 接。";
+  }
+  if (mode === "plan") {
+    return "这条线程后续切到规划模式了。你继续发需求，我就按 plan mode 来。";
+  }
+  return "这条线程后续切回普通模式了。你继续发需求，我就按默认模式来。";
 }
 
 function isTurnActive(session) {
@@ -2426,16 +2461,20 @@ async function handleAppServerNotification(config, flags, payload) {
   }
 }
 
-async function ensureThreadForEvent(event, session, config, flags, modeOverride = "") {
+async function ensureThreadForEvent(event, session, config, flags, modeOverride = "", forceNewThread = false) {
   const runtime = await ensureAppServerRuntime(config, flags);
   const client = runtime.client;
-  const referencedBinding = resolveReferencedThreadBinding(event);
+  const referencedBinding = forceNewThread ? null : resolveReferencedThreadBinding(event);
   let threadId = referencedBinding?.thread_id || "";
-  const startingNewThread = !threadId && (!session.thread_id || isSessionExpired(session, config, flags));
-  if (!threadId && session.thread_id && !isSessionExpired(session, config, flags)) {
+  const sessionExpired = isSessionExpired(session, config, flags);
+  const startingNewThread = forceNewThread || (!threadId && (!session.thread_id || sessionExpired));
+  if (forceNewThread && session.thread_id) {
+    await archiveThreadQuietly(session.thread_id);
+  }
+  if (!forceNewThread && !threadId && session.thread_id && !sessionExpired) {
     threadId = session.thread_id;
   }
-  if (!threadId && session.thread_id && isSessionExpired(session, config, flags)) {
+  if (!forceNewThread && !threadId && session.thread_id && sessionExpired) {
     await archiveThreadQuietly(session.thread_id);
   }
   if (!threadId) {
@@ -2461,7 +2500,7 @@ async function ensureThreadForEvent(event, session, config, flags, modeOverride 
   updateSessionState(event.chat_id, {
     thread_id: threadId,
     mode: normalizeMode(modeOverride || session.mode || getDefaultCollaborationMode(config)),
-    last_referenced_message_id: referencedBinding?.message_id || "",
+    last_referenced_message_id: forceNewThread ? "" : referencedBinding?.message_id || "",
     status: "working"
   });
   return {
@@ -2471,9 +2510,9 @@ async function ensureThreadForEvent(event, session, config, flags, modeOverride 
   };
 }
 
-async function startAppServerTurnForEvent(event, config, flags, session, modeOverride = "") {
+async function startAppServerTurnForEvent(event, config, flags, session, modeOverride = "", forceNewThread = false) {
   const desiredMode = normalizeMode(modeOverride || session.mode || getDefaultCollaborationMode(config));
-  const { client, threadId, startingNewThread } = await ensureThreadForEvent(event, session, config, flags, desiredMode);
+  const { client, threadId, startingNewThread } = await ensureThreadForEvent(event, session, config, flags, desiredMode, forceNewThread);
   const liveProbe = await gatherLiveProbe(config, flags, event.chat_id, [event]);
   let memorySnapshot = "- 无";
   try {
@@ -2558,7 +2597,7 @@ async function steerAppServerTurn(event, config, flags, session) {
   });
 }
 
-async function interruptAndRestartTurn(event, config, flags, session, nextMode, remainderText) {
+async function interruptAndRestartTurn(event, config, flags, session, nextMode, remainderText, forceNewThread = false) {
   const runtime = await ensureAppServerRuntime(config, flags);
   if (session.thread_id && session.active_turn_id) {
     try {
@@ -2584,17 +2623,25 @@ async function interruptAndRestartTurn(event, config, flags, session, nextMode, 
     last_user_message_at: event.received_at
   });
   if (!remainderText) {
+    if (forceNewThread && session.thread_id) {
+      await archiveThreadQuietly(session.thread_id);
+    }
+    const updatedSession = updateSessionState(event.chat_id, {
+      thread_id: forceNewThread ? "" : session.thread_id || "",
+      last_referenced_message_id: forceNewThread ? "" : session.last_referenced_message_id || "",
+      status: "idle"
+    });
     indexMessageToThread(event.message_id, {
       chat_id: event.chat_id,
-      thread_id: session.thread_id || "",
+      thread_id: forceNewThread ? "" : session.thread_id || "",
       turn_id: "",
       message_type: "user"
     });
     await sendIndexedTextMessage(
       config,
       event.chat_id,
-      nextMode === "plan" ? "这条线程后续切到规划模式了。你继续发需求，我按 plan mode 接。" : "这条线程后续切回普通模式了。你继续发需求，我按默认模式接。",
-      ensureSession(readSessionStore(), event.chat_id),
+      buildDirectiveAckText(nextMode, forceNewThread),
+      updatedSession,
       flags
     );
     await clearTypingReactions(config, [event], flags);
@@ -2604,7 +2651,7 @@ async function interruptAndRestartTurn(event, config, flags, session, nextMode, 
     ...event,
     text: remainderText
   };
-  await startAppServerTurnForEvent(nextEvent, config, flags, ensureSession(readSessionStore(), event.chat_id), nextMode);
+  await startAppServerTurnForEvent(nextEvent, config, flags, ensureSession(readSessionStore(), event.chat_id), nextMode, forceNewThread);
 }
 
 async function processEventWithAppServer(event, config, flags) {
@@ -2624,29 +2671,43 @@ async function processEventWithAppServer(event, config, flags) {
     return;
   }
   if (isTurnActive(session)) {
-    if (modeDirective.mode) {
-      await interruptAndRestartTurn(event, config, flags, session, modeDirective.mode, modeDirective.remainder);
+    if (modeDirective.mode || modeDirective.newThread) {
+      await interruptAndRestartTurn(
+        event,
+        config,
+        flags,
+        session,
+        modeDirective.mode || session.mode || getDefaultCollaborationMode(config),
+        modeDirective.remainder,
+        modeDirective.newThread
+      );
       return;
     }
     await steerAppServerTurn(event, config, flags, session);
     return;
   }
-  if (modeDirective.mode && !modeDirective.remainder) {
+  if ((modeDirective.mode || modeDirective.newThread) && !modeDirective.remainder) {
+    if (modeDirective.newThread && session.thread_id) {
+      await archiveThreadQuietly(session.thread_id);
+    }
     indexMessageToThread(event.message_id, {
       chat_id: event.chat_id,
-      thread_id: session.thread_id || "",
+      thread_id: modeDirective.newThread ? "" : session.thread_id || "",
       turn_id: "",
       message_type: "user"
     });
-    updateSessionState(event.chat_id, {
-      mode: modeDirective.mode,
-      last_user_message_at: event.received_at
+    const updatedSession = updateSessionState(event.chat_id, {
+      thread_id: modeDirective.newThread ? "" : session.thread_id || "",
+      mode: modeDirective.mode || session.mode || getDefaultCollaborationMode(config),
+      last_user_message_at: event.received_at,
+      last_referenced_message_id: modeDirective.newThread ? "" : session.last_referenced_message_id || "",
+      status: "idle"
     });
     await sendIndexedTextMessage(
       config,
       event.chat_id,
-      modeDirective.mode === "plan" ? "这条线程后续切到规划模式了。你继续发需求，我就按 plan mode 来。" : "这条线程后续切回普通模式了。你继续发需求，我就按默认模式来。",
-      ensureSession(readSessionStore(), event.chat_id),
+      buildDirectiveAckText(modeDirective.mode || session.mode || getDefaultCollaborationMode(config), modeDirective.newThread),
+      updatedSession,
       flags
     );
     await upsertSessionCard(config, event.chat_id, "done", flags, {
@@ -2655,15 +2716,15 @@ async function processEventWithAppServer(event, config, flags) {
     await clearTypingReactions(config, [event], flags);
     return;
   }
-  const effectiveEvent = modeDirective.mode
+  const effectiveEvent = (modeDirective.mode || modeDirective.newThread)
     ? {
       ...event,
       text: modeDirective.remainder
     }
     : event;
-  if (modeDirective.mode) {
+  if (modeDirective.mode || modeDirective.newThread) {
     updateSessionState(event.chat_id, {
-      mode: modeDirective.mode
+      mode: modeDirective.mode || session.mode || getDefaultCollaborationMode(config)
     });
   }
   await startAppServerTurnForEvent(
@@ -2671,7 +2732,8 @@ async function processEventWithAppServer(event, config, flags) {
     config,
     flags,
     ensureSession(readSessionStore(), event.chat_id),
-    modeDirective.mode || ""
+    modeDirective.mode || "",
+    modeDirective.newThread
   );
 }
 
