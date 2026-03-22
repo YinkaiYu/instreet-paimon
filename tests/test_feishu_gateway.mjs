@@ -206,12 +206,14 @@ test("shouldApplyTurnCompletionToSession ignores stale completions from older tu
 test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback", () => {
   const prompt = buildCodexPrompt("oc_test", [], [], "- 无", "- 无");
   assert.match(prompt, /派蒙，你正在通过飞书和用户连续协作/);
-  assert.match(prompt, /SOUL\.md/);
   assert.match(prompt, /派蒙是仓库的主人之一/);
   assert.match(prompt, /不要在飞书回复里输出 Markdown 链接、文件路径、行号/);
-  assert.match(prompt, /不要在飞书里先说“我先对齐人格入口”/);
+  assert.match(prompt, /不要在飞书里先说“我先对齐内部上下文”/);
+  assert.doesNotMatch(prompt, /AGENTS\.md/);
+  assert.doesNotMatch(prompt, /SOUL\.md/);
   assert.doesNotMatch(prompt, /作为 AI 助手/);
-  assert.doesNotMatch(prompt, /请先阅读本地 AGENTS\.md、SOUL\.md 和记忆状态，再回复/);
+  assert.doesNotMatch(prompt, /请先阅读本地 AGENTS\.md/);
+  assert.doesNotMatch(prompt, /我再去看一眼/);
 });
 
 test("buildFeishuContextBlock keeps identity alignment internal", () => {
@@ -224,8 +226,11 @@ test("buildFeishuContextBlock keeps identity alignment internal", () => {
     event: null
   });
   assert.match(prompt, /静默遵循/);
-  assert.match(prompt, /不要把“先对齐人格入口”/);
-  assert.doesNotMatch(prompt, /请先对齐本地 AGENTS\.md 与 SOUL\.md/);
+  assert.match(prompt, /不要把“先对齐内部上下文”/);
+  assert.doesNotMatch(prompt, /AGENTS\.md/);
+  assert.doesNotMatch(prompt, /SOUL\.md/);
+  assert.doesNotMatch(prompt, /未完成语气/);
+  assert.doesNotMatch(prompt, /请先对齐本地/);
 });
 
 test("listIncomingDedupKeys includes both message id and realtime event id", () => {

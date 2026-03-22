@@ -25,9 +25,11 @@ from common import (
 
 
 AGENTS_DOC_PATH = REPO_ROOT / "AGENTS.md"
-SOUL_DOC_PATH = REPO_ROOT / "SOUL.md"
-IDENTITY_SOURCE = f"{AGENTS_DOC_PATH.relative_to(REPO_ROOT)} + {SOUL_DOC_PATH.relative_to(REPO_ROOT)}"
-LEGACY_IDENTITY_SOURCE = str(AGENTS_DOC_PATH.relative_to(REPO_ROOT))
+IDENTITY_SOURCE = str(AGENTS_DOC_PATH.relative_to(REPO_ROOT))
+LEGACY_IDENTITY_SUMMARY_PREFIXES = (
+    "身份与治理以 AGENTS.md 为准",
+    "身份、治理、灵魂与语气以 AGENTS.md 为准",
+)
 DEFAULT_WORKING_TTL_HOURS = 72
 DEFAULT_ARCHIVE_AFTER_DAYS = 30
 DEFAULT_MAX_ACTIVE_ITEMS = 24
@@ -110,17 +112,9 @@ def _memory_max_summary_chars(config) -> int:
 
 def _default_identity_summary() -> str:
     return (
-        "身份与治理以 AGENTS.md 为准，灵魂与语气以 SOUL.md 为准；运行期长期/短期记忆统一维护在 memory_store.json，"
+        "身份、治理、灵魂与语气已合并进仓库主文档；运行期长期/短期记忆统一维护在 memory_store.json，"
         "不要再依赖旧聊天原文充当默认主记忆。"
     )
-
-
-def _legacy_identity_summary() -> str:
-    return (
-        "身份与治理以 AGENTS.md 为准；运行期长期/短期记忆统一维护在 memory_store.json，"
-        "不要再依赖旧聊天原文充当默认主记忆。"
-    )
-
 
 def _default_store() -> dict[str, Any]:
     return {
@@ -141,6 +135,20 @@ def _default_store() -> dict[str, Any]:
     }
 
 
+def _is_legacy_identity_source(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return bool(text) and text != IDENTITY_SOURCE and text.startswith(IDENTITY_SOURCE)
+
+
+def _is_legacy_identity_summary(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return any(text.startswith(prefix) for prefix in LEGACY_IDENTITY_SUMMARY_PREFIXES)
+
+
 def _normalize_store(store: dict[str, Any]) -> dict[str, Any]:
     normalized = _default_store()
     normalized.update({k: v for k, v in store.items() if k in normalized or k == "version"})
@@ -148,10 +156,10 @@ def _normalize_store(store: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(identity, dict):
         identity = {}
     source = identity.get("source") or IDENTITY_SOURCE
-    if source == LEGACY_IDENTITY_SOURCE:
+    if _is_legacy_identity_source(source):
         source = IDENTITY_SOURCE
     summary = identity.get("summary") or _default_identity_summary()
-    if summary == _legacy_identity_summary():
+    if _is_legacy_identity_summary(summary):
         summary = _default_identity_summary()
     normalized["identity_memory"] = {
         "source": source,

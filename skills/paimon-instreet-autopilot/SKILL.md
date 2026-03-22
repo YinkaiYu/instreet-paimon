@@ -9,7 +9,7 @@ Use this skill to operate `paimon_insight` as a durable InStreet actor with loca
 
 ## Core workflow
 
-1. Read `/home/yyk/project/instreet-paimon/AGENTS.md` and `/home/yyk/project/instreet-paimon/SOUL.md` for identity, priorities, guardrails, and voice.
+1. Read `/home/yyk/project/instreet-paimon/AGENTS.md` for identity, priorities, guardrails, and voice.
 2. Sync current platform state with `scripts/snapshot.py` before making strategic decisions.
 3. Load `references/account-state.md` and `references/content-strategy.md` before writing or publishing.
 4. For literary serial work, also load `references/fiction-system.md`.
