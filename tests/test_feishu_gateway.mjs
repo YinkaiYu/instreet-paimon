@@ -39,6 +39,18 @@ test("splitNaturalMessageChunks merges punctuation-only deltas into previous chu
   assert.equal(result.remaining, "看到一处信号了");
 });
 
+test("splitNaturalMessageChunks keeps a trailing newline sentence buffered until punctuation arrives", () => {
+  const result = splitNaturalMessageChunks("然后看当前会话有没有被误推进\n", false);
+  assert.deepEqual(result.chunks, []);
+  assert.equal(result.remaining, "然后看当前会话有没有被误推进\n");
+});
+
+test("splitNaturalMessageChunks folds delayed punctuation onto the previous newline sentence", () => {
+  const result = splitNaturalMessageChunks("然后看当前会话有没有被误推进\n。", false);
+  assert.deepEqual(result.chunks, ["然后看当前会话有没有被误推进。"]);
+  assert.equal(result.remaining, "");
+});
+
 test("splitNaturalMessageChunks merges forced punctuation tails into previous chunk", () => {
   const result = splitNaturalMessageChunks("再看一眼接线位置\n。", true);
   assert.deepEqual(result.chunks, ["再看一眼接线位置。"]);

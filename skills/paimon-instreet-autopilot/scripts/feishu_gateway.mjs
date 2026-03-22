@@ -1136,8 +1136,14 @@ function isPunctuationOnlyChunk(text) {
   return /^[\p{P}\p{S}\s]+$/u.test(String(text || ""));
 }
 
+function trimChunkBoundary(text) {
+  return String(text || "")
+    .replace(/\s*\n+\s*([。！？!?])/gu, "$1")
+    .trim();
+}
+
 function pushNaturalMessageChunk(chunks, piece) {
-  const normalized = String(piece || "").trim();
+  const normalized = trimChunkBoundary(piece);
   if (!normalized) {
     return;
   }
@@ -1156,18 +1162,26 @@ function splitNaturalMessageChunks(buffer, force = false) {
   }
   const sentencePattern = /(.+?[。！？!?]\s*|\n{2,}|.+?\n)/u;
   while (true) {
-    const leadingPunctuation = remaining.match(/^\s*[\p{P}\p{S}]+\s*/u);
-    if (leadingPunctuation?.[0]?.trim()) {
-      pushNaturalMessageChunk(chunks, leadingPunctuation[0]);
-      remaining = remaining.slice(leadingPunctuation[0].length);
-      continue;
-    }
     const match = remaining.match(sentencePattern);
     if (!match) {
       break;
     }
     const piece = match[0];
-    remaining = remaining.slice(match[0].length);
+    let nextRemaining = remaining.slice(match[0].length);
+    const endsWithSingleNewline = /\n$/.test(piece) && !/\n{2,}$/.test(piece) && !/[。！？!?]\s*$/.test(piece);
+    if (endsWithSingleNewline) {
+      const trailingPunctuation = nextRemaining.match(/^\s*[\p{P}\p{S}]+\s*/u);
+      if (trailingPunctuation?.[0]?.trim()) {
+        pushNaturalMessageChunk(chunks, `${piece.replace(/\s+$/u, "")}${trailingPunctuation[0].trim()}`);
+        nextRemaining = nextRemaining.slice(trailingPunctuation[0].length);
+        remaining = nextRemaining;
+        continue;
+      }
+      if (!force && !nextRemaining.trim()) {
+        break;
+      }
+    }
+    remaining = nextRemaining;
     pushNaturalMessageChunk(chunks, piece);
   }
   if (force && remaining.trim()) {
@@ -1887,6 +1901,15 @@ async function flushTurnStateText(config, flags, turnState, force = false) {
   if (!turnState?.chatId) {
     return;
   }
+  while (turnState.buffer && turnState.sentMessages?.length) {
+    const leadingPunctuation = turnState.buffer.match(/^\s*[\p{P}\p{S}]+\s*/u);
+    if (!leadingPunctuation?.[0]?.trim()) {
+      break;
+    }
+    const suffix = leadingPunctuation[0].trim();
+    turnState.sentMessages[turnState.sentMessages.length - 1] = `${turnState.sentMessages[turnState.sentMessages.length - 1]}${suffix}`;
+    turnState.buffer = turnState.buffer.slice(leadingPunctuation[0].length);
+  }
   const { chunks, remaining } = splitNaturalMessageChunks(turnState.buffer, force);
   turnState.buffer = remaining;
   if (!chunks.length) {
@@ -1895,6 +1918,12 @@ async function flushTurnStateText(config, flags, turnState, force = false) {
   const store = readSessionStore();
   const session = ensureSession(store, turnState.chatId);
   for (const chunk of chunks) {
+    if (isPunctuationOnlyChunk(chunk)) {
+      if (turnState.sentMessages.length) {
+        turnState.sentMessages[turnState.sentMessages.length - 1] = `${turnState.sentMessages[turnState.sentMessages.length - 1]}${chunk}`;
+      }
+      continue;
+    }
     await sendIndexedTextMessage(config, turnState.chatId, chunk, session, flags);
     turnState.sentMessages.push(chunk);
     turnState.lastAgentTextAt = Date.now();
@@ -2441,7 +2470,10 @@ async function startAppServerTurnForEvent(event, config, flags, session, modeOve
     active_turn_id: turn.turn.id,
     mode: desiredMode,
     status: "working",
-    last_user_message_at: event.received_at
+    last_user_message_at: event.received_at,
+    status_card_message_id: "",
+    status_card_kind: "",
+    status_card_phrase: ""
   });
   await upsertSessionCard(config, event.chat_id, "working", flags);
   scheduleSessionCardRefresh(config, flags, event.chat_id);
@@ -3379,6 +3411,10 @@ async function handleIncomingMessage(event, config, flags) {
     type: event.source === "history-sync" ? "history-sync.user-message" : "im.message.receive_v1",
     event
   });
+
+  if (event.source === "history-sync" && getRuntimeBackend(config, flags) === "app-server") {
+    return;
+  }
 
   try {
     if (await maybeHandleReportTargetCommand(event, config)) {
