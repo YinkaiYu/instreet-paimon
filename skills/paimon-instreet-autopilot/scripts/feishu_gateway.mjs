@@ -97,6 +97,13 @@ function writeMessageThreadIndex(payload) {
   writeJsonFile(messageThreadIndexPath, payload);
 }
 
+function normalizePendingRequestId(requestId) {
+  if (requestId === null || requestId === undefined) {
+    return "";
+  }
+  return String(requestId).trim();
+}
+
 function readPendingRequestStore() {
   return readJsonFile(pendingRequestsPath, { version: 1, requests: {} });
 }
@@ -174,41 +181,44 @@ function lookupMessageThreadBinding(messageId) {
 }
 
 function removePendingRequest(requestId) {
-  if (!requestId) {
+  const normalizedId = normalizePendingRequestId(requestId);
+  if (!normalizedId) {
     return null;
   }
   const store = readPendingRequestStore();
-  const entry = store.requests[requestId] || null;
+  const entry = store.requests[normalizedId] || null;
   if (!entry) {
     return null;
   }
-  delete store.requests[requestId];
+  delete store.requests[normalizedId];
   writePendingRequestStore(store);
   return entry;
 }
 
 function upsertPendingRequest(requestId, payload) {
-  if (!requestId) {
+  const normalizedId = normalizePendingRequestId(requestId);
+  if (!normalizedId) {
     return null;
   }
   const store = readPendingRequestStore();
-  const existing = store.requests[requestId] || {};
-  store.requests[requestId] = {
+  const existing = store.requests[normalizedId] || {};
+  store.requests[normalizedId] = {
     ...existing,
     ...payload,
-    request_id: requestId,
+    request_id: normalizedId,
     updated_at: new Date().toISOString()
   };
   writePendingRequestStore(store);
-  return store.requests[requestId];
+  return store.requests[normalizedId];
 }
 
 function readPendingRequest(requestId) {
-  if (!requestId) {
+  const normalizedId = normalizePendingRequestId(requestId);
+  if (!normalizedId) {
     return null;
   }
   const store = readPendingRequestStore();
-  return store.requests[requestId] || null;
+  return store.requests[normalizedId] || null;
 }
 
 function removePendingRequestsForTurn(turnId) {
@@ -2321,8 +2331,9 @@ async function handleAppServerServerRequest(config, flags, payload) {
       });
       return;
     }
-    const requestEntry = upsertPendingRequest(payload.id, {
-      request_id: payload.id,
+    const requestId = normalizePendingRequestId(payload.id);
+    const requestEntry = upsertPendingRequest(requestId, {
+      request_id: requestId,
       rpc_id: payload.id,
       chat_id: chatId,
       thread_id: payload.params.threadId,
@@ -2333,7 +2344,7 @@ async function handleAppServerServerRequest(config, flags, payload) {
       created_at: new Date().toISOString()
     });
     updateSessionState(chatId, {
-      pending_request_id: String(payload.id),
+      pending_request_id: requestId,
       status: "waiting"
     });
     await upsertSessionCard(config, chatId, "waiting", flags, {
@@ -3842,6 +3853,7 @@ export {
   inboxEventMatchesIncomingEvent,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
+  normalizePendingRequestId,
   pickStatusPhrase,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,

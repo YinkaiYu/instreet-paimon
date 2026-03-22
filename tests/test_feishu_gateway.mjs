@@ -11,6 +11,7 @@ import {
   inboxEventMatchesIncomingEvent,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
+  normalizePendingRequestId,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,
@@ -118,6 +119,13 @@ test("tryMapTextToQuestionAnswer prefers matching option labels", () => {
     "我选 Plan 优先"
   );
   assert.deepEqual(answer, { answers: ["Plan 优先"] });
+});
+
+test("normalizePendingRequestId keeps zero as a valid request id", () => {
+  assert.equal(normalizePendingRequestId(0), "0");
+  assert.equal(normalizePendingRequestId("0"), "0");
+  assert.equal(normalizePendingRequestId(""), "");
+  assert.equal(normalizePendingRequestId(null), "");
 });
 
 test("buildStatusCard renders question buttons when card actions are enabled", () => {
