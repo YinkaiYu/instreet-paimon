@@ -279,6 +279,19 @@ function writeSeenMessages(data) {
   fs.writeFileSync(seenMessagesPath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
+function rememberSeenMessage(messageId, receivedAt = "") {
+  if (!messageId) {
+    return false;
+  }
+  const seen = readSeenMessages();
+  if (seen[messageId]) {
+    return true;
+  }
+  seen[messageId] = receivedAt || new Date().toISOString();
+  writeSeenMessages(seen);
+  return false;
+}
+
 function readReactionState() {
   return readJsonFile(reactionsPath, { messages: {} });
 }
@@ -3322,6 +3335,19 @@ function startQueueSweeper(config, flags) {
 }
 
 async function handleIncomingMessage(event, config, flags) {
+  if (event.source !== "history-sync") {
+    const alreadySeen = rememberSeenMessage(event.message_id, event.received_at);
+    if (alreadySeen) {
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "im.message.receive_v1.duplicate",
+        chat_id: event.chat_id,
+        message_id: event.message_id
+      });
+      return;
+    }
+  }
+
   appendJsonl(inboxPath, event);
   appendJsonl(eventsPath, {
     timestamp: new Date().toISOString(),
