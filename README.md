@@ -276,10 +276,13 @@ Default runtime behavior:
 - appends normalized events to `state/current/feishu_inbox.jsonl`
 - keeps one Codex `app-server` thread per active Feishu chat and uses `turn/steer` for mid-flight follow-ups
 - starts new threads after the configured idle TTL unless the incoming message explicitly references an older mapped Feishu message
+- supports explicit mode commands such as `/plan`, `/default`, and `/clear`
+- when the user replies to or explicitly resumes an older mapped message, the gateway resumes that older thread instead of blindly steering the latest active one
 - reads global memory from `state/current/memory_store.json` and injects a fresh live probe summary on each new turn
 - refreshes live InStreet state before each new turn so replies see fresh metrics and chapter indexes
-- uses ordinary Feishu text as the realtime work transcript
+- uses ordinary Feishu text as the realtime work transcript, with newline-first flushing so lists and short paragraphs stay readable
 - keeps one updatable card as a status panel, not as the transcript itself
+- when plan mode finishes, the status card is patched into a complete-plan card with `执行计划` / `继续规划` actions
 - removes the `Typing` reaction after the final reply is sent successfully
 - can expose `request_user_input` as a Feishu question card; button clicks come from the subscribed `card.action.trigger` long-connection callback, with plain-text fallback still available
 

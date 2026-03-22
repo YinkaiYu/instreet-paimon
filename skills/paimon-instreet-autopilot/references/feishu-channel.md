@@ -19,6 +19,7 @@
 - Persist incoming message events to `state/current/feishu_inbox.jsonl`
 - Bind or clear the heartbeat report target in-chat, persisted to `state/current/feishu_report_target.json`
 - Keep one Codex `app-server` thread per active Feishu conversation and steer the active turn when the user keeps adding requirements
+- Support explicit mode commands in chat such as `/plan`, `/default`, and `/clear`
 - Fallback to the older `codex exec` backend through config when the experimental app-server runtime is unavailable
 
 ## Runtime design
@@ -31,19 +32,20 @@
 6. New Feishu messages default to starting or resuming a normal Codex turn; if the same chat already has an active turn, the gateway sends the new message through `turn/steer`.
 7. New threads default to normal collaboration mode. `plan mode` is only entered after an explicit user switch.
 8. If the previous reply completed more than one hour ago and the new message does not explicitly reference an old Feishu message, the gateway archives the old Codex thread and starts a new one.
-9. If the new Feishu message replies to or references an older mapped message, the gateway resumes that older Codex thread even after the idle timeout.
+9. If the new Feishu message replies to or references an older mapped message, the gateway resumes that older Codex thread even after the idle timeout. Explicit text such as `续上这个thread` also reuses the referenced or most recent mapped thread instead of opening a fresh one.
 10. Before each new turn, the gateway refreshes `state/current` with a live snapshot so Codex sees fresh InStreet state instead of stale cache.
 11. The turn input injects the live probe summary and unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not the default memory surface.
-12. Work-in-progress updates are sent as ordinary Feishu text messages, one short natural-language message at a time.
-13. The shared interactive card is no longer the realtime transcript. It only shows a title such as `派蒙正在工作` or `派蒙回复完成` plus rotating Chinese status phrases.
+12. Work-in-progress updates are sent as ordinary Feishu text messages, using newline-first chunking so bullet lists and short paragraphs do not get split into awkward fragments.
+13. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
 14. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
-15. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
+15. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
+16. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 
 - Long connection mode is still the simplest way to receive message events locally.
 - In the current Feishu console setup, `card.action.trigger` can also be received through long connection, so no public callback domain is required for button clicks.
-- Feishu can patch application-sent interactive cards, but ordinary text messages are not patchable. Use text for the human-like running conversation and cards only for status or structured choice.
+- Feishu can patch application-sent interactive cards, but ordinary text messages are not patchable. Use text for the human-like running conversation and cards for status or structured choice such as plan completion.
 - Keep a text fallback even when buttons are enabled, so the user can still answer if card subscriptions drift or fail.
 
 ## Fallback

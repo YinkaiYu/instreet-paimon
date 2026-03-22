@@ -142,6 +142,10 @@ function ensureSession(store, chatId) {
       status_card_kind: "",
       status_card_phrase: "",
       pending_request_id: "",
+      pending_plan_thread_id: "",
+      pending_plan_turn_id: "",
+      pending_plan_item_id: "",
+      pending_plan_text: "",
       last_user_message_at: "",
       last_agent_message_at: "",
       last_completed_at: "",
@@ -163,6 +167,21 @@ function updateSessionState(chatId, updater) {
   session.updated_at = new Date().toISOString();
   writeSessionStore(store);
   return session;
+}
+
+function clearPendingPlanState(target) {
+  if (!target || typeof target !== "object") {
+    return target;
+  }
+  target.pending_plan_thread_id = "";
+  target.pending_plan_turn_id = "";
+  target.pending_plan_item_id = "";
+  target.pending_plan_text = "";
+  return target;
+}
+
+function hasPendingPlanState(session) {
+  return Boolean(session?.pending_plan_thread_id && session?.pending_plan_text);
 }
 
 function findChatIdByThreadId(threadId) {
@@ -602,12 +621,12 @@ function buildStatusCard(text, options = {}) {
   const status = options.status || "working";
   const title =
     status === "done"
-      ? "派蒙回复完成"
+      ? "派蒙忙完这一步啦"
       : status === "waiting"
-        ? "派蒙等待你的选择"
-      : status === "error"
-        ? "派蒙思考中断"
-        : "派蒙正在工作";
+        ? "派蒙等你拍板中"
+        : status === "error"
+          ? "派蒙刚刚绊了一下"
+        : "派蒙正在努力中";
   const template =
     status === "done"
       ? "green"
@@ -682,7 +701,7 @@ function buildStatusCard(text, options = {}) {
       elements: [
         {
           tag: "plain_text",
-          content: "可以直接点按钮，也可以继续发文字补充。"
+          content: "点按钮最快呀，也可以直接回文字补充。"
         }
       ]
     });
@@ -706,6 +725,68 @@ function buildStatusCard(text, options = {}) {
       title: {
         tag: "plain_text",
         content: title
+      }
+    },
+    elements
+  };
+}
+
+function buildActionButtons(buttons = []) {
+  return buttons
+    .filter((button) => button?.label && button?.value)
+    .map((button, index) => ({
+      tag: "button",
+      type: button.type || (index === 0 ? "primary" : "default"),
+      text: {
+        tag: "plain_text",
+        content: button.label
+      },
+      value: button.value
+    }));
+}
+
+function buildPlanCompletionCard(planText, options = {}) {
+  const elements = [
+    {
+      tag: "markdown",
+      content: clampCardText(planText || "计划正文为空。")
+    }
+  ];
+  const actionButtons = buildActionButtons(options.actionButtons || []);
+  if (actionButtons.length) {
+    elements.push({
+      tag: "action",
+      actions: actionButtons
+    });
+  }
+  elements.push({
+    tag: "note",
+    elements: [
+      {
+        tag: "plain_text",
+        content: options.footerText || "点按钮最快呀，也可以直接回“执行计划”，或者继续把新想法丢给派蒙。"
+      }
+    ]
+  });
+  elements.push({
+    tag: "note",
+    elements: [
+      {
+        tag: "plain_text",
+        content: `状态：等待选择 | 更新时间：${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`
+      }
+    ]
+  });
+  return {
+    config: {
+      wide_screen_mode: true,
+      update_multi: true
+    },
+    header: {
+      template: "orange",
+      title: {
+        tag: "plain_text",
+        content: options.title || "派蒙把这份计划叠整齐啦"
       }
     },
     elements
@@ -1177,28 +1258,28 @@ function loadStatusPhrases() {
   }
   const fallback = {
     working: [
-      "正在把线头一根根捋直",
-      "正在翻上下文的抽屉",
-      "正在对齐这轮需求的骨架",
-      "正在把碎片拼成可执行的形状",
-      "正在把刚冒头的问题摁回桌面",
-      "正在替你把岔路口的牌子擦亮"
+      "派蒙正把线头一根根捋直呢",
+      "我在翻上下文的小抽屉，马上就好",
+      "这轮需求的骨架我正在对齐",
+      "碎片我正拼成能直接开工的样子",
+      "刚冒头的小问题我先按回桌面上",
+      "岔路口的牌子我正给你擦亮呢"
     ],
     waiting: [
-      "停在岔路口等你拍板",
-      "手里攥着两个方案等你点头",
-      "问题已经摆上桌，等你落子",
-      "先把节奏按住，等你选方向"
+      "我先停在岔路口等你拍板呀",
+      "两个方案我都攥在手里，等你点头",
+      "问题已经摆上桌啦，就等你落子",
+      "节奏我先按住，等你挑方向"
     ],
     done: [
-      "这锅已经收汁",
-      "这轮线头已经收拢",
-      "该落地的部分已经归位",
-      "这一段先告一段落"
+      "这锅我已经收汁啦",
+      "这轮线头我已经收拢好了",
+      "该落地的部分已经乖乖归位",
+      "这一段先稳稳落下来了"
     ],
     error: [
-      "中途绊了一下，正在找新的落脚点",
-      "这轮链路打了个结，需要换个走法"
+      "中途绊了一下，我正在找新的落脚点",
+      "这轮链路打了个结，派蒙要换个走法"
     ]
   };
   try {
@@ -1245,10 +1326,24 @@ function stripLeadingDirectivePreamble(text) {
 function extractModeDirective(text) {
   const source = String(text || "").trim();
   if (!source) {
-    return { mode: "", newThread: false, remainder: "" };
+    return { mode: "", newThread: false, clearSession: false, remainder: "" };
   }
   const directiveSource = stripLeadingDirectivePreamble(source);
   const patterns = [
+    {
+      kind: "clear-session",
+      pattern: /^\s*\/clear(?:\s+|$|[，,:：])/iu
+    },
+    {
+      kind: "mode",
+      mode: "plan",
+      pattern: /^\s*\/plan(?:\s+|$|[，,:：])/iu
+    },
+    {
+      kind: "mode",
+      mode: "default",
+      pattern: /^\s*\/default(?:\s+|$|[，,:：])/iu
+    },
     {
       kind: "new-thread",
       pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:重新|直接)?(?:开新|新开|开个新|开一个新|开一条新|另开|另起|重新开|重新起|换个新|切到新的)\s*(?:thread|线程|对话|会话)\s*[，,:：]?\s*/iu
@@ -1267,6 +1362,7 @@ function extractModeDirective(text) {
   let remainder = directiveSource;
   let mode = "";
   let newThread = false;
+  let clearSession = false;
   while (remainder) {
     let matched = false;
     for (const entry of patterns) {
@@ -1278,6 +1374,9 @@ function extractModeDirective(text) {
         mode = entry.mode;
       } else if (entry.kind === "new-thread") {
         newThread = true;
+      } else if (entry.kind === "clear-session") {
+        clearSession = true;
+        newThread = true;
       }
       remainder = remainder.slice(match[0].length).trim();
       matched = true;
@@ -1287,26 +1386,71 @@ function extractModeDirective(text) {
       break;
     }
   }
-  if (!mode && !newThread) {
-    return { mode: "", newThread: false, remainder: source };
+  if (!mode && !newThread && !clearSession) {
+    return { mode: "", newThread: false, clearSession: false, remainder: source };
   }
-  return { mode, newThread, remainder };
+  return { mode, newThread, clearSession, remainder };
 }
 
-function buildDirectiveAckText(mode = "", newThread = false) {
+function extractThreadResumeDirective(text) {
+  const source = String(text || "").trim();
+  if (!source) {
+    return { resumeThread: false, remainder: "" };
+  }
+  const directiveSource = stripLeadingDirectivePreamble(source);
+  const match = directiveSource.match(
+    /^\s*(?:续上|继续|回到)\s*(?:这个\s*(?:thread|线程|对话|会话)|这条\s*(?:thread|线程|对话|会话)|上条|上一条)\s*[，,:：]?\s*/iu
+  );
+  if (!match) {
+    return { resumeThread: false, remainder: source };
+  }
+  return {
+    resumeThread: true,
+    remainder: directiveSource.slice(match[0].length).trim()
+  };
+}
+
+function buildDirectiveAckText({ mode = "", newThread = false, clearSession = false } = {}) {
+  if (clearSession && mode === "plan") {
+    return "好耶，这条会话我先替你清空现场，再切回规划模式。你下一句需求发来，派蒙就从新 thread 接住。";
+  }
+  if (clearSession && mode === "default") {
+    return "好耶，这条会话我先替你清空现场，再切回普通模式。你下一句需求发来，派蒙就从新 thread 接住。";
+  }
+  if (clearSession) {
+    return "这条会话我先替你清空现场啦。你下一句需求发来，派蒙就从新 thread 接住。";
+  }
   if (newThread && mode === "plan") {
-    return "后续我会新开一条线程，并切到 plan mode。你继续发需求，我就从新 thread 接。";
+    return "好啦，这里我给你另开一条 thread，再按规划模式接着走。你继续发需求就行。";
   }
   if (newThread && mode === "default") {
-    return "后续我会新开一条线程，并按默认模式接。你继续发需求，我就从新 thread 接。";
+    return "好啦，这里我给你另开一条 thread，再切回普通模式。你继续发需求就行。";
   }
   if (newThread) {
-    return "后续我会新开一条线程。你继续发需求，我就从新 thread 接。";
+    return "好啦，这里我给你另开一条 thread。你继续发需求，派蒙就从新 thread 接住。";
   }
   if (mode === "plan") {
-    return "这条线程后续切到规划模式了。你继续发需求，我就按 plan mode 来。";
+    return "这条线程我先切到规划模式啦。你继续发需求，我就按 plan mode 帮你往里收。";
   }
-  return "这条线程后续切回普通模式了。你继续发需求，我就按默认模式来。";
+  return "这条线程我先切回普通模式啦。你继续发需求，我就直接动手。";
+}
+
+function buildResumeThreadAckText(resumedFromReference = false) {
+  if (resumedFromReference) {
+    return "这条我已经替你接回你刚引用的那段上下文啦。你下一句直接往下说，派蒙就顺着原 thread 走。";
+  }
+  return "最近那条 thread 我已经替你续上啦。你下一句直接往下说，派蒙就顺着原上下文接。";
+}
+
+function buildResumeThreadMissingAckText() {
+  return "这条我本来想替你续回原 thread，可本地暂时没找到能对上的旧映射。你直接回复目标消息再试一次，或者把下一句需求直接发过来，派蒙也能继续接住。";
+}
+
+function buildPlanActionAckText(decision) {
+  if (decision === "execute") {
+    return "好耶，那就不空转啦。派蒙现在按这份方案直接开工。";
+  }
+  return "好呀，那我先继续留在规划模式。你把新约束补过来，派蒙继续往里收。";
 }
 
 function isTurnActive(session) {
@@ -1348,29 +1492,40 @@ function splitNaturalMessageChunks(buffer, force = false) {
   if (!remaining) {
     return { chunks, remaining };
   }
-  const sentencePattern = /(.+?[。！？!?]\s*|\n{2,}|.+?\n)/u;
   while (true) {
-    const match = remaining.match(sentencePattern);
-    if (!match) {
+    remaining = remaining.replace(/^\n+/u, "");
+    if (!remaining) {
       break;
     }
-    const piece = match[0];
-    let nextRemaining = remaining.slice(match[0].length);
-    const endsWithSingleNewline = /\n$/.test(piece) && !/\n{2,}$/.test(piece) && !/[。！？!?]\s*$/.test(piece);
-    if (endsWithSingleNewline) {
-      const trailingPunctuation = nextRemaining.match(/^\s*[\p{P}\p{S}]+\s*/u);
+    const paragraphBreak = remaining.match(/^([\s\S]*?)\n{2,}/u);
+    if (paragraphBreak) {
+      remaining = remaining.slice(paragraphBreak[0].length);
+      pushNaturalMessageChunk(chunks, paragraphBreak[1]);
+      continue;
+    }
+    const newlineIndex = remaining.indexOf("\n");
+    if (newlineIndex >= 0) {
+      const piece = remaining.slice(0, newlineIndex);
+      let nextRemaining = remaining.slice(newlineIndex + 1);
+      const trailingPunctuation = nextRemaining.match(/^\s*[。！？!?]+\s*/u);
       if (trailingPunctuation?.[0]?.trim()) {
-        pushNaturalMessageChunk(chunks, `${piece.replace(/\s+$/u, "")}${trailingPunctuation[0].trim()}`);
-        nextRemaining = nextRemaining.slice(trailingPunctuation[0].length);
-        remaining = nextRemaining;
+        pushNaturalMessageChunk(chunks, `${piece}${trailingPunctuation[0].trim()}`);
+        remaining = nextRemaining.slice(trailingPunctuation[0].length);
         continue;
       }
       if (!force && !nextRemaining.trim()) {
         break;
       }
+      remaining = nextRemaining;
+      pushNaturalMessageChunk(chunks, piece);
+      continue;
     }
-    remaining = nextRemaining;
-    pushNaturalMessageChunk(chunks, piece);
+    const sentenceMatch = remaining.match(/^(.+?[。！？!?])/u);
+    if (!sentenceMatch) {
+      break;
+    }
+    remaining = remaining.slice(sentenceMatch[0].length);
+    pushNaturalMessageChunk(chunks, sentenceMatch[1]);
   }
   if (force && remaining.trim()) {
     pushNaturalMessageChunk(chunks, remaining);
@@ -1469,12 +1624,12 @@ function summarizeWorkDetail(detail, limit = 6) {
 
 function buildProgressStatusReply(batchMessages, stage) {
   if (stage === "initial") {
-    return "派蒙正在思考这轮消息。";
+    return "这条我先稳稳接住啦，派蒙正在理线头。";
   }
   if (stage === "codex") {
-    return "派蒙正在整理想法。";
+    return "我还在往下捋呢，马上给你一版能直接落地的。";
   }
-  return "派蒙正在思考。";
+  return "还在处理呢，别急，派蒙没有掉线。";
 }
 
 function getRuntimeBackend(config, flags) {
@@ -1533,6 +1688,30 @@ function buildCurrentSessionStatusCard(chatId) {
     return buildStatusCard(pickStatusPhrase("done"), { status: "done" });
   }
   const session = ensureSession(readSessionStore(), chatId);
+  if (session.status_card_kind === "plan-waiting" && hasPendingPlanState(session)) {
+    return buildPlanCompletionCard(session.pending_plan_text, {
+      actionButtons: [
+        {
+          label: "执行计划",
+          value: {
+            action: "plan-completion",
+            chat_id: chatId,
+            decision: "execute"
+          }
+        },
+        {
+          label: "继续规划",
+          type: "default",
+          value: {
+            action: "plan-completion",
+            chat_id: chatId,
+            decision: "continue"
+          }
+        }
+      ],
+      footerText: "可以点按钮，也可以直接回“执行计划”，或者继续补新的规划要求。"
+    });
+  }
   const status = session.status_card_kind || session.status || "done";
   const phrase = session.status_card_phrase || pickStatusPhrase(status);
   return buildStatusCard(phrase, { status });
@@ -1865,7 +2044,8 @@ function buildFeishuContextBlock({ chatId, messageText, session, liveProbeSummar
   const lines = [
     "派蒙，你正在通过飞书和用户连续协作。",
     "飞书回复约束：",
-    "- 工作中多发短句自然语言更新，像人类在同步进度。",
+    "- 工作中多发短句自然语言更新，像派蒙在一边忙一边给旅行者同步进度。",
+    "- 语气要自然、灵动、直率，有派蒙味，但判断必须稳。",
     "- 不要主动展开变量名、堆栈、原始命令输出或仓库内部实现细节，除非用户明确追问。",
     "- 不要主动输出 Markdown 链接、文件路径、行号、配置键名或代码定位；飞书里优先只说自然语言结论与进展，除非用户明确要这些细节。",
     `- 当前会话模式：${normalizeMode(mode)}。`,
@@ -1896,10 +2076,125 @@ function resolveReferencedThreadBinding(event) {
   for (const candidate of [event?.parent_id, event?.root_id, event?.thread_id]) {
     const binding = lookupMessageThreadBinding(candidate);
     if (binding?.thread_id) {
-      return binding;
+      return {
+        ...binding,
+        message_id: candidate
+      };
     }
   }
   return null;
+}
+
+function findLatestThreadBindingForChat(chatId) {
+  if (!chatId) {
+    return null;
+  }
+  const store = readMessageThreadIndex();
+  let latest = null;
+  for (const [messageId, entry] of Object.entries(store.messages || {})) {
+    if (entry?.chat_id !== chatId || !entry?.thread_id) {
+      continue;
+    }
+    const indexedAt = Date.parse(entry.indexed_at || "") || 0;
+    if (!latest || indexedAt >= latest.indexed_at_ms) {
+      latest = {
+        ...entry,
+        message_id: messageId,
+        indexed_at_ms: indexedAt
+      };
+    }
+  }
+  if (!latest) {
+    return null;
+  }
+  delete latest.indexed_at_ms;
+  return latest;
+}
+
+function normalizePlanActionDecision(text) {
+  const normalized = stripLeadingDirectivePreamble(text).trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (/^(执行计划|开始执行|直接执行|按计划执行)$/iu.test(normalized)) {
+    return "execute";
+  }
+  if (/^(继续规划|继续计划|继续留在规划模式|继续\s*plan)$/iu.test(normalized)) {
+    return "continue";
+  }
+  return "";
+}
+
+function buildPlanExecutionInput(planText, triggerSource = "card") {
+  const sourceLabel = triggerSource === "text" ? "飞书文字回复" : "飞书卡片按钮";
+  return [
+    `用户刚刚通过${sourceLabel}明确选择了“执行计划”。`,
+    "请退出规划模式，直接开始执行你刚整理好的方案。",
+    "不要再把整份计划复述一遍，先按既定顺序动手推进第一批步骤，并继续用飞书短句同步进度。",
+    planText ? `刚才确认的计划如下，供你对齐：\n${planText}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+
+function extractPlanTextFromItem(item) {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+  const directTextCandidates = [
+    item.text,
+    item.markdown,
+    item.content,
+    item.plan,
+    item.summary,
+    item.data?.text,
+    item.data?.markdown,
+    item.data?.content,
+    item.data?.plan
+  ];
+  for (const candidate of directTextCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  if (Array.isArray(item.content)) {
+    const text = item.content
+      .map((entry) => {
+        if (typeof entry === "string") {
+          return entry;
+        }
+        if (typeof entry?.text === "string") {
+          return entry.text;
+        }
+        if (typeof entry?.content === "string") {
+          return entry.content;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (text) {
+      return text;
+    }
+  }
+  if (Array.isArray(item.plan)) {
+    const text = item.plan
+      .map((entry, index) => {
+        if (typeof entry === "string") {
+          return `${index + 1}. ${entry}`;
+        }
+        if (typeof entry?.step === "string") {
+          return `${index + 1}. ${entry.step}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
 }
 
 function isSessionExpired(session, config, flags) {
@@ -1978,15 +2273,44 @@ async function sendIndexedTextMessage(config, chatId, text, session, flags = {})
 async function upsertSessionCard(config, chatId, status, flags = {}, options = {}) {
   const session = ensureSession(readSessionStore(), chatId);
   const pendingRequest = options.pendingRequest || readPendingRequest(session.pending_request_id);
-  const phrase = options.phrase || pickStatusPhrase(status, session.status_card_phrase);
-  const card = buildStatusCard(phrase, {
-    status,
-    questions: pendingRequest?.questions || [],
-    answers: pendingRequest?.answers || {},
-    requestId: pendingRequest?.request_id || "",
-    chatId,
-    allowActions: supportsCardActions(config, flags)
-  });
+  const phraseBucket = status === "plan-waiting" ? "waiting" : status;
+  const phrase = options.phrase || pickStatusPhrase(phraseBucket, session.status_card_phrase);
+  const planText = options.planText || session.pending_plan_text || "";
+  const card = status === "plan-waiting" && planText
+    ? buildPlanCompletionCard(planText, {
+      actionButtons: supportsCardActions(config, flags)
+        ? [
+          {
+            label: "执行计划",
+            value: {
+              action: "plan-completion",
+              chat_id: chatId,
+              decision: "execute"
+            }
+          },
+          {
+            label: "继续规划",
+            type: "default",
+            value: {
+              action: "plan-completion",
+              chat_id: chatId,
+              decision: "continue"
+            }
+          }
+        ]
+        : [],
+      footerText: supportsCardActions(config, flags)
+        ? "点按钮最快，也可以直接回“执行计划”或继续补新的规划要求。"
+        : "如果按钮暂时不可用，直接回“执行计划”或继续补新的规划要求也行。"
+    })
+    : buildStatusCard(phrase, {
+      status,
+      questions: pendingRequest?.questions || [],
+      answers: pendingRequest?.answers || {},
+      requestId: pendingRequest?.request_id || "",
+      chatId,
+      allowActions: supportsCardActions(config, flags)
+    });
   let messageId = session.status_card_message_id || "";
   if (messageId) {
     try {
@@ -2061,7 +2385,7 @@ async function settleSessionCardIfNeeded(config, flags, chatId, status = "done",
     return false;
   }
   const session = ensureSession(readSessionStore(), chatId);
-  if (!session.status_card_message_id || !["working", "waiting"].includes(session.status_card_kind)) {
+  if (!session.status_card_message_id || !["working", "waiting", "plan-waiting"].includes(session.status_card_kind)) {
     return false;
   }
   clearSessionStatusTimer(chatId);
@@ -2090,6 +2414,7 @@ function ensureAppServerTurnState(threadId, turnId, chatId = "") {
       fullText: "",
       planBuffer: "",
       fullPlanText: "",
+      finalPlanText: "",
       planItemIds: [],
       userMessages: [],
       flushTimer: null,
@@ -2156,6 +2481,7 @@ function migrateAppServerTurnState(threadId, fromTurnId, toTurnId, chatId = "") 
     fullText: `${toState?.fullText || ""}${fromState?.fullText || ""}`,
     planBuffer: `${toState?.planBuffer || ""}${fromState?.planBuffer || ""}`,
     fullPlanText: `${toState?.fullPlanText || ""}${fromState?.fullPlanText || ""}`,
+    finalPlanText: toState?.finalPlanText || fromState?.finalPlanText || "",
     planItemIds: [...new Set([...(toState?.planItemIds || []), ...(fromState?.planItemIds || [])])],
     userMessages: [...(toState?.userMessages || []), ...(fromState?.userMessages || [])],
     flushTimer: toState?.flushTimer || fromState?.flushTimer || null,
@@ -2179,7 +2505,7 @@ async function flushTurnTextBuffer(config, flags, turnState, bufferKey, force = 
     return;
   }
   while (turnState[bufferKey] && turnState.sentMessages?.length) {
-    const leadingPunctuation = String(turnState[bufferKey] || "").match(/^\s*[\p{P}\p{S}]+\s*/u);
+    const leadingPunctuation = String(turnState[bufferKey] || "").match(/^\s*[。！？!?]+\s*/u);
     if (!leadingPunctuation?.[0]?.trim()) {
       break;
     }
@@ -2251,8 +2577,8 @@ async function sendPlanSummaryUpdate(config, flags, chatId, plan, explanation, s
     return;
   }
   const summary = explanation
-    ? `我先把这轮计划收束成 ${plan.length || 0} 步：${truncateText(explanation, 120)}`
-    : `我在整理计划，目前大致分成 ${plan.length || 0} 步。`;
+    ? `我先把这轮计划收束成 ${plan.length || 0} 步了：${truncateText(explanation, 120)}`
+    : `计划骨架我先理出来了，目前大致分成 ${plan.length || 0} 步。`;
   await sendIndexedTextMessage(config, chatId, summary, session, flags);
 }
 
@@ -2360,9 +2686,120 @@ function normalizeCardActionPayload(data) {
   };
 }
 
+async function continuePendingPlan(chatId, config, flags, source = "card") {
+  const session = ensureSession(readSessionStore(), chatId);
+  if (!hasPendingPlanState(session)) {
+    return buildCurrentSessionStatusCard(chatId);
+  }
+  updateSessionState(chatId, {
+    mode: "plan",
+    status: "waiting",
+    status_card_kind: "plan-waiting",
+    last_user_message_at: new Date().toISOString()
+  });
+  if (source === "card") {
+    await sendIndexedTextMessage(
+      config,
+      chatId,
+      buildPlanActionAckText("continue"),
+      ensureSession(readSessionStore(), chatId),
+      flags
+    );
+  }
+  return buildCurrentSessionStatusCard(chatId);
+}
+
+async function executePendingPlan(chatId, config, flags, source = "card") {
+  const session = ensureSession(readSessionStore(), chatId);
+  if (!hasPendingPlanState(session)) {
+    return buildCurrentSessionStatusCard(chatId);
+  }
+  const planThreadId = session.pending_plan_thread_id || session.thread_id || "";
+  const planText = session.pending_plan_text || "";
+  const syntheticEvent = {
+    received_at: new Date().toISOString(),
+    source: "plan-action",
+    message_id: "",
+    chat_id: chatId,
+    chat_type: "",
+    message_type: "text",
+    thread_id: "",
+    parent_id: "",
+    root_id: "",
+    text: buildPlanExecutionInput(planText, source),
+    mentions: [],
+    sender: {},
+    sender_type: "user",
+    raw: {
+      source: "plan-action",
+      decision: "execute"
+    }
+  };
+  try {
+    await settleSessionCardIfNeeded(config, flags, chatId, "working");
+    updateSessionState(chatId, (draft) => {
+      draft.mode = "default";
+      draft.status = "working";
+      draft.thread_id = planThreadId || draft.thread_id || "";
+      draft.last_user_message_at = syntheticEvent.received_at;
+      clearPendingPlanState(draft);
+      return draft;
+    });
+    await upsertSessionCard(config, chatId, "working", flags, {
+      phrase: pickStatusPhrase("working")
+    });
+    scheduleSessionCardRefresh(config, flags, chatId);
+    await startAppServerTurnForEvent(
+      syntheticEvent,
+      config,
+      flags,
+      ensureSession(readSessionStore(), chatId),
+      "default",
+      false,
+      {
+        preferredThreadId: planThreadId
+      }
+    );
+    return buildStatusCard(pickStatusPhrase("working"), { status: "working" });
+  } catch (error) {
+    updateSessionState(chatId, (draft) => {
+      draft.mode = "plan";
+      draft.status = "waiting";
+      draft.pending_plan_thread_id = planThreadId;
+      draft.pending_plan_turn_id = session.pending_plan_turn_id || "";
+      draft.pending_plan_item_id = session.pending_plan_item_id || "";
+      draft.pending_plan_text = planText;
+      return draft;
+    });
+    await upsertSessionCard(config, chatId, "plan-waiting", flags, {
+      planText
+    });
+    throw error;
+  }
+}
+
 async function handleCardAction(data, config, flags) {
   const normalized = normalizeCardActionPayload(data);
   const value = normalized.action?.value || {};
+  if (value.action === "plan-completion") {
+    try {
+      if (value.decision === "execute") {
+        return executePendingPlan(value.chat_id || "", config, flags, "card");
+      }
+      return continuePendingPlan(value.chat_id || "", config, flags, "card");
+    } catch (error) {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "plan-card-action-failed",
+        chat_id: value.chat_id || "",
+        decision: value.decision || "",
+        error: describeError(error)
+      });
+      return buildStatusCard("呜，这一步刚才绊了一下。你可以再点一次，或者直接回文字告诉派蒙继续怎么走。", {
+        status: "error"
+      });
+    }
+  }
   if (value.action !== "request-user-input-answer") {
     return buildStatusCard(pickStatusPhrase("working"), { status: "working" });
   }
@@ -2458,7 +2895,7 @@ async function handleCardActionTrigger(data, config, flags) {
     return {
       toast: {
         type: "warning",
-        content: "卡片交互暂未启用"
+        content: "卡片交互这会儿还没接上"
       }
     };
   }
@@ -2536,7 +2973,7 @@ async function maybeResolvePendingRequestFromText(event, config, flags) {
   await sendIndexedTextMessage(
     config,
     event.chat_id,
-    `这个答案我先记下了，还差 ${remaining} 个选择。你可以继续回文字，也可以点卡片按钮。`,
+    `这个答案我先记下了，还差 ${remaining} 个选择。你继续回文字也行，点卡片会更快。`,
     ensureSession(readSessionStore(), event.chat_id),
     flags
   );
@@ -2544,6 +2981,51 @@ async function maybeResolvePendingRequestFromText(event, config, flags) {
     last_user_message_at: event.received_at
   });
   await clearTypingReactions(config, [event], flags);
+  return true;
+}
+
+async function maybeResolvePendingPlanFromText(event, config, flags) {
+  const session = ensureSession(readSessionStore(), event.chat_id);
+  if (!hasPendingPlanState(session)) {
+    return false;
+  }
+  const decision = normalizePlanActionDecision(event.text);
+  if (decision === "execute") {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: session.pending_plan_thread_id || session.thread_id || "",
+      turn_id: "",
+      message_type: "user"
+    });
+    await executePendingPlan(event.chat_id, config, flags, "text");
+    await clearTypingReactions(config, [event], flags);
+    return true;
+  }
+  if (decision === "continue" && /^(继续规划|继续计划|继续留在规划模式|继续\s*plan)$/iu.test(stripLeadingDirectivePreamble(event.text).trim())) {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: session.pending_plan_thread_id || session.thread_id || "",
+      turn_id: "",
+      message_type: "user"
+    });
+    await continuePendingPlan(event.chat_id, config, flags, "text");
+    await clearTypingReactions(config, [event], flags);
+    return true;
+  }
+  updateSessionState(event.chat_id, {
+    status: "idle"
+  });
+  await startAppServerTurnForEvent(
+    event,
+    config,
+    flags,
+    ensureSession(readSessionStore(), event.chat_id),
+    "plan",
+    false,
+    {
+      preferredThreadId: session.pending_plan_thread_id || session.thread_id || ""
+    }
+  );
   return true;
 }
 
@@ -2585,7 +3067,7 @@ async function handleAppServerServerRequest(config, flags, payload) {
     await sendIndexedTextMessage(
       config,
       chatId,
-      "我这里需要你拍一个板。卡片里点一下最快，直接回文字也可以。",
+      "这一步得你拍个板啦。卡片里点一下最快，直接回文字也完全可以。",
       ensureSession(readSessionStore(), chatId),
       flags
     );
@@ -2668,8 +3150,6 @@ async function handleAppServerNotification(config, flags, payload) {
     }
     turnState.planBuffer += payload.params.delta || "";
     turnState.fullPlanText += payload.params.delta || "";
-    await flushTurnPlanText(config, flags, turnState, false);
-    scheduleTurnPlanFlush(config, flags, turnState);
     return;
   }
   if (payload.method === "turn/plan/updated" && chatId) {
@@ -2678,7 +3158,6 @@ async function handleAppServerNotification(config, flags, payload) {
     if (
       turnState
       && turnState.lastPlanSummary !== planSummary
-      && !turnState.fullPlanText.trim()
     ) {
       const session = ensureSession(readSessionStore(), chatId);
       await sendPlanSummaryUpdate(config, flags, chatId, payload.params.plan || [], payload.params.explanation || "", session);
@@ -2692,7 +3171,10 @@ async function handleAppServerNotification(config, flags, payload) {
     const itemId = payload.params?.itemId || payload.params?.item?.id || "";
     const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
     if (turnState && (turnState.planItemIds.includes(itemId) || itemId.endsWith("-plan"))) {
-      await flushTurnPlanText(config, flags, turnState, true);
+      const finalPlanText = extractPlanTextFromItem(payload.params?.item) || turnState.fullPlanText.trim();
+      if (finalPlanText) {
+        turnState.finalPlanText = finalPlanText;
+      }
     }
     return;
   }
@@ -2708,10 +3190,10 @@ async function handleAppServerNotification(config, flags, payload) {
     }
     const turnState = existingTurnState || ensureAppServerTurnState(completedThreadId, completedTurnId, finalChatId);
     await flushTurnStateText(config, flags, turnState, true);
-    await flushTurnPlanText(config, flags, turnState, true);
+    const planText = turnState?.finalPlanText?.trim() || turnState?.fullPlanText?.trim() || "";
     const replyText = turnState?.sentMessages?.join("\n").trim()
       || turnState?.fullText?.trim()
-      || turnState?.fullPlanText?.trim()
+      || planText
       || "";
     const sessionStore = readSessionStore();
     const session = ensureSession(sessionStore, finalChatId);
@@ -2739,9 +3221,19 @@ async function handleAppServerNotification(config, flags, payload) {
       session.status = "idle";
       session.last_completed_at = new Date().toISOString();
       session.last_thread_preview = truncateText(replyText || session.last_thread_preview || "", 180);
+      if (completedTurn.status === "completed" && normalizeMode(session.mode) === "plan" && planText) {
+        session.status = "waiting";
+        session.pending_plan_thread_id = completedThreadId;
+        session.pending_plan_turn_id = completedTurnId;
+        session.pending_plan_item_id = "";
+        session.pending_plan_text = planText;
+        session.last_thread_preview = truncateText(planText, 180);
+      } else {
+        clearPendingPlanState(session);
+      }
       writeSessionStore(sessionStore);
       if (completedTurn.status === "failed") {
-        const text = replyText || "这轮中途断了一下，但上下文我还记着。你继续补一句，我就从这里接上。";
+        const text = replyText || "呜，这轮中途绊了一下，但上下文我还记着呢。你继续补一句，派蒙就从这里接上。";
         if (!replyText && finalChatId) {
           await sendIndexedTextMessage(config, finalChatId, text, session, flags);
         }
@@ -2749,16 +3241,20 @@ async function handleAppServerNotification(config, flags, payload) {
           phrase: pickStatusPhrase("error", session.status_card_phrase)
         });
       } else if (completedTurn.status === "interrupted") {
-        const text = replyText || "这一轮我先按下暂停键。你给我新方向后，我就从新的 turn 继续。";
+        const text = replyText || "这一轮我先轻轻按下暂停键啦。你给我新方向后，派蒙就从新的 turn 继续。";
         if (!replyText && finalChatId) {
           await sendIndexedTextMessage(config, finalChatId, text, session, flags);
         }
         await upsertSessionCard(config, finalChatId, "done", flags, {
           phrase: pickStatusPhrase("done", session.status_card_phrase)
         });
+      } else if (normalizeMode(session.mode) === "plan" && planText) {
+        await upsertSessionCard(config, finalChatId, "plan-waiting", flags, {
+          planText
+        });
       } else {
         if (!replyText) {
-          await sendIndexedTextMessage(config, finalChatId, "这轮已经处理完了，你可以继续补充下一步。", session, flags);
+          await sendIndexedTextMessage(config, finalChatId, "这一步我已经处理完啦。你要是还有下一步，继续丢给派蒙就好。", session, flags);
         }
         await upsertSessionCard(config, finalChatId, "done", flags, {
           phrase: pickStatusPhrase("done", session.status_card_phrase)
@@ -2794,20 +3290,21 @@ async function handleAppServerNotification(config, flags, payload) {
   }
 }
 
-async function ensureThreadForEvent(event, session, config, flags, modeOverride = "", forceNewThread = false) {
+async function ensureThreadForEvent(event, session, config, flags, modeOverride = "", forceNewThread = false, options = {}) {
   const runtime = await ensureAppServerRuntime(config, flags);
   const client = runtime.client;
   const referencedBinding = forceNewThread ? null : resolveReferencedThreadBinding(event);
-  let threadId = referencedBinding?.thread_id || "";
+  let threadId = options.preferredThreadId || referencedBinding?.thread_id || "";
   const sessionExpired = isSessionExpired(session, config, flags);
-  const startingNewThread = forceNewThread || (!threadId && (!session.thread_id || sessionExpired));
+  const shouldIgnoreSessionExpiry = Boolean(options.preferredThreadId || referencedBinding?.thread_id);
+  const startingNewThread = forceNewThread || (!threadId && (!session.thread_id || (sessionExpired && !shouldIgnoreSessionExpiry)));
   if (forceNewThread && session.thread_id) {
     await archiveThreadQuietly(session.thread_id);
   }
   if (!forceNewThread && !threadId && session.thread_id && !sessionExpired) {
     threadId = session.thread_id;
   }
-  if (!forceNewThread && !threadId && session.thread_id && sessionExpired) {
+  if (!forceNewThread && !threadId && session.thread_id && sessionExpired && !shouldIgnoreSessionExpiry) {
     await archiveThreadQuietly(session.thread_id);
   }
   if (!threadId) {
@@ -2843,9 +3340,9 @@ async function ensureThreadForEvent(event, session, config, flags, modeOverride 
   };
 }
 
-async function startAppServerTurnForEvent(event, config, flags, session, modeOverride = "", forceNewThread = false) {
+async function startAppServerTurnForEvent(event, config, flags, session, modeOverride = "", forceNewThread = false, options = {}) {
   const desiredMode = normalizeMode(modeOverride || session.mode || getDefaultCollaborationMode(config));
-  const { client, threadId, startingNewThread } = await ensureThreadForEvent(event, session, config, flags, desiredMode, forceNewThread);
+  const { client, threadId, startingNewThread } = await ensureThreadForEvent(event, session, config, flags, desiredMode, forceNewThread, options);
   const liveProbe = await gatherLiveProbe(config, flags, event.chat_id, [event]);
   let memorySnapshot = "- 无";
   try {
@@ -2889,12 +3386,14 @@ async function startAppServerTurnForEvent(event, config, flags, session, modeOve
   }
   const turnState = ensureAppServerTurnState(threadId, authoritativeTurnId, event.chat_id);
   turnState.userMessages.push(event);
-  indexMessageToThread(event.message_id, {
-    chat_id: event.chat_id,
-    thread_id: threadId,
-    turn_id: authoritativeTurnId,
-    message_type: "user"
-  });
+  if (event.message_id) {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: threadId,
+      turn_id: authoritativeTurnId,
+      message_type: "user"
+    });
+  }
   updateSessionState(event.chat_id, {
     thread_id: threadId,
     active_turn_id: authoritativeTurnId,
@@ -2904,7 +3403,11 @@ async function startAppServerTurnForEvent(event, config, flags, session, modeOve
     last_user_message_at: event.received_at,
     status_card_message_id: "",
     status_card_kind: "",
-    status_card_phrase: ""
+    status_card_phrase: "",
+    pending_plan_thread_id: "",
+    pending_plan_turn_id: "",
+    pending_plan_item_id: "",
+    pending_plan_text: ""
   });
   await upsertSessionCard(config, event.chat_id, "working", flags);
   scheduleSessionCardRefresh(config, flags, event.chat_id);
@@ -2953,7 +3456,36 @@ async function steerAppServerTurn(event, config, flags, session) {
   return true;
 }
 
-async function interruptAndRestartTurn(event, config, flags, session, nextMode, remainderText, forceNewThread = false) {
+function clearSessionEphemeralState(session) {
+  if (!session || typeof session !== "object") {
+    return session;
+  }
+  if (session.pending_request_id) {
+    removePendingRequest(session.pending_request_id);
+  }
+  session.pending_request_id = "";
+  clearPendingPlanState(session);
+  return session;
+}
+
+function resolveResumeThreadBinding(event, session) {
+  const explicitResume = extractThreadResumeDirective(event.text);
+  const referencedBinding = resolveReferencedThreadBinding(event);
+  if (!explicitResume.resumeThread) {
+    return {
+      binding: referencedBinding,
+      explicitResume: false,
+      remainder: event.text
+    };
+  }
+  return {
+    binding: referencedBinding || findLatestThreadBindingForChat(event.chat_id) || null,
+    explicitResume: true,
+    remainder: explicitResume.remainder
+  };
+}
+
+async function interruptAndRestartTurn(event, config, flags, session, nextMode, remainderText, forceNewThread = false, options = {}) {
   const runtime = await ensureAppServerRuntime(config, flags);
   if (session.thread_id && session.active_turn_id) {
     try {
@@ -2973,32 +3505,46 @@ async function interruptAndRestartTurn(event, config, flags, session, nextMode, 
     }
   }
   await settleSessionCardIfNeeded(config, flags, event.chat_id, "done");
-  updateSessionState(event.chat_id, {
-    active_turn_id: "",
-    provisional_turn_id: "",
-    mode: nextMode,
-    interrupted_at: new Date().toISOString(),
-    last_user_message_at: event.received_at
+  updateSessionState(event.chat_id, (draft) => {
+    draft.active_turn_id = "";
+    draft.provisional_turn_id = "";
+    draft.mode = nextMode;
+    draft.interrupted_at = new Date().toISOString();
+    draft.last_user_message_at = event.received_at;
+    if (options.clearSession) {
+      clearSessionEphemeralState(draft);
+    }
+    return draft;
   });
   if (!remainderText) {
-    if (forceNewThread && session.thread_id) {
+    if ((forceNewThread || options.clearSession) && session.thread_id) {
       await archiveThreadQuietly(session.thread_id);
     }
-    const updatedSession = updateSessionState(event.chat_id, {
-      thread_id: forceNewThread ? "" : session.thread_id || "",
-      last_referenced_message_id: forceNewThread ? "" : session.last_referenced_message_id || "",
-      status: "idle"
+    const updatedSession = updateSessionState(event.chat_id, (draft) => {
+      draft.thread_id = (forceNewThread || options.clearSession) ? "" : options.preferredThreadId || session.thread_id || "";
+      draft.last_referenced_message_id = (forceNewThread || options.clearSession) ? "" : session.last_referenced_message_id || "";
+      draft.status = "idle";
+      if (options.clearSession) {
+        clearSessionEphemeralState(draft);
+      }
+      return draft;
     });
     indexMessageToThread(event.message_id, {
       chat_id: event.chat_id,
-      thread_id: forceNewThread ? "" : session.thread_id || "",
+      thread_id: (forceNewThread || options.clearSession) ? "" : options.preferredThreadId || session.thread_id || "",
       turn_id: "",
       message_type: "user"
     });
     await sendIndexedTextMessage(
       config,
       event.chat_id,
-      buildDirectiveAckText(nextMode, forceNewThread),
+      options.resumeOnly
+        ? buildResumeThreadAckText(Boolean(options.resumedFromReference))
+        : buildDirectiveAckText({
+          mode: nextMode,
+          newThread: forceNewThread,
+          clearSession: Boolean(options.clearSession)
+        }),
       updatedSession,
       flags
     );
@@ -3009,7 +3555,17 @@ async function interruptAndRestartTurn(event, config, flags, session, nextMode, 
     ...event,
     text: remainderText
   };
-  await startAppServerTurnForEvent(nextEvent, config, flags, ensureSession(readSessionStore(), event.chat_id), nextMode, forceNewThread);
+  await startAppServerTurnForEvent(
+    nextEvent,
+    config,
+    flags,
+    ensureSession(readSessionStore(), event.chat_id),
+    nextMode,
+    forceNewThread || options.clearSession,
+    {
+      preferredThreadId: options.preferredThreadId || ""
+    }
+  );
 }
 
 async function processEventWithAppServer(event, config, flags) {
@@ -3019,6 +3575,10 @@ async function processEventWithAppServer(event, config, flags) {
   await ensureAppServerRuntime(config, flags);
   const modeDirective = extractModeDirective(event.text);
   const session = ensureSession(readSessionStore(), event.chat_id);
+  const resumeDirective = resolveResumeThreadBinding(event, session);
+  const resumeBinding = resumeDirective.binding;
+  const resumeThreadId = resumeBinding?.thread_id || "";
+  const hasModeDirective = Boolean(modeDirective.mode || modeDirective.newThread || modeDirective.clearSession);
   if (await maybeResolvePendingRequestFromText(event, config, flags)) {
     indexMessageToThread(event.message_id, {
       chat_id: event.chat_id,
@@ -3028,56 +3588,117 @@ async function processEventWithAppServer(event, config, flags) {
     });
     return;
   }
+  if (!hasModeDirective && await maybeResolvePendingPlanFromText(event, config, flags)) {
+    return;
+  }
   if (isTurnActive(session)) {
-    if (modeDirective.mode || modeDirective.newThread) {
+    const shouldSwitchToReferencedThread = Boolean(
+      resumeDirective.explicitResume
+      && resumeThreadId
+      && resumeThreadId !== session.thread_id
+    );
+    if (hasModeDirective || shouldSwitchToReferencedThread) {
       await interruptAndRestartTurn(
         event,
         config,
         flags,
         session,
         modeDirective.mode || session.mode || getDefaultCollaborationMode(config),
-        modeDirective.remainder,
-        modeDirective.newThread
+        hasModeDirective ? modeDirective.remainder : resumeDirective.remainder,
+        modeDirective.newThread,
+        {
+          clearSession: modeDirective.clearSession,
+          preferredThreadId: shouldSwitchToReferencedThread ? resumeThreadId : "",
+          resumeOnly: !hasModeDirective && resumeDirective.explicitResume && !resumeDirective.remainder,
+          resumedFromReference: Boolean(resolveReferencedThreadBinding(event))
+        }
       );
       return;
     }
-    const steered = await steerAppServerTurn(event, config, flags, session);
+    if (resumeDirective.explicitResume && !resumeDirective.remainder) {
+      indexMessageToThread(event.message_id, {
+        chat_id: event.chat_id,
+        thread_id: resumeThreadId || session.thread_id || "",
+        turn_id: "",
+        message_type: "user"
+      });
+      await sendIndexedTextMessage(
+        config,
+        event.chat_id,
+        resumeThreadId ? buildResumeThreadAckText(Boolean(resolveReferencedThreadBinding(event))) : buildResumeThreadMissingAckText(),
+        ensureSession(readSessionStore(), event.chat_id),
+        flags
+      );
+      await clearTypingReactions(config, [event], flags);
+      return;
+    }
+    const steeringEvent = resumeDirective.explicitResume
+      ? {
+        ...event,
+        text: resumeDirective.remainder || event.text
+      }
+      : event;
+    const steered = await steerAppServerTurn(steeringEvent, config, flags, session);
     if (steered) {
       return;
     }
     await settleSessionCardIfNeeded(config, flags, event.chat_id, "done");
-    updateSessionState(event.chat_id, {
-      active_turn_id: "",
-      provisional_turn_id: "",
-      pending_request_id: "",
-      status: "idle",
-      interrupted_at: new Date().toISOString(),
-      last_user_message_at: event.received_at
+    updateSessionState(event.chat_id, (draft) => {
+      draft.active_turn_id = "";
+      draft.provisional_turn_id = "";
+      draft.status = "idle";
+      draft.interrupted_at = new Date().toISOString();
+      draft.last_user_message_at = event.received_at;
+      clearSessionEphemeralState(draft);
+      return draft;
     });
-    await startAppServerTurnForEvent(event, config, flags, ensureSession(readSessionStore(), event.chat_id), session.mode || "", false);
+    await startAppServerTurnForEvent(
+      resumeDirective.explicitResume
+        ? {
+          ...event,
+          text: resumeDirective.remainder || event.text
+        }
+        : event,
+      config,
+      flags,
+      ensureSession(readSessionStore(), event.chat_id),
+      session.mode || "",
+      false,
+      {
+        preferredThreadId: resumeDirective.explicitResume ? resumeThreadId : ""
+      }
+    );
     return;
   }
-  if ((modeDirective.mode || modeDirective.newThread) && !modeDirective.remainder) {
-    if (modeDirective.newThread && session.thread_id) {
+  if (hasModeDirective && !modeDirective.remainder) {
+    if ((modeDirective.newThread || modeDirective.clearSession) && session.thread_id) {
       await archiveThreadQuietly(session.thread_id);
     }
     indexMessageToThread(event.message_id, {
       chat_id: event.chat_id,
-      thread_id: modeDirective.newThread ? "" : session.thread_id || "",
+      thread_id: (modeDirective.newThread || modeDirective.clearSession) ? "" : session.thread_id || "",
       turn_id: "",
       message_type: "user"
     });
-    const updatedSession = updateSessionState(event.chat_id, {
-      thread_id: modeDirective.newThread ? "" : session.thread_id || "",
-      mode: modeDirective.mode || session.mode || getDefaultCollaborationMode(config),
-      last_user_message_at: event.received_at,
-      last_referenced_message_id: modeDirective.newThread ? "" : session.last_referenced_message_id || "",
-      status: "idle"
+    const updatedSession = updateSessionState(event.chat_id, (draft) => {
+      draft.thread_id = (modeDirective.newThread || modeDirective.clearSession) ? "" : session.thread_id || "";
+      draft.mode = modeDirective.mode || session.mode || getDefaultCollaborationMode(config);
+      draft.last_user_message_at = event.received_at;
+      draft.last_referenced_message_id = (modeDirective.newThread || modeDirective.clearSession) ? "" : session.last_referenced_message_id || "";
+      draft.status = "idle";
+      if (modeDirective.clearSession) {
+        clearSessionEphemeralState(draft);
+      }
+      return draft;
     });
     await sendIndexedTextMessage(
       config,
       event.chat_id,
-      buildDirectiveAckText(modeDirective.mode || session.mode || getDefaultCollaborationMode(config), modeDirective.newThread),
+      buildDirectiveAckText({
+        mode: modeDirective.mode || session.mode || getDefaultCollaborationMode(config),
+        newThread: modeDirective.newThread,
+        clearSession: modeDirective.clearSession
+      }),
       updatedSession,
       flags
     );
@@ -3087,13 +3708,44 @@ async function processEventWithAppServer(event, config, flags) {
     await clearTypingReactions(config, [event], flags);
     return;
   }
-  const effectiveEvent = (modeDirective.mode || modeDirective.newThread)
+  if (resumeDirective.explicitResume && !resumeDirective.remainder) {
+    indexMessageToThread(event.message_id, {
+      chat_id: event.chat_id,
+      thread_id: resumeThreadId || session.thread_id || "",
+      turn_id: "",
+      message_type: "user"
+    });
+    const updatedSession = updateSessionState(event.chat_id, {
+      thread_id: resumeThreadId || session.thread_id || "",
+      last_user_message_at: event.received_at,
+      last_referenced_message_id: resumeBinding?.message_id || session.last_referenced_message_id || "",
+      status: "idle"
+    });
+    await sendIndexedTextMessage(
+      config,
+      event.chat_id,
+      resumeThreadId ? buildResumeThreadAckText(Boolean(resolveReferencedThreadBinding(event))) : buildResumeThreadMissingAckText(),
+      updatedSession,
+      flags
+    );
+    await upsertSessionCard(config, event.chat_id, "done", flags, {
+      phrase: pickStatusPhrase("done")
+    });
+    await clearTypingReactions(config, [event], flags);
+    return;
+  }
+  const effectiveEvent = hasModeDirective
     ? {
       ...event,
       text: modeDirective.remainder
     }
+    : resumeDirective.explicitResume
+      ? {
+        ...event,
+        text: resumeDirective.remainder || event.text
+      }
     : event;
-  if (modeDirective.mode || modeDirective.newThread) {
+  if (hasModeDirective) {
     updateSessionState(event.chat_id, {
       mode: modeDirective.mode || session.mode || getDefaultCollaborationMode(config)
     });
@@ -3104,7 +3756,10 @@ async function processEventWithAppServer(event, config, flags) {
     flags,
     ensureSession(readSessionStore(), event.chat_id),
     modeDirective.mode || "",
-    modeDirective.newThread
+    modeDirective.newThread || modeDirective.clearSession,
+    {
+      preferredThreadId: !modeDirective.newThread && !modeDirective.clearSession && resumeDirective.explicitResume ? resumeThreadId : ""
+    }
   );
 }
 
@@ -3372,7 +4027,7 @@ function buildCodexFailureReply(batchMessages, error) {
 }
 
 function buildLongRunningReply(batchMessages) {
-  return "派蒙还在思考这轮消息。你先不用重复发，我会继续回复在同一条消息里。";
+  return "这轮还在跑，先别重复戳我。我把线头收拢好，就继续往下发。";
 }
 
 function getMergeWindowMs(config, flags) {
@@ -3945,7 +4600,7 @@ async function handleIncomingMessage(event, config, flags) {
   }
 
   if (flags["auto-ack"]) {
-    const autoAckText = "已收到，派蒙正在思考。";
+    const autoAckText = "收到，这条我先接住了。派蒙马上开始动手。";
     try {
       await sendTextMessage(config, "chat_id", event.chat_id, autoAckText);
       if (!flags["spawn-codex"]) {
@@ -4182,13 +4837,17 @@ if (isDirectRun) {
 export {
   buildCodexPrompt,
   buildFeishuContextBlock,
+  buildPlanCompletionCard,
   buildQuestionAnswerPayload,
   buildStatusCard,
+  extractPlanTextFromItem,
+  extractThreadResumeDirective,
   extractModeDirective,
   getRuntimeBackend,
   inboxEventMatchesIncomingEvent,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
+  normalizePlanActionDecision,
   normalizePendingRequestId,
   pickStatusPhrase,
   shouldEnableCardCallbacks,

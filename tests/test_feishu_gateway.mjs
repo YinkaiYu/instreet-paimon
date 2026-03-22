@@ -5,12 +5,16 @@ import fs from "node:fs";
 import {
   buildCodexPrompt,
   buildFeishuContextBlock,
+  buildPlanCompletionCard,
   buildQuestionAnswerPayload,
   buildStatusCard,
+  extractPlanTextFromItem,
+  extractThreadResumeDirective,
   extractModeDirective,
   inboxEventMatchesIncomingEvent,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
+  normalizePlanActionDecision,
   normalizePendingRequestId,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
@@ -24,6 +28,28 @@ test("extractModeDirective recognizes explicit plan switch", () => {
   assert.equal(result.mode, "plan");
   assert.equal(result.newThread, false);
   assert.equal(result.remainder, "帮我规划一下飞书重构");
+});
+
+test("extractModeDirective recognizes slash commands for plan and default", () => {
+  const plan = extractModeDirective("/plan 帮我规划飞书线程恢复");
+  assert.equal(plan.mode, "plan");
+  assert.equal(plan.newThread, false);
+  assert.equal(plan.clearSession, false);
+  assert.equal(plan.remainder, "帮我规划飞书线程恢复");
+
+  const fallback = extractModeDirective("/default 直接开始修");
+  assert.equal(fallback.mode, "default");
+  assert.equal(fallback.newThread, false);
+  assert.equal(fallback.clearSession, false);
+  assert.equal(fallback.remainder, "直接开始修");
+});
+
+test("extractModeDirective recognizes clear-session command", () => {
+  const result = extractModeDirective("/clear /default 重新开始");
+  assert.equal(result.mode, "default");
+  assert.equal(result.newThread, true);
+  assert.equal(result.clearSession, true);
+  assert.equal(result.remainder, "重新开始");
 });
 
 test("extractModeDirective recognizes explicit default switch", () => {
@@ -61,6 +87,18 @@ test("extractModeDirective ignores Feishu prefixes before a mode directive", () 
   assert.equal(result.remainder, "帮我规划");
 });
 
+test("extractThreadResumeDirective recognizes explicit resume wording", () => {
+  const result = extractThreadResumeDirective("【联调6】@_user_1 续上这个thread，继续修飞书 flush");
+  assert.equal(result.resumeThread, true);
+  assert.equal(result.remainder, "继续修飞书 flush");
+});
+
+test("normalizePlanActionDecision recognizes execute and continue replies", () => {
+  assert.equal(normalizePlanActionDecision("执行计划"), "execute");
+  assert.equal(normalizePlanActionDecision("继续规划"), "continue");
+  assert.equal(normalizePlanActionDecision("继续补细节"), "");
+});
+
 test("splitNaturalMessageChunks emits complete sentences and keeps tail", () => {
   const result = splitNaturalMessageChunks("先看现状。再改实现", false);
   assert.deepEqual(result.chunks, ["先看现状。"]);
@@ -88,6 +126,18 @@ test("splitNaturalMessageChunks folds delayed punctuation onto the previous newl
 test("splitNaturalMessageChunks merges forced punctuation tails into previous chunk", () => {
   const result = splitNaturalMessageChunks("再看一眼接线位置\n。", true);
   assert.deepEqual(result.chunks, ["再看一眼接线位置。"]);
+  assert.equal(result.remaining, "");
+});
+
+test("splitNaturalMessageChunks keeps list markers as separate newline chunks", () => {
+  const result = splitNaturalMessageChunks("先看现状\n- 第一项\n- 第二项", true);
+  assert.deepEqual(result.chunks, ["先看现状", "- 第一项", "- 第二项"]);
+  assert.equal(result.remaining, "");
+});
+
+test("splitNaturalMessageChunks preserves paragraph breaks before lists", () => {
+  const result = splitNaturalMessageChunks("先做概览\n\n1. 看 thread\n2. 看卡片", true);
+  assert.deepEqual(result.chunks, ["先做概览", "1. 看 thread", "2. 看卡片"]);
   assert.equal(result.remaining, "");
 });
 
@@ -146,10 +196,53 @@ test("buildStatusCard renders question buttons when card actions are enabled", (
       }
     ]
   });
-  assert.equal(card.header.title.content, "派蒙等待你的选择");
+  assert.equal(card.header.title.content, "派蒙等你拍板中");
   const actionElement = card.elements.find((item) => item.tag === "action");
   assert.ok(actionElement);
   assert.equal(actionElement.actions.length, 2);
+});
+
+test("buildPlanCompletionCard renders complete-plan actions", () => {
+  const card = buildPlanCompletionCard("1. 先修 thread 恢复\n2. 再补计划卡片", {
+    actionButtons: [
+      {
+        label: "执行计划",
+        value: {
+          action: "plan-completion",
+          chat_id: "oc_test",
+          decision: "execute"
+        }
+      },
+      {
+        label: "继续规划",
+        value: {
+          action: "plan-completion",
+          chat_id: "oc_test",
+          decision: "continue"
+        }
+      }
+    ]
+  });
+  assert.equal(card.header.title.content, "派蒙把这份计划叠整齐啦");
+  const actionElement = card.elements.find((item) => item.tag === "action");
+  assert.ok(actionElement);
+  assert.equal(actionElement.actions.length, 2);
+});
+
+test("extractPlanTextFromItem accepts direct and structured plan payloads", () => {
+  assert.equal(
+    extractPlanTextFromItem({ text: "完整计划正文" }),
+    "完整计划正文"
+  );
+  assert.equal(
+    extractPlanTextFromItem({
+      plan: [
+        { step: "先修 thread 恢复" },
+        { step: "再修计划卡片" }
+      ]
+    }),
+    "1. 先修 thread 恢复\n2. 再修计划卡片"
+  );
 });
 
 test("supportsCardActions only depends on callback enablement, not token or encrypt key", () => {
