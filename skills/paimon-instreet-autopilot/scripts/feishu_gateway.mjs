@@ -1161,11 +1161,27 @@ function normalizeMode(mode) {
   return String(mode || "").trim().toLowerCase() === "plan" ? "plan" : "default";
 }
 
+function stripLeadingDirectivePreamble(text) {
+  let remainder = String(text || "").trim();
+  while (remainder) {
+    const next = remainder
+      .replace(/^\s*【[^】]{1,48}】\s*/u, "")
+      .replace(/^\s*@(?:[^\s，,:：]+)\s*/u, "")
+      .replace(/^\s*派蒙(?:[\s，,:：]+|$)/u, "");
+    if (next === remainder) {
+      break;
+    }
+    remainder = next.trimStart();
+  }
+  return remainder;
+}
+
 function extractModeDirective(text) {
   const source = String(text || "").trim();
   if (!source) {
     return { mode: "", newThread: false, remainder: "" };
   }
+  const directiveSource = stripLeadingDirectivePreamble(source);
   const patterns = [
     {
       kind: "new-thread",
@@ -1182,7 +1198,7 @@ function extractModeDirective(text) {
       pattern: /^\s*(?:请)?(?:先)?(?:帮我)?(?:退出|切回|切到|切换到|改成|改用|用)\s*(?:default(?:\s*mode)?|普通模式|默认模式)\s*[，,:：]?\s*/iu
     }
   ];
-  let remainder = source;
+  let remainder = directiveSource;
   let mode = "";
   let newThread = false;
   while (remainder) {
@@ -1204,6 +1220,9 @@ function extractModeDirective(text) {
     if (!matched) {
       break;
     }
+  }
+  if (!mode && !newThread) {
+    return { mode: "", newThread: false, remainder: source };
   }
   return { mode, newThread, remainder };
 }

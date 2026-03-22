@@ -38,11 +38,25 @@ test("extractModeDirective recognizes explicit new thread switch", () => {
   assert.equal(result.remainder, "继续做飞书联调");
 });
 
+test("extractModeDirective ignores Feishu prefixes before a new thread directive", () => {
+  const result = extractModeDirective("【联调4】@_user_1 派蒙 开个新thread，只做飞书链路自检");
+  assert.equal(result.mode, "");
+  assert.equal(result.newThread, true);
+  assert.equal(result.remainder, "只做飞书链路自检");
+});
+
 test("extractModeDirective supports combined new thread and mode directives", () => {
   const result = extractModeDirective("开个新thread，切到 plan mode，帮我规划飞书链路");
   assert.equal(result.mode, "plan");
   assert.equal(result.newThread, true);
   assert.equal(result.remainder, "帮我规划飞书链路");
+});
+
+test("extractModeDirective ignores Feishu prefixes before a mode directive", () => {
+  const result = extractModeDirective("【联调5】@派蒙 切到 plan mode，帮我规划");
+  assert.equal(result.mode, "plan");
+  assert.equal(result.newThread, false);
+  assert.equal(result.remainder, "帮我规划");
 });
 
 test("splitNaturalMessageChunks emits complete sentences and keeps tail", () => {
