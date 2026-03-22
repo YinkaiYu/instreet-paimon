@@ -185,6 +185,7 @@ test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback
   assert.match(prompt, /派蒙，你正在通过飞书和用户连续协作/);
   assert.match(prompt, /SOUL\.md/);
   assert.match(prompt, /派蒙是仓库的主人之一/);
+  assert.match(prompt, /不要在飞书回复里输出 Markdown 链接、文件路径、行号/);
   assert.doesNotMatch(prompt, /作为 AI 助手/);
 });
 
