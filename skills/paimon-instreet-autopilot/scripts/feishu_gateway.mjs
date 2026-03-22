@@ -31,6 +31,7 @@ const sessionsPath = path.join(stateCurrentDir, "feishu_sessions.json");
 const messageThreadIndexPath = path.join(stateCurrentDir, "feishu_message_thread_index.json");
 const pendingRequestsPath = path.join(stateCurrentDir, "feishu_pending_requests.json");
 const statusPhrasesPath = path.join(repoRoot, "skills", "paimon-instreet-autopilot", "assets", "feishu-status-phrases.json");
+const COMMAND_EXECUTION_PROGRESS_TEXT = "我先去核对现有实现，再继续往前推。";
 const chatTimers = new Map();
 const processingChats = new Set();
 const sessionStatusTimers = new Map();
@@ -1915,6 +1916,14 @@ function getAppServerTurnKey(threadId, turnId) {
   return `${threadId}:${turnId}`;
 }
 
+function getAppServerCommandExecutionItemKey(threadId, turnId, itemId = "") {
+  const normalizedItemId = String(itemId || "").trim();
+  if (!normalizedItemId) {
+    return "";
+  }
+  return `${getAppServerTurnKey(threadId, turnId)}:${normalizedItemId}`;
+}
+
 function ensureAppServerTurnState(threadId, turnId, chatId = "") {
   if (!appServerRuntime) {
     return null;
@@ -1931,6 +1940,7 @@ function ensureAppServerTurnState(threadId, turnId, chatId = "") {
       userMessages: [],
       flushTimer: null,
       progressStubSent: false,
+      startedCommandItemIds: [],
       lastAgentTextAt: 0,
       lastPlanSummary: ""
     });
@@ -1940,6 +1950,68 @@ function ensureAppServerTurnState(threadId, turnId, chatId = "") {
     state.chatId = chatId;
   }
   return state;
+}
+
+function shouldSendCommandExecutionProgressStub(runtimeState, turnState, threadId, turnId, itemId = "") {
+  if (!turnState) {
+    return false;
+  }
+  const normalizedItemId = String(itemId || "").trim();
+  if (!Array.isArray(turnState.startedCommandItemIds)) {
+    turnState.startedCommandItemIds = [];
+  }
+  if (normalizedItemId && turnState.startedCommandItemIds.includes(normalizedItemId)) {
+    return false;
+  }
+  if (turnState.progressStubSent) {
+    return false;
+  }
+  const turnKey = getAppServerTurnKey(threadId, turnId);
+  const itemKey = getAppServerCommandExecutionItemKey(threadId, turnId, normalizedItemId);
+  if (runtimeState?.progressStubTurns?.has(turnKey)) {
+    return false;
+  }
+  if (itemKey && runtimeState?.startedCommandItemKeys?.has(itemKey)) {
+    return false;
+  }
+  if (normalizedItemId) {
+    turnState.startedCommandItemIds.push(normalizedItemId);
+  }
+  turnState.progressStubSent = true;
+  runtimeState?.progressStubTurns?.add(turnKey);
+  if (itemKey) {
+    runtimeState?.startedCommandItemKeys?.add(itemKey);
+  }
+  return true;
+}
+
+function rollbackCommandExecutionProgressStub(runtimeState, turnState, threadId, turnId, itemId = "") {
+  if (turnState) {
+    turnState.progressStubSent = false;
+    const normalizedItemId = String(itemId || "").trim();
+    if (normalizedItemId && Array.isArray(turnState.startedCommandItemIds)) {
+      turnState.startedCommandItemIds = turnState.startedCommandItemIds.filter((value) => value !== normalizedItemId);
+    }
+  }
+  const turnKey = getAppServerTurnKey(threadId, turnId);
+  const itemKey = getAppServerCommandExecutionItemKey(threadId, turnId, itemId);
+  runtimeState?.progressStubTurns?.delete(turnKey);
+  if (itemKey) {
+    runtimeState?.startedCommandItemKeys?.delete(itemKey);
+  }
+}
+
+function clearCommandExecutionProgressStub(runtimeState, threadId, turnId) {
+  const turnKey = getAppServerTurnKey(threadId, turnId);
+  runtimeState?.progressStubTurns?.delete(turnKey);
+  if (!runtimeState?.startedCommandItemKeys) {
+    return;
+  }
+  for (const key of runtimeState.startedCommandItemKeys) {
+    if (key.startsWith(`${turnKey}:`)) {
+      runtimeState.startedCommandItemKeys.delete(key);
+    }
+  }
 }
 
 function clearTurnFlushTimer(turnState) {
@@ -1959,6 +2031,7 @@ function dropAppServerTurnState(threadId, turnId) {
   if (state?.flushTimer) {
     clearTimeout(state.flushTimer);
   }
+  clearCommandExecutionProgressStub(appServerRuntime, threadId, turnId);
   appServerRuntime.turnStates.delete(key);
 }
 
@@ -2058,7 +2131,9 @@ async function ensureAppServerRuntime(config, flags) {
   const client = new CodexAppServerClient(config);
   appServerRuntime = {
     client,
-    turnStates: new Map()
+    turnStates: new Map(),
+    progressStubTurns: new Set(),
+    startedCommandItemKeys: new Set()
   };
   client.on("notification", (payload) => {
     handleAppServerNotification(config, flags, payload).catch((error) => {
@@ -2329,13 +2404,13 @@ async function handleAppServerNotification(config, flags, payload) {
   }
   if (payload.method === "item/started" && payload.params?.item?.type === "commandExecution") {
     const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
-    if (turnState && !turnState.progressStubSent && chatId) {
+    const itemId = payload.params?.item?.id || "";
+    if (turnState && chatId && shouldSendCommandExecutionProgressStub(appServerRuntime, turnState, threadId, turnId, itemId)) {
       const session = ensureSession(readSessionStore(), chatId);
-      turnState.progressStubSent = true;
       try {
-        await sendIndexedTextMessage(config, chatId, "我先去核对现有实现，再继续往前推。", session, flags);
+        await sendIndexedTextMessage(config, chatId, COMMAND_EXECUTION_PROGRESS_TEXT, session, flags);
       } catch (error) {
-        turnState.progressStubSent = false;
+        rollbackCommandExecutionProgressStub(appServerRuntime, turnState, threadId, turnId, itemId);
         throw error;
       }
     }
@@ -3769,6 +3844,7 @@ export {
   listIncomingDedupKeys,
   normalizeCardActionPayload,
   pickStatusPhrase,
+  shouldSendCommandExecutionProgressStub,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,

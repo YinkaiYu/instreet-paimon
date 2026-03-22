@@ -10,6 +10,7 @@ import {
   inboxEventMatchesIncomingEvent,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
+  shouldSendCommandExecutionProgressStub,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,
@@ -162,6 +163,44 @@ test("shouldApplyTurnCompletionToSession ignores stale completions from older tu
   assert.equal(shouldApplyTurnCompletionToSession({ active_turn_id: "turn-new" }, "turn-old"), false);
   assert.equal(shouldApplyTurnCompletionToSession({ active_turn_id: "turn-old" }, "turn-old"), true);
   assert.equal(shouldApplyTurnCompletionToSession({ active_turn_id: "" }, "turn-old"), true);
+});
+
+test("shouldSendCommandExecutionProgressStub only allows the first stub per turn", () => {
+  const runtimeState = {
+    progressStubTurns: new Set(),
+    startedCommandItemKeys: new Set()
+  };
+  const turnState = {
+    progressStubSent: false,
+    startedCommandItemIds: []
+  };
+  assert.equal(
+    shouldSendCommandExecutionProgressStub(runtimeState, turnState, "thread-1", "turn-1", "item-1"),
+    true
+  );
+  assert.equal(
+    shouldSendCommandExecutionProgressStub(runtimeState, turnState, "thread-1", "turn-1", "item-1"),
+    false
+  );
+  assert.equal(
+    shouldSendCommandExecutionProgressStub(runtimeState, turnState, "thread-1", "turn-1", "item-2"),
+    false
+  );
+});
+
+test("shouldSendCommandExecutionProgressStub survives turn-state recreation", () => {
+  const runtimeState = {
+    progressStubTurns: new Set([ "thread-1:turn-1" ]),
+    startedCommandItemKeys: new Set([ "thread-1:turn-1:item-1" ])
+  };
+  const recreatedTurnState = {
+    progressStubSent: false,
+    startedCommandItemIds: []
+  };
+  assert.equal(
+    shouldSendCommandExecutionProgressStub(runtimeState, recreatedTurnState, "thread-1", "turn-1", "item-1"),
+    false
+  );
 });
 
 test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback", () => {
