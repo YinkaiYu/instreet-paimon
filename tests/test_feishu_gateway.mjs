@@ -7,8 +7,11 @@ import {
   buildQuestionAnswerPayload,
   buildStatusCard,
   extractModeDirective,
+  normalizeCardActionPayload,
+  shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,
+  supportsCardActions,
   tryMapTextToQuestionAnswer
 } from "../skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs";
 
@@ -82,6 +85,51 @@ test("buildStatusCard renders question buttons when card actions are enabled", (
   const actionElement = card.elements.find((item) => item.tag === "action");
   assert.ok(actionElement);
   assert.equal(actionElement.actions.length, 2);
+});
+
+test("supportsCardActions only depends on callback enablement, not token or encrypt key", () => {
+  const config = {
+    feishu: {},
+    automation: {
+      feishu_card_callback_enabled: true
+    }
+  };
+  assert.equal(shouldEnableCardCallbacks(config, {}), true);
+  assert.equal(supportsCardActions(config, {}), true);
+});
+
+test("normalizeCardActionPayload accepts long-connection event wrapper", () => {
+  const normalized = normalizeCardActionPayload({
+    header: {
+      tenant_key: "tenant-test"
+    },
+    event: {
+      open_message_id: "om_123",
+      open_id: "ou_123",
+      token: "token_123",
+      action: {
+        tag: "button",
+        value: {
+          action: "request-user-input-answer",
+          request_id: "req_1"
+        }
+      }
+    }
+  });
+  assert.deepEqual(normalized, {
+    open_id: "ou_123",
+    user_id: "",
+    tenant_key: "tenant-test",
+    open_message_id: "om_123",
+    token: "token_123",
+    action: {
+      tag: "button",
+      value: {
+        action: "request-user-input-answer",
+        request_id: "req_1"
+      }
+    }
+  });
 });
 
 test("shouldApplyTurnCompletionToSession ignores stale completions from older turns", () => {

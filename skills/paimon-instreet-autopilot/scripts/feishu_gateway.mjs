@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 import { EventEmitter } from "node:events";
@@ -1290,20 +1289,8 @@ function shouldEnableCardCallbacks(config, flags) {
   return config.automation?.feishu_card_callback_enabled === true;
 }
 
-function getCardCallbackHost(config, flags) {
-  return String(flags["card-callback-host"] || config.automation?.feishu_card_callback_host || "127.0.0.1");
-}
-
-function getCardCallbackPort(config, flags) {
-  return Number(flags["card-callback-port"] || config.automation?.feishu_card_callback_port || 3100);
-}
-
-function getCardCallbackPath(config, flags) {
-  return String(flags["card-callback-path"] || config.automation?.feishu_card_callback_path || "/webhook/card");
-}
-
 function supportsCardActions(config, flags) {
-  return shouldEnableCardCallbacks(config, flags) && Boolean(config.feishu?.verification_token || config.feishu?.encrypt_key);
+  return shouldEnableCardCallbacks(config, flags);
 }
 
 function getReactionEmojiType(config, flags) {
@@ -1939,35 +1926,6 @@ function buildCollaborationModePayload(config, mode) {
   };
 }
 
-async function startCardActionServer(config, flags) {
-  if (!shouldEnableCardCallbacks(config, flags) || !supportsCardActions(config, flags)) {
-    return null;
-  }
-  const handler = new Lark.CardActionHandler(
-    {
-      encryptKey: config.feishu.encrypt_key,
-      verificationToken: config.feishu.verification_token,
-      loggerLevel: Lark.LoggerLevel.info
-    },
-    async (data) => handleCardAction(data, config, flags)
-  );
-  const server = http.createServer();
-  server.on("request", Lark.adaptDefault(getCardCallbackPath(config, flags), handler, {
-    autoChallenge: true
-  }));
-  await new Promise((resolve) => {
-    server.listen(getCardCallbackPort(config, flags), getCardCallbackHost(config, flags), resolve);
-  });
-  appendJsonl(eventsPath, {
-    timestamp: new Date().toISOString(),
-    type: "card-action-server.started",
-    host: getCardCallbackHost(config, flags),
-    port: getCardCallbackPort(config, flags),
-    path: getCardCallbackPath(config, flags)
-  });
-  return server;
-}
-
 async function ensureAppServerRuntime(config, flags) {
   if (appServerRuntime?.client) {
     await appServerRuntime.client.ensureStarted();
@@ -1976,8 +1934,7 @@ async function ensureAppServerRuntime(config, flags) {
   const client = new CodexAppServerClient(config);
   appServerRuntime = {
     client,
-    turnStates: new Map(),
-    cardServer: null
+    turnStates: new Map()
   };
   client.on("notification", (payload) => {
     handleAppServerNotification(config, flags, payload).catch((error) => {
@@ -2010,12 +1967,29 @@ async function ensureAppServerRuntime(config, flags) {
     writeSessionStore(store);
   });
   await client.ensureStarted();
-  appServerRuntime.cardServer = await startCardActionServer(config, flags);
   return appServerRuntime;
 }
 
+function normalizeCardActionPayload(data) {
+  const source = data?.event && typeof data.event === "object" ? data.event : data;
+  const action = source?.action && typeof source.action === "object" ? source.action : {};
+  const value = action?.value && typeof action.value === "object" ? action.value : {};
+  return {
+    open_id: source?.open_id || source?.operator?.open_id || source?.user?.open_id || "",
+    user_id: source?.user_id || source?.operator?.user_id || source?.user?.user_id || "",
+    tenant_key: source?.tenant_key || data?.tenant_key || data?.header?.tenant_key || "",
+    open_message_id: source?.open_message_id || source?.open_message?.open_message_id || "",
+    token: source?.token || data?.token || "",
+    action: {
+      ...action,
+      value
+    }
+  };
+}
+
 async function handleCardAction(data, config, flags) {
-  const value = data?.action?.value || {};
+  const normalized = normalizeCardActionPayload(data);
+  const value = normalized.action?.value || {};
   if (value.action !== "request-user-input-answer") {
     return buildStatusCard(pickStatusPhrase("working"), { status: "working" });
   }
@@ -2064,6 +2038,23 @@ async function handleCardAction(data, config, flags) {
       allowActions: supportsCardActions(config, flags)
     }
   );
+}
+
+async function handleCardActionTrigger(data, config, flags) {
+  if (!shouldEnableCardCallbacks(config, flags)) {
+    return {
+      toast: {
+        type: "warning",
+        content: "卡片交互暂未启用"
+      }
+    };
+  }
+  appendJsonl(eventsPath, {
+    timestamp: new Date().toISOString(),
+    type: "card.action.trigger",
+    event: normalizeCardActionPayload(data)
+  });
+  return handleCardAction(data, config, flags);
 }
 
 async function maybeResolvePendingRequestFromText(event, config, flags) {
@@ -3422,11 +3413,14 @@ async function startWebsocket(config, flags) {
     startQueueSweeper(config, flags);
   }
 
-  const dispatcher = new Lark.EventDispatcher({}).register({
+  const dispatcher = new Lark.EventDispatcher({
+    encryptKey: config.feishu?.encrypt_key || ""
+  }).register({
     "im.message.receive_v1": async (data) => {
       const event = extractMessageEvent(data);
       await handleIncomingMessage(event, config, flags);
     },
+    "card.action.trigger": async (data) => handleCardActionTrigger(data, config, flags),
     "im.message.message_read_v1": async (data) => {
       appendJsonl(eventsPath, {
         timestamp: new Date().toISOString(),
@@ -3504,7 +3498,7 @@ function printHelp() {
   node feishu_gateway.mjs bind-report-target --chat-id oc_xxx [--chat-type group] [--label "ops"]
   node feishu_gateway.mjs clear-report-target
   node feishu_gateway.mjs sync --chat-id oc_xxx [--auto-ack] [--spawn-codex] [--runtime-backend app-server|exec]
-  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--runtime-backend app-server|exec] [--thread-idle-ttl-ms 3600000] [--progress-flush-ms 2000] [--status-card-update-min-ms 8000] [--status-card-update-max-ms 15000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--card-callback|--no-card-callback] [--card-callback-host 127.0.0.1] [--card-callback-port 3100] [--card-callback-path /webhook/card]`);
+  node feishu_gateway.mjs ws [--auto-ack] [--spawn-codex] [--runtime-backend app-server|exec] [--thread-idle-ttl-ms 3600000] [--progress-flush-ms 2000] [--status-card-update-min-ms 8000] [--status-card-update-max-ms 15000] [--progress-ping-ms 300000] [--reaction-emoji Typing] [--no-reaction] [--card-callback|--no-card-callback]`);
 }
 
 async function main() {
@@ -3607,7 +3601,9 @@ export {
   buildStatusCard,
   extractModeDirective,
   getRuntimeBackend,
+  normalizeCardActionPayload,
   pickStatusPhrase,
+  shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,
   supportsCardActions,

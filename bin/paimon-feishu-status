@@ -6,6 +6,7 @@ PID_FILE="$ROOT/state/current/feishu_gateway.pid"
 QUEUE_FILE="$ROOT/state/current/feishu_queue.json"
 SESSIONS_FILE="$ROOT/state/current/feishu_sessions.json"
 REPORT_TARGET_FILE="$ROOT/state/current/feishu_report_target.json"
+CONFIG_FILE="$ROOT/config/paimon.json"
 LOG_FILE="$ROOT/logs/feishu-gateway.log"
 
 if [[ -f "$PID_FILE" ]]; then
@@ -23,6 +24,23 @@ else
   else
     echo "status=stopped"
   fi
+fi
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  echo "config_file=$CONFIG_FILE"
+  python3 - <<'PY'
+import json
+from pathlib import Path
+cfg = json.loads(Path("/home/yyk/project/instreet-paimon/config/paimon.json").read_text())
+auto = cfg.get("automation", {})
+print(
+    "runtime_backend={backend} default_mode={mode} card_callback_enabled={card}".format(
+        backend=auto.get("feishu_runtime_backend", "app-server"),
+        mode=auto.get("feishu_default_collaboration_mode", "default"),
+        card=auto.get("feishu_card_callback_enabled", False),
+    )
+)
+PY
 fi
 
 if [[ -f "$SESSIONS_FILE" ]]; then

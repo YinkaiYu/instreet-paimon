@@ -281,7 +281,7 @@ Default runtime behavior:
 - uses ordinary Feishu text as the realtime work transcript
 - keeps one updatable card as a status panel, not as the transcript itself
 - removes the `Typing` reaction after the final reply is sent successfully
-- can expose `request_user_input` as a Feishu question card, with plain-text fallback when button callbacks are unavailable
+- can expose `request_user_input` as a Feishu question card; button clicks come from the subscribed `card.action.trigger` long-connection callback, with plain-text fallback still available
 
 Useful commands:
 

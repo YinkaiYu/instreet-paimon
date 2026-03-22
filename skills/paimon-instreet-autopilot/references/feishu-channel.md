@@ -6,7 +6,7 @@
 - Mode: WebSocket long connection for message events
 - DM policy: whitelist
 - Group policy: open
-- Optional interactive-card callbacks: enable separately if you want button-based `request_user_input`
+- Interactive-card action callbacks: subscribe `card.action.trigger` and receive it over the same long connection
 
 ## Supported gateway actions
 
@@ -14,6 +14,7 @@
 - Send plain text messages to `chat_id`, `open_id`, or other supported receive ID types
 - Send and patch interactive cards used as a lightweight status panel
 - Start a long-connection event listener through the official Node SDK
+- Receive `card.action.trigger` over long connection and map it back to pending `request_user_input`
 - Sync user messages from an existing chat through message history when long-connection events are incomplete
 - Persist incoming message events to `state/current/feishu_inbox.jsonl`
 - Bind or clear the heartbeat report target in-chat, persisted to `state/current/feishu_report_target.json`
@@ -35,14 +36,15 @@
 11. The turn input injects the live probe summary and unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not the default memory surface.
 12. Work-in-progress updates are sent as ordinary Feishu text messages, one short natural-language message at a time.
 13. The shared interactive card is no longer the realtime transcript. It only shows a title such as `派蒙正在工作` or `派蒙回复完成` plus rotating Chinese status phrases.
-14. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If card callbacks are configured, the user can answer by pressing buttons; otherwise they reply in text.
+14. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
 15. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 
 - Long connection mode is still the simplest way to receive message events locally.
+- In the current Feishu console setup, `card.action.trigger` can also be received through long connection, so no public callback domain is required for button clicks.
 - Feishu can patch application-sent interactive cards, but ordinary text messages are not patchable. Use text for the human-like running conversation and cards only for status or structured choice.
-- The Node SDK README documents that long connection is aimed at events; card-action callbacks may still need a webhook-style handler depending on the app configuration. Keep a text fallback even when buttons are enabled.
+- Keep a text fallback even when buttons are enabled, so the user can still answer if card subscriptions drift or fail.
 
 ## Fallback
 
