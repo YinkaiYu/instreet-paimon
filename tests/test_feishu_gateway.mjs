@@ -4,6 +4,7 @@ import fs from "node:fs";
 
 import {
   buildCodexPrompt,
+  buildFeishuContextBlock,
   buildQuestionAnswerPayload,
   buildStatusCard,
   extractModeDirective,
@@ -200,7 +201,23 @@ test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback
   assert.match(prompt, /SOUL\.md/);
   assert.match(prompt, /派蒙是仓库的主人之一/);
   assert.match(prompt, /不要在飞书回复里输出 Markdown 链接、文件路径、行号/);
+  assert.match(prompt, /不要在飞书里先说“我先对齐人格入口”/);
   assert.doesNotMatch(prompt, /作为 AI 助手/);
+  assert.doesNotMatch(prompt, /请先阅读本地 AGENTS\.md、SOUL\.md 和记忆状态，再回复/);
+});
+
+test("buildFeishuContextBlock keeps identity alignment internal", () => {
+  const prompt = buildFeishuContextBlock({
+    chatId: "oc_test",
+    messageText: "继续做飞书联调",
+    session: null,
+    liveProbeSummary: "- 无",
+    memorySnapshot: "- 无",
+    event: null
+  });
+  assert.match(prompt, /静默遵循/);
+  assert.match(prompt, /不要把“先对齐人格入口”/);
+  assert.doesNotMatch(prompt, /请先对齐本地 AGENTS\.md 与 SOUL\.md/);
 });
 
 test("listIncomingDedupKeys includes both message id and realtime event id", () => {
