@@ -1831,8 +1831,7 @@ async function sendIndexedTextMessage(config, chatId, text, session, flags = {})
 }
 
 async function upsertSessionCard(config, chatId, status, flags = {}, options = {}) {
-  const store = readSessionStore();
-  const session = ensureSession(store, chatId);
+  const session = ensureSession(readSessionStore(), chatId);
   const pendingRequest = options.pendingRequest || readPendingRequest(session.pending_request_id);
   const phrase = options.phrase || pickStatusPhrase(status, session.status_card_phrase);
   const card = buildStatusCard(phrase, {
@@ -1862,22 +1861,20 @@ async function upsertSessionCard(config, chatId, status, flags = {}, options = {
     const response = await sendCardMessage(config, "chat_id", chatId, card, flags);
     messageId = response?.data?.message_id || "";
   }
-  Object.assign(session, {
+  const updatedSession = updateSessionState(chatId, {
     status_card_message_id: messageId,
     status_card_kind: status,
     status_card_phrase: phrase,
-    updated_at: new Date().toISOString()
   });
-  writeSessionStore(store);
   if (messageId) {
     indexMessageToThread(messageId, {
       chat_id: chatId,
-      thread_id: session.thread_id || "",
-      turn_id: session.active_turn_id || "",
+      thread_id: updatedSession.thread_id || "",
+      turn_id: updatedSession.active_turn_id || "",
       message_type: "status-card"
     });
   }
-  return session;
+  return updatedSession;
 }
 
 function scheduleSessionCardRefresh(config, flags, chatId) {
@@ -1983,8 +1980,6 @@ async function flushTurnStateText(config, flags, turnState, force = false) {
   if (!chunks.length) {
     return;
   }
-  const store = readSessionStore();
-  const session = ensureSession(store, turnState.chatId);
   for (const chunk of chunks) {
     if (isPunctuationOnlyChunk(chunk)) {
       if (turnState.sentMessages.length) {
@@ -1992,12 +1987,11 @@ async function flushTurnStateText(config, flags, turnState, force = false) {
       }
       continue;
     }
+    const session = ensureSession(readSessionStore(), turnState.chatId);
     await sendIndexedTextMessage(config, turnState.chatId, chunk, session, flags);
     turnState.sentMessages.push(chunk);
     turnState.lastAgentTextAt = Date.now();
-    session.last_agent_message_at = new Date().toISOString();
   }
-  writeSessionStore(store);
 }
 
 function scheduleTurnStateFlush(config, flags, turnState) {
