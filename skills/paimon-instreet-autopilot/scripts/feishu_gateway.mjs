@@ -1472,6 +1472,31 @@ function supportsCardActions(config, flags) {
   return shouldEnableCardCallbacks(config, flags);
 }
 
+function buildCurrentSessionStatusCard(chatId) {
+  if (!chatId) {
+    return buildStatusCard(pickStatusPhrase("done"), { status: "done" });
+  }
+  const session = ensureSession(readSessionStore(), chatId);
+  const status = session.status_card_kind || session.status || "done";
+  const phrase = session.status_card_phrase || pickStatusPhrase(status);
+  return buildStatusCard(phrase, { status });
+}
+
+function summarizeAppServerEnvelope(payload) {
+  const params = payload?.params || {};
+  return {
+    method: payload?.method || "",
+    request_id: Object.prototype.hasOwnProperty.call(payload || {}, "id") ? String(payload.id) : "",
+    thread_id: params.threadId || params.thread?.id || "",
+    turn_id: params.turnId || params.turn?.id || "",
+    item_id: params.itemId || params.item?.id || "",
+    turn_status: params.turn?.status || "",
+    question_count: Array.isArray(params.questions) ? params.questions.length : 0,
+    plan_steps: Array.isArray(params.plan) ? params.plan.length : 0,
+    delta_len: typeof params.delta === "string" ? params.delta.length : 0
+  };
+}
+
 function getReactionEmojiType(config, flags) {
   return String(flags["reaction-emoji"] || config.automation?.feishu_reaction_emoji_type || "Typing");
 }
@@ -2128,6 +2153,13 @@ async function ensureAppServerRuntime(config, flags) {
     turnStates: new Map()
   };
   client.on("notification", (payload) => {
+    if (payload?.method !== "item/agentMessage/delta") {
+      appendJsonl(eventsPath, {
+        timestamp: new Date().toISOString(),
+        type: "app-server.notification",
+        ...summarizeAppServerEnvelope(payload)
+      });
+    }
     handleAppServerNotification(config, flags, payload).catch((error) => {
       appendJsonl(errorsPath, {
         timestamp: new Date().toISOString(),
@@ -2138,6 +2170,11 @@ async function ensureAppServerRuntime(config, flags) {
     });
   });
   client.on("server-request", (payload) => {
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: "app-server.server-request",
+      ...summarizeAppServerEnvelope(payload)
+    });
     handleAppServerServerRequest(config, flags, payload).catch((error) => {
       appendJsonl(errorsPath, {
         timestamp: new Date().toISOString(),
@@ -2186,7 +2223,7 @@ async function handleCardAction(data, config, flags) {
   }
   const requestEntry = readPendingRequest(value.request_id);
   if (!requestEntry) {
-    return buildStatusCard("这张卡片已经过期了，直接继续发文字给我就行。", { status: "done" });
+    return buildCurrentSessionStatusCard(value.chat_id || "");
   }
   const answers = {
     ...(requestEntry.answers || {}),
@@ -2200,15 +2237,44 @@ async function handleCardAction(data, config, flags) {
   });
   const allAnswered = (updated.questions || []).every((question) => answers?.[question.id]?.answers?.length);
   if (allAnswered) {
-    await appServerRuntime.client.respond(updated.rpc_id, buildQuestionAnswerPayload(updated.questions, answers));
     removePendingRequest(updated.request_id);
     const phrase = pickStatusPhrase("working");
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: "request-user-input.answer",
+      source: "card",
+      chat_id: updated.chat_id,
+      request_id: updated.request_id,
+      question_ids: Object.keys(answers),
+      answer_count: Object.keys(answers).length
+    });
     updateSessionState(updated.chat_id, {
       pending_request_id: "",
       status: "working",
       status_card_kind: "working",
       status_card_phrase: phrase
     });
+    upsertSessionCard(config, updated.chat_id, "working", flags, {
+      phrase
+    }).catch((error) => {
+      appendJsonl(errorsPath, {
+        timestamp: new Date().toISOString(),
+        type: "card-action-working-patch-failed",
+        chat_id: updated.chat_id,
+        request_id: updated.request_id,
+        error: String(error)
+      });
+    });
+    appServerRuntime.client.respond(updated.rpc_id, buildQuestionAnswerPayload(updated.questions, answers))
+      .catch((error) => {
+        appendJsonl(errorsPath, {
+          timestamp: new Date().toISOString(),
+          type: "card-action-respond-failed",
+          chat_id: updated.chat_id,
+          request_id: updated.request_id,
+          error: String(error)
+        });
+      });
     scheduleSessionCardRefresh(config, flags, updated.chat_id);
     return buildStatusCard(phrase, { status: "working" });
   }
@@ -2216,6 +2282,17 @@ async function handleCardAction(data, config, flags) {
     pending_request_id: updated.request_id,
     status: "waiting",
     status_card_kind: "waiting"
+  });
+  upsertSessionCard(config, updated.chat_id, "waiting", flags, {
+    pendingRequest: updated
+  }).catch((error) => {
+    appendJsonl(errorsPath, {
+      timestamp: new Date().toISOString(),
+      type: "card-action-waiting-patch-failed",
+      chat_id: updated.chat_id,
+      request_id: updated.request_id,
+      error: String(error)
+    });
   });
   scheduleSessionCardRefresh(config, flags, updated.chat_id);
   return buildStatusCard(
@@ -2286,6 +2363,15 @@ async function maybeResolvePendingRequestFromText(event, config, flags) {
   });
   const allAnswered = (updated.questions || []).every((question) => answers?.[question.id]?.answers?.length);
   if (allAnswered) {
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: "request-user-input.answer",
+      source: "text",
+      chat_id: updated.chat_id,
+      request_id: updated.request_id,
+      question_ids: Object.keys(answers),
+      answer_count: Object.keys(answers).length
+    });
     await appServerRuntime.client.respond(updated.rpc_id, buildQuestionAnswerPayload(updated.questions, answers));
     removePendingRequest(updated.request_id);
     updateSessionState(event.chat_id, {
