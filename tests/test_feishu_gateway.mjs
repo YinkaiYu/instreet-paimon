@@ -7,6 +7,8 @@ import {
   buildQuestionAnswerPayload,
   buildStatusCard,
   extractModeDirective,
+  inboxEventMatchesIncomingEvent,
+  listIncomingDedupKeys,
   normalizeCardActionPayload,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
@@ -166,6 +168,38 @@ test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback
   const prompt = buildCodexPrompt("oc_test", [], [], "- 无", "- 无");
   assert.match(prompt, /派蒙，你正在通过飞书和用户连续协作/);
   assert.doesNotMatch(prompt, /仓库主人/);
+});
+
+test("listIncomingDedupKeys includes both message id and realtime event id", () => {
+  assert.deepEqual(
+    listIncomingDedupKeys({
+      message_id: "om_123",
+      raw: {
+        event_id: "evt_123"
+      }
+    }),
+    ["om_123", "event:evt_123"]
+  );
+});
+
+test("inboxEventMatchesIncomingEvent matches by event id when message ids drift", () => {
+  assert.equal(
+    inboxEventMatchesIncomingEvent(
+      {
+        message_id: "om_old",
+        raw: {
+          event_id: "evt_same"
+        }
+      },
+      {
+        message_id: "om_new",
+        raw: {
+          event_id: "evt_same"
+        }
+      }
+    ),
+    true
+  );
 });
 
 test("status phrase asset contains a large rotating pool", () => {

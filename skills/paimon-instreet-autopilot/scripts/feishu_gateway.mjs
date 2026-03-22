@@ -279,16 +279,84 @@ function writeSeenMessages(data) {
   fs.writeFileSync(seenMessagesPath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
-function rememberSeenMessage(messageId, receivedAt = "") {
-  if (!messageId) {
+function listIncomingDedupKeys(event) {
+  const keys = [];
+  if (event?.message_id) {
+    keys.push(event.message_id);
+  }
+  const rawEventId = event?.raw?.event_id || "";
+  if (rawEventId) {
+    keys.push(`event:${rawEventId}`);
+  }
+  return keys;
+}
+
+function mergeSeenMessages(entries) {
+  if (!entries || typeof entries !== "object" || !Object.keys(entries).length) {
+    return readSeenMessages();
+  }
+  const seen = readSeenMessages();
+  let changed = false;
+  for (const [key, value] of Object.entries(entries)) {
+    if (!key || Object.prototype.hasOwnProperty.call(seen, key)) {
+      continue;
+    }
+    seen[key] = value;
+    changed = true;
+  }
+  if (changed) {
+    writeSeenMessages(seen);
+  }
+  return seen;
+}
+
+function inboxEventMatchesIncomingEvent(inboxEvent, event) {
+  if (!inboxEvent || !event) {
+    return false;
+  }
+  if (event.message_id && inboxEvent.message_id === event.message_id) {
+    return true;
+  }
+  const inboxEventId = inboxEvent?.raw?.event_id || "";
+  const rawEventId = event?.raw?.event_id || "";
+  return Boolean(rawEventId && inboxEventId && rawEventId === inboxEventId);
+}
+
+function inboxAlreadyHasIncomingEvent(event) {
+  if (!fs.existsSync(inboxPath)) {
+    return false;
+  }
+  const lines = fs.readFileSync(inboxPath, "utf8").split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+    try {
+      const payload = JSON.parse(line);
+      if (inboxEventMatchesIncomingEvent(payload, event)) {
+        return true;
+      }
+    } catch {
+      // ignore malformed lines
+    }
+  }
+  return false;
+}
+
+function rememberIncomingEvent(event) {
+  const dedupKeys = listIncomingDedupKeys(event);
+  if (!dedupKeys.length) {
     return false;
   }
   const seen = readSeenMessages();
-  if (seen[messageId]) {
+  if (dedupKeys.some((key) => Object.prototype.hasOwnProperty.call(seen, key))) {
     return true;
   }
-  seen[messageId] = receivedAt || new Date().toISOString();
-  writeSeenMessages(seen);
+  const timestamp = event?.received_at || new Date().toISOString();
+  mergeSeenMessages(
+    Object.fromEntries(dedupKeys.map((key) => [key, timestamp]))
+  );
   return false;
 }
 
@@ -3392,17 +3460,17 @@ function startQueueSweeper(config, flags) {
 }
 
 async function handleIncomingMessage(event, config, flags) {
-  if (event.source !== "history-sync") {
-    const alreadySeen = rememberSeenMessage(event.message_id, event.received_at);
-    if (alreadySeen) {
-      appendJsonl(eventsPath, {
-        timestamp: new Date().toISOString(),
-        type: "im.message.receive_v1.duplicate",
-        chat_id: event.chat_id,
-        message_id: event.message_id
-      });
-      return;
-    }
+  const alreadySeen = rememberIncomingEvent(event);
+  const duplicateInInbox = !alreadySeen && inboxAlreadyHasIncomingEvent(event);
+  if (alreadySeen || duplicateInInbox) {
+    appendJsonl(eventsPath, {
+      timestamp: new Date().toISOString(),
+      type: event.source === "history-sync" ? "history-sync.user-message.duplicate" : "im.message.receive_v1.duplicate",
+      chat_id: event.chat_id,
+      message_id: event.message_id,
+      duplicate_source: alreadySeen ? "seen-ledger" : "inbox-log"
+    });
+    return false;
   }
 
   appendJsonl(inboxPath, event);
@@ -3413,7 +3481,7 @@ async function handleIncomingMessage(event, config, flags) {
   });
 
   if (event.source === "history-sync" && getRuntimeBackend(config, flags) === "app-server") {
-    return;
+    return true;
   }
 
   try {
@@ -3479,16 +3547,17 @@ async function handleIncomingMessage(event, config, flags) {
   }
 
   if (!flags["spawn-codex"]) {
-    return;
+    return true;
   }
 
   if (getRuntimeBackend(config, flags) === "app-server") {
     await processEventWithAppServer(event, config, flags);
-    return;
+    return true;
   }
 
   enqueueForChat(event);
   scheduleChatProcessing(event.chat_id, config, flags);
+  return true;
 }
 
 async function startWebsocket(config, flags) {
@@ -3570,23 +3639,19 @@ async function syncChatHistory(config, flags) {
   if (!chatId) {
     throw new Error("sync requires --chat-id");
   }
-  const seen = readSeenMessages();
   const items = await fetchChatMessages(config, chatId, Number(flags["page-size"] || 50));
   const fresh = [];
 
   for (const item of items) {
-    if (seen[item.message_id]) {
-      continue;
-    }
-    seen[item.message_id] = item.create_time || Date.now();
     if (item.sender?.sender_type !== "user") {
       continue;
     }
     const event = normalizeMessageItem(item);
-    await handleIncomingMessage(event, config, flags);
-    fresh.push(event);
+    const accepted = await handleIncomingMessage(event, config, flags);
+    if (accepted) {
+      fresh.push(event);
+    }
   }
-  writeSeenMessages(seen);
   if (flags["spawn-codex"] && fresh.length && getRuntimeBackend(config, flags) !== "app-server") {
     await processChatQueue(chatId, config, flags);
   }
@@ -3706,6 +3771,8 @@ export {
   buildStatusCard,
   extractModeDirective,
   getRuntimeBackend,
+  inboxEventMatchesIncomingEvent,
+  listIncomingDedupKeys,
   normalizeCardActionPayload,
   pickStatusPhrase,
   shouldEnableCardCallbacks,
