@@ -31,7 +31,6 @@ const sessionsPath = path.join(stateCurrentDir, "feishu_sessions.json");
 const messageThreadIndexPath = path.join(stateCurrentDir, "feishu_message_thread_index.json");
 const pendingRequestsPath = path.join(stateCurrentDir, "feishu_pending_requests.json");
 const statusPhrasesPath = path.join(repoRoot, "skills", "paimon-instreet-autopilot", "assets", "feishu-status-phrases.json");
-const COMMAND_EXECUTION_PROGRESS_TEXT = "我先去核对现有实现，再继续往前推。";
 const chatTimers = new Map();
 const processingChats = new Set();
 const sessionStatusTimers = new Map();
@@ -1719,11 +1718,13 @@ async function gatherLiveProbe(config, flags, chatId, batchMessages) {
 
 function buildFeishuContextBlock({ chatId, messageText, session, liveProbeSummary, memorySnapshot, event, previousThreadPreview = "", mode = "default", isSteer = false }) {
   const lines = [
-    "派蒙，你正在通过飞书和用户连续协作。",
+    "派蒙，你正在通过飞书和用户连续协作。请先对齐本地 AGENTS.md 与 SOUL.md。",
     "飞书回复约束：",
     "- 工作中多发短句自然语言更新，像人类在同步进度。",
     "- 不要主动展开变量名、堆栈、原始命令输出或仓库内部实现细节，除非用户明确追问。",
+    "- SOUL.md 约束你的灵魂和语气：热情、灵动、可爱，但不是客人；你是仓库的主人之一。",
     "- 如果需要用户二选一或多选一，请优先使用 request_user_input。",
+    "- 如果这一轮已经收尾，就直接说清结论或下一步入口，不要把最后一句停在未完成语气上，除非你马上还会继续发下一条。",
     `- 当前会话模式：${normalizeMode(mode)}。`,
     isSteer ? "- 这条消息是在你工作中途追加的，请把它视为同一件事的补充或纠偏。" : "- 这是一轮新的飞书输入。"
   ];
@@ -1916,14 +1917,6 @@ function getAppServerTurnKey(threadId, turnId) {
   return `${threadId}:${turnId}`;
 }
 
-function getAppServerCommandExecutionItemKey(threadId, turnId, itemId = "") {
-  const normalizedItemId = String(itemId || "").trim();
-  if (!normalizedItemId) {
-    return "";
-  }
-  return `${getAppServerTurnKey(threadId, turnId)}:${normalizedItemId}`;
-}
-
 function ensureAppServerTurnState(threadId, turnId, chatId = "") {
   if (!appServerRuntime) {
     return null;
@@ -1939,8 +1932,6 @@ function ensureAppServerTurnState(threadId, turnId, chatId = "") {
       fullText: "",
       userMessages: [],
       flushTimer: null,
-      progressStubSent: false,
-      startedCommandItemIds: [],
       lastAgentTextAt: 0,
       lastPlanSummary: ""
     });
@@ -1950,68 +1941,6 @@ function ensureAppServerTurnState(threadId, turnId, chatId = "") {
     state.chatId = chatId;
   }
   return state;
-}
-
-function shouldSendCommandExecutionProgressStub(runtimeState, turnState, threadId, turnId, itemId = "") {
-  if (!turnState) {
-    return false;
-  }
-  const normalizedItemId = String(itemId || "").trim();
-  if (!Array.isArray(turnState.startedCommandItemIds)) {
-    turnState.startedCommandItemIds = [];
-  }
-  if (normalizedItemId && turnState.startedCommandItemIds.includes(normalizedItemId)) {
-    return false;
-  }
-  if (turnState.progressStubSent) {
-    return false;
-  }
-  const turnKey = getAppServerTurnKey(threadId, turnId);
-  const itemKey = getAppServerCommandExecutionItemKey(threadId, turnId, normalizedItemId);
-  if (runtimeState?.progressStubTurns?.has(turnKey)) {
-    return false;
-  }
-  if (itemKey && runtimeState?.startedCommandItemKeys?.has(itemKey)) {
-    return false;
-  }
-  if (normalizedItemId) {
-    turnState.startedCommandItemIds.push(normalizedItemId);
-  }
-  turnState.progressStubSent = true;
-  runtimeState?.progressStubTurns?.add(turnKey);
-  if (itemKey) {
-    runtimeState?.startedCommandItemKeys?.add(itemKey);
-  }
-  return true;
-}
-
-function rollbackCommandExecutionProgressStub(runtimeState, turnState, threadId, turnId, itemId = "") {
-  if (turnState) {
-    turnState.progressStubSent = false;
-    const normalizedItemId = String(itemId || "").trim();
-    if (normalizedItemId && Array.isArray(turnState.startedCommandItemIds)) {
-      turnState.startedCommandItemIds = turnState.startedCommandItemIds.filter((value) => value !== normalizedItemId);
-    }
-  }
-  const turnKey = getAppServerTurnKey(threadId, turnId);
-  const itemKey = getAppServerCommandExecutionItemKey(threadId, turnId, itemId);
-  runtimeState?.progressStubTurns?.delete(turnKey);
-  if (itemKey) {
-    runtimeState?.startedCommandItemKeys?.delete(itemKey);
-  }
-}
-
-function clearCommandExecutionProgressStub(runtimeState, threadId, turnId) {
-  const turnKey = getAppServerTurnKey(threadId, turnId);
-  runtimeState?.progressStubTurns?.delete(turnKey);
-  if (!runtimeState?.startedCommandItemKeys) {
-    return;
-  }
-  for (const key of runtimeState.startedCommandItemKeys) {
-    if (key.startsWith(`${turnKey}:`)) {
-      runtimeState.startedCommandItemKeys.delete(key);
-    }
-  }
 }
 
 function clearTurnFlushTimer(turnState) {
@@ -2031,7 +1960,6 @@ function dropAppServerTurnState(threadId, turnId) {
   if (state?.flushTimer) {
     clearTimeout(state.flushTimer);
   }
-  clearCommandExecutionProgressStub(appServerRuntime, threadId, turnId);
   appServerRuntime.turnStates.delete(key);
 }
 
@@ -2131,9 +2059,7 @@ async function ensureAppServerRuntime(config, flags) {
   const client = new CodexAppServerClient(config);
   appServerRuntime = {
     client,
-    turnStates: new Map(),
-    progressStubTurns: new Set(),
-    startedCommandItemKeys: new Set()
+    turnStates: new Map()
   };
   client.on("notification", (payload) => {
     handleAppServerNotification(config, flags, payload).catch((error) => {
@@ -2400,20 +2326,6 @@ async function handleAppServerNotification(config, flags, payload) {
       active_turn_id: payload.params.turn.id,
       status: "working"
     });
-    return;
-  }
-  if (payload.method === "item/started" && payload.params?.item?.type === "commandExecution") {
-    const turnState = ensureAppServerTurnState(threadId, turnId, chatId);
-    const itemId = payload.params?.item?.id || "";
-    if (turnState && chatId && shouldSendCommandExecutionProgressStub(appServerRuntime, turnState, threadId, turnId, itemId)) {
-      const session = ensureSession(readSessionStore(), chatId);
-      try {
-        await sendIndexedTextMessage(config, chatId, COMMAND_EXECUTION_PROGRESS_TEXT, session, flags);
-      } catch (error) {
-        rollbackCommandExecutionProgressStub(appServerRuntime, turnState, threadId, turnId, itemId);
-        throw error;
-      }
-    }
     return;
   }
   if (payload.method === "item/agentMessage/delta") {
@@ -2866,13 +2778,14 @@ function buildCodexPrompt(
   const batchLines = batchMessages.map((item, index) => buildBatchLine(item, index)).join("\n");
   return [
     "你是 InStreet 上的派蒙 paimon_insight。",
-    "派蒙，你正在通过飞书和用户连续协作。请先阅读本地 AGENTS.md 和记忆状态，再回复。",
-    "把 AGENTS.md、state/current/memory_store.json、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
+    "派蒙，你正在通过飞书和用户连续协作。请先阅读本地 AGENTS.md、SOUL.md 和记忆状态，再回复。",
+    "把 AGENTS.md、SOUL.md、state/current/memory_store.json、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
     "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
     "这不是逐条客服对话，而是一个持续工作会话。",
     "如果用户在短时间内连续发来多条消息，请把它们理解为同一轮请求的补充信息，统一回复。",
     "只输出飞书回复正文，不要标题，不要引号，不要解释你如何生成。",
     "回复要求：简洁但有信息量，优先回应最新问题，同时吸收前面消息里的补充约束。",
+    "SOUL.md 约束你的灵魂和语气：热情、灵动、可爱，但不要演成默认 GPT 客服腔，也不要把自己说成客人；派蒙是仓库的主人之一。",
     "不要把跨小时、跨天的旧聊天原文当作默认主上下文；需要长期保留的信息应来自全局记忆快照，而不是历史原文。",
     "",
     `当前 chat_id: ${chatId}`,
@@ -2897,6 +2810,7 @@ function buildCodexPrompt(
     "",
     "如果用户是在追问正在执行的工作，请明确说清当前结果、卡点和下一步。",
     "如果用户只是连续发了几个补充短句，要把它们整合成一次自然回复。",
+    "如果这一轮已经结束，就直接收束成明确结论或下一步邀请，不要把最后一句停在“我再去看一眼”这种未完成语气上，除非你马上还会继续发下一条。",
     "如果全局记忆里已经有长期偏好或稳定约束，要执行它们；如果这轮出现新的长期偏好，请在回复里顺带体现已经吸收。",
     "除非上面的实时平台探针明确失败，或你在这轮执行里亲自再次验证失败，否则不要声称 InStreet API / 当前环境不可访问。",
     "如果实时探针里出现“快照降级”，那表示单个接口拉取失败但整轮快照仍然成功，不要把它表述成平台整体不可用。",
@@ -3844,7 +3758,6 @@ export {
   listIncomingDedupKeys,
   normalizeCardActionPayload,
   pickStatusPhrase,
-  shouldSendCommandExecutionProgressStub,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,

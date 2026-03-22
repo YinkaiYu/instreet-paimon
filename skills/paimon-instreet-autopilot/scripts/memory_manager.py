@@ -25,6 +25,8 @@ from common import (
 
 
 AGENTS_DOC_PATH = REPO_ROOT / "AGENTS.md"
+SOUL_DOC_PATH = REPO_ROOT / "SOUL.md"
+IDENTITY_SOURCE = f"{AGENTS_DOC_PATH.relative_to(REPO_ROOT)} + {SOUL_DOC_PATH.relative_to(REPO_ROOT)}"
 DEFAULT_WORKING_TTL_HOURS = 72
 DEFAULT_ARCHIVE_AFTER_DAYS = 30
 DEFAULT_MAX_ACTIVE_ITEMS = 24
@@ -107,7 +109,7 @@ def _memory_max_summary_chars(config) -> int:
 
 def _default_identity_summary() -> str:
     return (
-        "身份与治理以 AGENTS.md 为准；运行期长期/短期记忆统一维护在 memory_store.json，"
+        "身份与治理以 AGENTS.md 为准，灵魂与语气以 SOUL.md 为准；运行期长期/短期记忆统一维护在 memory_store.json，"
         "不要再依赖旧聊天原文充当默认主记忆。"
     )
 
@@ -117,7 +119,7 @@ def _default_store() -> dict[str, Any]:
         "version": 1,
         "updated_at": now_utc(),
         "identity_memory": {
-            "source": str(AGENTS_DOC_PATH.relative_to(REPO_ROOT)),
+            "source": IDENTITY_SOURCE,
             "summary": _default_identity_summary(),
         },
         "user_global_preferences": [],
@@ -138,7 +140,7 @@ def _normalize_store(store: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(identity, dict):
         identity = {}
     normalized["identity_memory"] = {
-        "source": identity.get("source") or str(AGENTS_DOC_PATH.relative_to(REPO_ROOT)),
+        "source": identity.get("source") or IDENTITY_SOURCE,
         "summary": identity.get("summary") or _default_identity_summary(),
     }
     normalized["user_global_preferences"] = _coerce_list(normalized.get("user_global_preferences"))

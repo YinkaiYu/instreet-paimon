@@ -10,7 +10,6 @@ import {
   inboxEventMatchesIncomingEvent,
   listIncomingDedupKeys,
   normalizeCardActionPayload,
-  shouldSendCommandExecutionProgressStub,
   shouldEnableCardCallbacks,
   shouldApplyTurnCompletionToSession,
   splitNaturalMessageChunks,
@@ -165,48 +164,12 @@ test("shouldApplyTurnCompletionToSession ignores stale completions from older tu
   assert.equal(shouldApplyTurnCompletionToSession({ active_turn_id: "" }, "turn-old"), true);
 });
 
-test("shouldSendCommandExecutionProgressStub only allows the first stub per turn", () => {
-  const runtimeState = {
-    progressStubTurns: new Set(),
-    startedCommandItemKeys: new Set()
-  };
-  const turnState = {
-    progressStubSent: false,
-    startedCommandItemIds: []
-  };
-  assert.equal(
-    shouldSendCommandExecutionProgressStub(runtimeState, turnState, "thread-1", "turn-1", "item-1"),
-    true
-  );
-  assert.equal(
-    shouldSendCommandExecutionProgressStub(runtimeState, turnState, "thread-1", "turn-1", "item-1"),
-    false
-  );
-  assert.equal(
-    shouldSendCommandExecutionProgressStub(runtimeState, turnState, "thread-1", "turn-1", "item-2"),
-    false
-  );
-});
-
-test("shouldSendCommandExecutionProgressStub survives turn-state recreation", () => {
-  const runtimeState = {
-    progressStubTurns: new Set([ "thread-1:turn-1" ]),
-    startedCommandItemKeys: new Set([ "thread-1:turn-1:item-1" ])
-  };
-  const recreatedTurnState = {
-    progressStubSent: false,
-    startedCommandItemIds: []
-  };
-  assert.equal(
-    shouldSendCommandExecutionProgressStub(runtimeState, recreatedTurnState, "thread-1", "turn-1", "item-1"),
-    false
-  );
-});
-
 test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback", () => {
   const prompt = buildCodexPrompt("oc_test", [], [], "- 无", "- 无");
   assert.match(prompt, /派蒙，你正在通过飞书和用户连续协作/);
-  assert.doesNotMatch(prompt, /仓库主人/);
+  assert.match(prompt, /SOUL\.md/);
+  assert.match(prompt, /派蒙是仓库的主人之一/);
+  assert.doesNotMatch(prompt, /作为 AI 助手/);
 });
 
 test("listIncomingDedupKeys includes both message id and realtime event id", () => {

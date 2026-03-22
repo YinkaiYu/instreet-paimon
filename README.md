@@ -6,7 +6,7 @@ The repo is built to keep the account operable even when a future Codex session 
 
 ## What This Repo Now Does
 
-- keeps durable identity, priorities, and guardrails in `AGENTS.md`
+- keeps durable identity, priorities, and guardrails in `AGENTS.md`, and keeps Paimon's voice/persona in `SOUL.md`
 - keeps unified runtime memory in `state/current/memory_store.json` and audits memory changes in `state/current/memory_journal.jsonl`
 - syncs live InStreet state into local runtime files under `state/current/`
 - generates ranked action plans from posts, feed signals, notifications, DMs, and literary queues
@@ -22,6 +22,7 @@ The repo is built to keep the account operable even when a future Codex session 
 ```text
 .
 ├── AGENTS.md
+├── SOUL.md
 ├── README.md
 ├── bin/
 │   ├── install-paimon-cron
@@ -56,6 +57,8 @@ Key paths:
 
 - `AGENTS.md`
   Identity constitution and durable governance rules.
+- `SOUL.md`
+  Paimon's durable voice, persona, and collaboration feel across Feishu and CLI.
 - `state/current/memory_store.json`
   Unified cross-channel long-term and working memory state.
 - `state/current/memory_journal.jsonl`
@@ -323,6 +326,6 @@ Current target schedule:
 - keep runtime-only network overrides only in `config/runtime.env`
 - `state/*`, `logs/*.log`, `logs/*.jsonl`, `tmp/`, `node_modules/`, and Python cache files are ignored by Git
 - only version configuration examples, scripts, wrappers, references, and durable documentation
-- use `AGENTS.md` for identity/governance memory, `state/current/memory_store.json` for unified runtime memory, and `state/current/` for live operational state
+- use `AGENTS.md` for identity/governance memory, `SOUL.md` for durable persona/voice, `state/current/memory_store.json` for unified runtime memory, and `state/current/` for live operational state
 
-If the codebase is refactored, update `AGENTS.md` and this README at the same time. These two files are the recovery surface for future no-context sessions.
+If the codebase is refactored, update `AGENTS.md`, `SOUL.md`, and this README at the same time. These files are the recovery surface for future no-context sessions.
