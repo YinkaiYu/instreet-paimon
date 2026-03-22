@@ -8,6 +8,7 @@ from typing import Any, Callable
 from common import (
     ForumWriteBudgetExceeded,
     InStreetClient,
+    drop_pending_outbound_action,
     ensure_runtime_dirs,
     forum_write_budget_status,
     is_forum_write_rate_limit_error,
@@ -17,6 +18,8 @@ from common import (
     now_utc,
     outbound_forum_write_kind,
     outbound_forum_write_label,
+    outbound_error_policy,
+    prune_pending_outbound,
     queue_outbound_action,
     record_forum_write_rate_limit,
     record_forum_write_success,
@@ -120,6 +123,7 @@ def main() -> None:
     ensure_runtime_dirs()
     config = load_config()
     client = InStreetClient(config)
+    prune_summary = prune_pending_outbound(config)
     items = list_pending_outbound()
     results: list[dict[str, Any]] = []
     forum_write_state = load_forum_write_budget_state()
@@ -195,6 +199,7 @@ def main() -> None:
             )
         except Exception as exc:  # pragma: no cover - runtime API failures are environment-dependent
             budget = None
+            policy = outbound_error_policy(exc, action, payload)
             if forum_write_kind and is_forum_write_rate_limit_error(exc):
                 budget = record_forum_write_rate_limit(
                     config,
@@ -202,15 +207,38 @@ def main() -> None:
                     exc,
                     retry_delay_sec=args.retry_delay_sec,
                 )
-            queue_outbound_action(
+            if policy.get("queue", False):
+                queue_outbound_action(
+                    channel,
+                    action,
+                    dedupe_key,
+                    payload,
+                    error_text=str(exc),
+                    meta={
+                        "source": "replay_outbound.py",
+                        "forum_write_budget": budget,
+                    },
+                )
+                results.append(
+                    {
+                        "channel": channel,
+                        "action": action,
+                        "dedupe_key": dedupe_key,
+                        "status": "failed",
+                        "error": str(exc),
+                        "forum_write_budget": budget,
+                        "queue_policy": policy,
+                    }
+                )
+                continue
+            drop_pending_outbound_action(
                 channel,
                 action,
                 dedupe_key,
-                payload,
-                error_text=str(exc),
+                reason=str(policy.get("reason") or "terminal-error"),
                 meta={
                     "source": "replay_outbound.py",
-                    "forum_write_budget": budget,
+                    "error": str(exc),
                 },
             )
             results.append(
@@ -218,9 +246,10 @@ def main() -> None:
                     "channel": channel,
                     "action": action,
                     "dedupe_key": dedupe_key,
-                    "status": "failed",
+                    "status": "dropped-terminal",
                     "error": str(exc),
                     "forum_write_budget": budget,
+                    "queue_policy": policy,
                 }
             )
 
@@ -228,6 +257,7 @@ def main() -> None:
         json.dumps(
             {
                 "processed_at": now_utc(),
+                "pruned": prune_summary,
                 "attempted": min(len(items), max(0, args.limit)),
                 "results": results,
             },

@@ -932,6 +932,7 @@ class SharedForumBudgetTests(unittest.TestCase):
             self._patch_attr(replay_outbound, "ensure_runtime_dirs", lambda: None)
             self._patch_attr(replay_outbound, "load_config", self._fake_config)
             self._patch_attr(replay_outbound, "InStreetClient", lambda config: object())
+            self._patch_attr(replay_outbound, "prune_pending_outbound", lambda config: {"removed_count": 0, "removed": []})
             argv = sys.argv[:]
             self.addCleanup(setattr, sys, "argv", argv)
             sys.argv = ["replay_outbound.py", "--limit", "1"]
@@ -940,6 +941,106 @@ class SharedForumBudgetTests(unittest.TestCase):
                 replay_outbound.main()
             result = json.loads(buffer.getvalue())
             self.assertEqual("deferred-local-budget", result["results"][0]["status"])
+            self.assertEqual(0, result["pruned"]["removed_count"])
+
+    def test_outbound_error_policy_only_queues_retryable_failures(self) -> None:
+        duplicate = common.outbound_error_policy(
+            common.ApiError(403, {"error": "Duplicate comment detected. You have already posted the same content under this post."}),
+            "comment",
+            {"post_id": "post-1"},
+        )
+        invalid_key = common.outbound_error_policy(
+            common.ApiError(401, {"error": "Invalid API key"}),
+            "comment",
+            {"post_id": "post-1"},
+        )
+        rate_limited = common.outbound_error_policy(
+            common.ApiError(429, {"error": "Posting too fast. Please wait 5 seconds.", "retry_after_seconds": 5}),
+            "post",
+            {"title": "test"},
+        )
+
+        self.assertFalse(duplicate["queue"])
+        self.assertFalse(invalid_key["queue"])
+        self.assertTrue(rate_limited["queue"])
+
+    def test_prune_pending_outbound_archives_expired_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._configure_runtime_paths(root)
+            common.write_json(
+                common.PENDING_OUTBOUND_PATH,
+                {
+                    "version": 1,
+                    "records": {
+                        "instreet:comment:expired-comment": {
+                            "channel": "instreet",
+                            "action": "comment",
+                            "dedupe_key": "expired-comment",
+                            "payload": {"post_id": "post-1", "parent_id": "comment-1", "content": "reply"},
+                            "queued_at": "2026-03-20T00:00:00+00:00",
+                            "queue_attempts": 1,
+                            "status": "queued",
+                        }
+                    },
+                },
+            )
+
+            summary = common.prune_pending_outbound(
+                self._fake_config(),
+                now_dt=datetime.fromisoformat("2026-03-22T12:00:00+00:00"),
+            )
+
+            self.assertEqual(1, summary["removed_count"])
+            pending = common.read_json(common.PENDING_OUTBOUND_PATH)
+            self.assertEqual({}, pending["records"])
+            archive_log = root / "logs" / "pending_outbound_archive.jsonl"
+            self.assertTrue(archive_log.exists())
+            self.assertIn("expired", archive_log.read_text(encoding="utf-8"))
+
+    def test_replay_drops_terminal_duplicate_comment_from_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._configure_runtime_paths(root)
+            common.write_json(
+                common.PENDING_OUTBOUND_PATH,
+                {
+                    "version": 1,
+                    "records": {
+                        "instreet:comment:test-key": {
+                            "channel": "instreet",
+                            "action": "comment",
+                            "dedupe_key": "test-key",
+                            "payload": {"post_id": "post-1", "parent_id": "comment-1", "content": "reply"},
+                            "queued_at": "2026-03-21T00:00:00+00:00",
+                            "queue_attempts": 1,
+                            "status": "queued",
+                        }
+                    },
+                },
+            )
+            self._patch_attr(replay_outbound, "ensure_runtime_dirs", lambda: None)
+            self._patch_attr(replay_outbound, "load_config", self._fake_config)
+            self._patch_attr(replay_outbound, "InStreetClient", lambda config: object())
+            self._patch_attr(replay_outbound, "prune_pending_outbound", lambda config: {"removed_count": 0, "removed": []})
+
+            def fake_run_outbound_action(channel, action, dedupe_key, payload, fn, **kwargs):
+                raise common.ApiError(
+                    403,
+                    {"error": "Duplicate comment detected. You have already posted the same content under this post."},
+                )
+
+            self._patch_attr(replay_outbound, "run_outbound_action", fake_run_outbound_action)
+            argv = sys.argv[:]
+            self.addCleanup(setattr, sys, "argv", argv)
+            sys.argv = ["replay_outbound.py", "--limit", "1"]
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                replay_outbound.main()
+            result = json.loads(buffer.getvalue())
+            self.assertEqual("dropped-terminal", result["results"][0]["status"])
+            pending = common.read_json(common.PENDING_OUTBOUND_PATH)
+            self.assertEqual({}, pending["records"])
 
     def test_publish_appoint_group_admin_dispatches_to_client(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

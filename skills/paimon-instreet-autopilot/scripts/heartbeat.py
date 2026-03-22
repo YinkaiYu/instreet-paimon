@@ -32,6 +32,7 @@ from common import (
     load_config,
     load_forum_write_budget_state as common_load_forum_write_budget_state,
     now_utc,
+    outbound_error_policy,
     record_forum_write_rate_limit as common_record_forum_write_rate_limit,
     record_forum_write_success as common_record_forum_write_success,
     queue_outbound_action,
@@ -635,6 +636,7 @@ def _run_heartbeat_write(
         error_text = str(exc)
         if isinstance(exc, ApiError):
             error_text = f"HTTP {exc.status}: {exc.body}"
+        policy = outbound_error_policy(exc, action, payload)
         budget = None
         rate_limit_scope = None
         if forum_write_state is not None and forum_write_kind and _is_normal_forum_write_mechanism(exc):
@@ -654,6 +656,19 @@ def _run_heartbeat_write(
                         False,
                         exc,
                     )
+        if not policy.get("queue", False):
+            return (
+                None,
+                {
+                    "status": "failed-terminal",
+                    "error": error_text,
+                    "queue_policy": policy,
+                    "forum_write_budget": budget,
+                    "meta": heartbeat_meta,
+                },
+                False,
+                exc,
+            )
         record = queue_outbound_action(
             "instreet",
             action,

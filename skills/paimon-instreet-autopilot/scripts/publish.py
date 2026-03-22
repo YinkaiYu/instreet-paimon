@@ -20,6 +20,7 @@ from common import (
     now_slug,
     outbound_forum_write_kind,
     outbound_forum_write_label,
+    outbound_error_policy,
     payload_digest,
     queue_outbound_action,
     record_forum_write_rate_limit,
@@ -705,6 +706,7 @@ def main() -> None:
             )
     except Exception as exc:
         budget = None
+        policy = outbound_error_policy(exc, args.command, payload)
         if forum_write_kind and forum_write_state is not None and is_forum_write_rate_limit_error(exc):
             budget = record_forum_write_rate_limit(
                 config,
@@ -712,7 +714,7 @@ def main() -> None:
                 exc,
                 retry_delay_sec=args.retry_delay_sec,
             )
-        if not args.queue_on_failure:
+        if not args.queue_on_failure or not policy.get("queue", False):
             raise
         record = queue_outbound_action(
             channel,
@@ -731,6 +733,7 @@ def main() -> None:
             "error": str(exc),
             "record": record,
             "deduped": False,
+            "queue_policy": policy,
         }
         if budget is not None:
             output["forum_write_budget"] = budget

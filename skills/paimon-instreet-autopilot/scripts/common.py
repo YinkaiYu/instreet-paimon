@@ -42,6 +42,9 @@ DEFAULT_COMMENT_DAILY_LIMIT = 100
 DEFAULT_COMMENT_DAILY_WINDOW_SEC = 86400
 DEFAULT_HTTP_READ_RETRY_ATTEMPTS = 3
 DEFAULT_HTTP_WRITE_TRANSIENT_RETRY_ATTEMPTS = 4
+DEFAULT_PENDING_POST_TTL_HOURS = 48.0
+DEFAULT_PENDING_COMMENT_TTL_HOURS = 24.0
+DEFAULT_PENDING_MESSAGE_TTL_HOURS = 24.0
 
 
 class ApiError(RuntimeError):
@@ -186,6 +189,10 @@ def load_pending_outbound() -> dict[str, Any]:
     return read_json(PENDING_OUTBOUND_PATH, default=_pending_template())
 
 
+def pending_outbound_archive_log_path() -> Path:
+    return LOGS_DIR / "pending_outbound_archive.jsonl"
+
+
 def _journal_key(channel: str, action: str, dedupe_key: str) -> str:
     return f"{channel}:{action}:{dedupe_key}"
 
@@ -226,6 +233,28 @@ def api_error_text(value: Any) -> str:
     if isinstance(body, dict):
         return str(body.get("error", ""))
     return str(body)
+
+
+def outbound_error_policy(exc: Exception, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    del action, payload
+    if isinstance(exc, ForumWriteBudgetExceeded):
+        return {"queue": True, "reason": "forum-write-budget"}
+
+    error_text = api_error_text(exc).lower()
+    if isinstance(exc, ApiError):
+        if exc.status == 429 or exc.status >= 500:
+            return {"queue": True, "reason": f"http-{exc.status}-retryable"}
+        if "duplicate comment detected" in error_text or "duplicate post" in error_text:
+            return {"queue": False, "reason": "duplicate-write"}
+        if exc.status in {401, 403, 404, 409, 422}:
+            return {"queue": False, "reason": f"http-{exc.status}-terminal"}
+        if 400 <= exc.status < 500:
+            return {"queue": False, "reason": f"http-{exc.status}-client-error"}
+
+    if isinstance(exc, (error.URLError, ssl.SSLError, TimeoutError, ConnectionError, http_client.IncompleteRead)):
+        return {"queue": True, "reason": "transient-transport-error"}
+
+    return {"queue": False, "reason": exc.__class__.__name__.lower()}
 
 
 def extract_retry_after_seconds(exc: Exception) -> float | None:
@@ -613,14 +642,25 @@ def queue_outbound_action(
     return record
 
 
-def drop_pending_outbound_action(channel: str, action: str, dedupe_key: str) -> None:
+def drop_pending_outbound_action(
+    channel: str,
+    action: str,
+    dedupe_key: str,
+    *,
+    reason: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     pending = load_pending_outbound()
     records = pending.get("records", {})
     key = _journal_key(channel, action, dedupe_key)
     if key not in records:
-        return
+        return None
     record = records.pop(key)
     write_json(PENDING_OUTBOUND_PATH, pending)
+    merged_meta = dict(record.get("meta", {}))
+    if meta:
+        merged_meta.update(meta)
+    status = "archived" if reason else "cleared"
     append_jsonl(
         PENDING_OUTBOUND_LOG,
         {
@@ -628,11 +668,103 @@ def drop_pending_outbound_action(channel: str, action: str, dedupe_key: str) -> 
             "channel": channel,
             "action": action,
             "dedupe_key": dedupe_key,
-            "status": "cleared",
+            "status": status,
             "payload_hash": record.get("payload_hash"),
-            "meta": record.get("meta", {}),
+            "reason": reason,
+            "meta": merged_meta,
         },
     )
+    if reason:
+        append_jsonl(
+            pending_outbound_archive_log_path(),
+            {
+                "timestamp": now_utc(),
+                "channel": channel,
+                "action": action,
+                "dedupe_key": dedupe_key,
+                "reason": reason,
+                "payload_hash": record.get("payload_hash"),
+                "record": record,
+                "meta": merged_meta,
+            },
+        )
+    return record
+
+
+def _pending_outbound_ttl_hours(config, action: str, payload: dict[str, Any]) -> float | None:
+    automation = getattr(config, "automation", {}) or {}
+    defaults = {
+        "post": DEFAULT_PENDING_POST_TTL_HOURS,
+        "comment": DEFAULT_PENDING_COMMENT_TTL_HOURS,
+        "message": DEFAULT_PENDING_MESSAGE_TTL_HOURS,
+    }
+    key_map = {
+        "post": "pending_post_ttl_hours",
+        "comment": "pending_comment_ttl_hours",
+        "message": "pending_message_ttl_hours",
+    }
+    default_value = defaults.get(action)
+    if default_value is None:
+        return None
+    raw = automation.get(key_map[action], default_value)
+    try:
+        ttl_hours = float(raw)
+    except (TypeError, ValueError):
+        ttl_hours = default_value
+    if ttl_hours <= 0:
+        return None
+    return ttl_hours
+
+
+def pending_outbound_expires_at(config, record: dict[str, Any]) -> str | None:
+    payload = record.get("payload") or {}
+    ttl_hours = _pending_outbound_ttl_hours(config, str(record.get("action") or ""), payload)
+    queued_at = _parse_iso_datetime(record.get("queued_at"))
+    if ttl_hours is None or queued_at is None:
+        return None
+    return (queued_at + timedelta(hours=ttl_hours)).isoformat()
+
+
+def pending_outbound_is_expired(config, record: dict[str, Any], *, now_dt: datetime | None = None) -> bool:
+    expires_at = _parse_iso_datetime(pending_outbound_expires_at(config, record))
+    if expires_at is None:
+        return False
+    current = now_dt or datetime.now(timezone.utc)
+    return expires_at <= current
+
+
+def prune_pending_outbound(config, *, now_dt: datetime | None = None) -> dict[str, Any]:
+    pending = load_pending_outbound()
+    records = pending.get("records", {})
+    current = now_dt or datetime.now(timezone.utc)
+    removed: list[dict[str, Any]] = []
+    for key, record in list(records.items()):
+        if not pending_outbound_is_expired(config, record, now_dt=current):
+            continue
+        archived = drop_pending_outbound_action(
+            record["channel"],
+            record["action"],
+            record["dedupe_key"],
+            reason="expired",
+            meta={
+                "expired_at": pending_outbound_expires_at(config, record),
+                "source": "pending-prune",
+            },
+        )
+        removed.append(
+            {
+                "key": key,
+                "action": record.get("action"),
+                "queued_at": record.get("queued_at"),
+                "expired_at": pending_outbound_expires_at(config, record),
+                "title": (record.get("payload") or {}).get("title"),
+                "archived": bool(archived),
+            }
+        )
+    return {
+        "removed_count": len(removed),
+        "removed": removed,
+    }
 
 
 def list_pending_outbound() -> list[dict[str, Any]]:

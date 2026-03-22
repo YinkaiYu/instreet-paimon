@@ -26,6 +26,7 @@ from common import (
 
 
 HEARTBEAT_ONCE_BIN = REPO_ROOT / "bin" / "paimon-heartbeat-once"
+REPLAY_OUTBOUND_BIN = REPO_ROOT / "bin" / "paimon-replay-outbound"
 HEARTBEAT_LAST_RUN_PATH = CURRENT_STATE_DIR / "heartbeat_last_run.json"
 HEARTBEAT_LOG_PATH = CURRENT_STATE_DIR / "heartbeat_log.jsonl"
 SUPERVISOR_LAST_RUN_PATH = CURRENT_STATE_DIR / "heartbeat_supervisor_last_run.json"
@@ -80,6 +81,14 @@ def _heartbeat_command(args: argparse.Namespace) -> list[str]:
         *_bool_flag(args.execute, "--execute"),
         *_bool_flag(args.allow_codex, "--allow-codex"),
         *_bool_flag(args.archive, "--archive"),
+    ]
+
+
+def _replay_command(settings: dict[str, Any]) -> list[str]:
+    return [
+        str(REPLAY_OUTBOUND_BIN),
+        "--limit",
+        str(settings["replay_pending_limit"]),
     ]
 
 
@@ -394,7 +403,61 @@ def _supervisor_settings(config: Any) -> dict[str, Any]:
         "require_public_action": bool(automation.get("public_output_required", False)),
         "require_primary_publication": bool(automation.get("heartbeat_require_primary_publication", True)),
         "require_feishu_report": bool(automation.get("heartbeat_feishu_report_enabled", True)),
+        "replay_pending_enabled": bool(automation.get("pending_outbound_replay_enabled", True)),
+        "replay_pending_limit": max(1, int(automation.get("pending_outbound_replay_limit", 3))),
+        "replay_pending_timeout_seconds": max(30, int(automation.get("pending_outbound_replay_timeout_ms", 300000)) // 1000),
     }
+
+
+def _run_pending_replay(settings: dict[str, Any]) -> dict[str, Any]:
+    command = _replay_command(settings)
+    started_at = now_utc()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            env={
+                **runtime_subprocess_env(),
+                "PYTHONUNBUFFERED": "1",
+            },
+            text=True,
+            capture_output=True,
+            timeout=settings["replay_pending_timeout_seconds"],
+            check=False,
+        )
+        parsed_stdout = None
+        if completed.stdout.strip():
+            try:
+                parsed_stdout = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                parsed_stdout = None
+        return {
+            "started_at": started_at,
+            "finished_at": now_utc(),
+            "command": command,
+            "timed_out": False,
+            "returncode": completed.returncode,
+            "stdout": truncate_text(completed.stdout.strip(), 3000),
+            "stderr": truncate_text(completed.stderr.strip(), 3000),
+            "result": parsed_stdout,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "started_at": started_at,
+            "finished_at": now_utc(),
+            "command": command,
+            "timed_out": True,
+            "returncode": None,
+            "stdout": truncate_text((exc.stdout or "").strip(), 3000),
+            "stderr": truncate_text((exc.stderr or "").strip(), 3000),
+            "result": None,
+        }
+
+
+def _maybe_run_pending_replay(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any] | None:
+    if not args.execute or not settings.get("replay_pending_enabled"):
+        return None
+    return _run_pending_replay(settings)
 
 
 def main() -> None:
@@ -529,6 +592,9 @@ def main() -> None:
                     run_record["attempts"].append(attempt_record)
                     run_record["status"] = "success"
                     run_record["completed_at"] = now_utc()
+                    replay_summary = _maybe_run_pending_replay(args, settings)
+                    if replay_summary is not None:
+                        run_record["pending_outbound_replay"] = replay_summary
                     write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
                     append_jsonl(SUPERVISOR_LOG_PATH, run_record)
                     print(json.dumps(run_record, ensure_ascii=False, indent=2))
@@ -550,6 +616,9 @@ def main() -> None:
             if audit.get("status") == "success":
                 run_record["status"] = "success"
                 run_record["completed_at"] = now_utc()
+                replay_summary = _maybe_run_pending_replay(args, settings)
+                if replay_summary is not None:
+                    run_record["pending_outbound_replay"] = replay_summary
                 write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
                 print(json.dumps(run_record, ensure_ascii=False, indent=2))
                 return
