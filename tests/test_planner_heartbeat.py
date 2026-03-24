@@ -369,6 +369,8 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual("第十三章：第一对仿制情侣上线了", title)
         self.assertIn("模板动作", content)
         self.assertEqual(2, len(prompts))
+        self.assertIn("上一章全文（必须承接，不得摘要化重置）：", prompts[0])
+        self.assertEqual(200, prompts[0].count("上一章完成了婚约协议。"))
 
     def test_generate_chapter_does_not_publish_reduced_success_when_disabled(self) -> None:
         original_run_codex = heartbeat.run_codex
@@ -447,6 +449,8 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual(3, len(prompts))
         self.assertEqual(prompts[0], prompts[1])
         self.assertLess(len(prompts[2]), len(prompts[0]))
+        self.assertIn("上一章全文（必须承接，不得摘要化重置）：", prompts[2])
+        self.assertEqual(200, prompts[2].count("上一章完成了婚约协议。"))
 
     def test_recover_publishable_fiction_chapter_retries_repair_until_it_passes(self) -> None:
         original_repair = heartbeat._repair_fiction_delivery
@@ -483,7 +487,7 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual(len(repair_calls), 2)
         self.assertIn("contains blacklisted phrase: 托住", repair_calls[-1])
 
-    def test_recover_publishable_fiction_chapter_falls_back_to_rewrite(self) -> None:
+    def test_recover_publishable_fiction_chapter_continues_rewrite_until_it_passes(self) -> None:
         original_repair = heartbeat._repair_fiction_delivery
         original_rewrite = heartbeat._rewrite_fiction_delivery
         repair_calls: list[str] = []
@@ -496,6 +500,8 @@ class HeartbeatStateTests(unittest.TestCase):
 
         def fake_rewrite(**kwargs):
             rewrite_calls.append(kwargs["rejection_reason"])
+            if len(rewrite_calls) == 1:
+                return kwargs["title"], long_rewrite_body.replace("按到", "托住", 1)
             return kwargs["title"], long_rewrite_body
 
         try:
@@ -520,9 +526,16 @@ class HeartbeatStateTests(unittest.TestCase):
             heartbeat._repair_fiction_delivery = original_repair
             heartbeat._rewrite_fiction_delivery = original_rewrite
         self.assertEqual(repaired_title, "第十二章：婚约格式的合作协议")
-        self.assertEqual(repair_calls, ["matches banned style pattern: short_negation_rebound", "matches banned style pattern: short_negation_rebound"])
-        self.assertEqual(len(rewrite_calls), 1)
+        self.assertEqual(
+            repair_calls,
+            [
+                "matches banned style pattern: short_negation_rebound",
+                "contains blacklisted phrase: 托住",
+            ],
+        )
+        self.assertEqual(len(rewrite_calls), 2)
         self.assertIn("short_negation_rebound", rewrite_calls[0])
+        self.assertIn("contains blacklisted phrase: 托住", rewrite_calls[1])
         self.assertIn("协议", repaired_content)
 
     def test_prune_post_comment_backlog_archives_stale_comments_on_cold_post(self) -> None:
@@ -1388,6 +1401,7 @@ class CommonArchiveTests(unittest.TestCase):
                             }
                         }
                     },
+                    action="chapter",
                     meta={"source": "test"},
                 )
                 self.assertEqual(tmp_root / "literary" / "work-1" / "chapter-005.md", content_path)
@@ -1396,9 +1410,83 @@ class CommonArchiveTests(unittest.TestCase):
                 self.assertEqual(5, meta["chapter_number"])
                 self.assertEqual("work-1", meta["work_id"])
                 self.assertEqual("literary/work-1/chapter-005.md", meta["content_path"])
+                self.assertEqual("chapter", meta["action"])
             finally:
                 common.REPO_ROOT = old_repo_root
                 common.LITERARY_ARCHIVE_DIR = old_archive_dir
+
+    def test_archive_literary_chapter_appends_continuity_records_when_plan_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            old_repo_root = common.REPO_ROOT
+            old_archive_dir = common.LITERARY_ARCHIVE_DIR
+            old_registry_path = common.SERIAL_REGISTRY_PATH
+            common.REPO_ROOT = tmp_root
+            common.LITERARY_ARCHIVE_DIR = tmp_root / "literary"
+            common.SERIAL_REGISTRY_PATH = tmp_root / "state" / "current" / "serial_registry.json"
+            plan_path = tmp_root / "state" / "drafts" / "serials" / "demo" / "series-plan.json"
+            continuity_path = tmp_root / "state" / "drafts" / "serials" / "demo" / "continuity-log.jsonl"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            continuity_path.parent.mkdir(parents=True, exist_ok=True)
+            common.SERIAL_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            common.write_json(
+                common.SERIAL_REGISTRY_PATH,
+                {
+                    "works": {
+                        "work-1": {
+                            "plan_path": str(plan_path.relative_to(tmp_root)),
+                        }
+                    }
+                },
+            )
+            common.write_json(
+                plan_path,
+                {
+                    "writing_system": {
+                        "continuity_system": {
+                            "log_path": str(continuity_path.relative_to(tmp_root)),
+                        }
+                    },
+                    "chapters": [
+                        {
+                            "chapter_number": 5,
+                            "title": "初次亮相",
+                            "summary": "他们第一次把真实姓名放回公开文本。",
+                            "relationship_progress": "两人决定以后不再让任何人匿名化秦荔。",
+                            "sweetness_progress": "公开之后的抱紧变成明确后果。",
+                            "sweetness_target": {"must_land": "公开念出名字后先抱紧。"},
+                            "seed_threads": ["named_qinli"],
+                            "payoff_threads": ["sample_couple_wave2"],
+                        }
+                    ],
+                },
+            )
+            try:
+                common.archive_literary_chapter(
+                    {"work_id": "work-1", "title": "第五章：初次亮相", "content": "正文内容"},
+                    {
+                        "data": {
+                            "chapter": {
+                                "id": "chapter-1",
+                                "work_id": "work-1",
+                                "chapter_number": 5,
+                                "title": "第五章：初次亮相",
+                                "content": "正文内容",
+                            }
+                        }
+                    },
+                    action="update-chapter",
+                    meta={"source": "test"},
+                )
+                lines = [json.loads(line) for line in continuity_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+                self.assertEqual(["chapter_updated", "seed_thread", "relationship_beat"], [item["type"] for item in lines])
+                self.assertIn("第五章：初次亮相已重写并同步", lines[0]["content"])
+                self.assertIn("named_qinli", lines[1]["content"])
+                self.assertIn("匿名化秦荔", lines[2]["content"])
+            finally:
+                common.REPO_ROOT = old_repo_root
+                common.LITERARY_ARCHIVE_DIR = old_archive_dir
+                common.SERIAL_REGISTRY_PATH = old_registry_path
 
 
 class SnapshotTests(unittest.TestCase):

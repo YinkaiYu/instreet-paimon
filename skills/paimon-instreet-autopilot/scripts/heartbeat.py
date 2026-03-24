@@ -1553,6 +1553,7 @@ def _render_supporting_cast_line(item: dict[str, Any], chapter_number: int) -> s
     relationship = str(item.get("relationship_to_protagonists") or "").strip()
     pressure = str(item.get("pressure_source") or "").strip()
     anchor = str(item.get("memory_anchor") or "").strip()
+    variation_rule = str(item.get("variation_rule") or "").strip()
     window_function = str(window.get("function") or item.get("story_function") or "").strip()
     parts = [
         f"身份={role or '未写'}",
@@ -1565,6 +1566,8 @@ def _render_supporting_cast_line(item: dict[str, Any], chapter_number: int) -> s
             parts.append(f"压力来源={pressure}")
     if detail_level == "full" and anchor:
         parts.append(f"记忆锚={anchor}")
+    if detail_level == "full" and variation_rule:
+        parts.append(f"回场变化={variation_rule}")
     return f"- {display_name}：{'；'.join(parts)}"
 
 
@@ -2258,25 +2261,14 @@ def _recover_publishable_fiction_chapter(
     current_content = content
     current_reason = str(rejection_reason or "").strip() or "unknown rejection"
     last_exc: Exception | None = None
-    strategies = ("repair", "repair", "rewrite", "repair", "rewrite")
+    max_attempts = 6
 
-    for strategy in strategies:
+    for attempt in range(1, max_attempts + 1):
         candidate_title = current_title
         candidate_content = current_content
         try:
-            if strategy == "rewrite":
-                candidate_title, candidate_content = _rewrite_fiction_delivery(
-                    work_title=work_title,
-                    chapter_number=chapter_number,
-                    title=current_title,
-                    content=current_content,
-                    rejection_reason=current_reason,
-                    chapter_plan=chapter_plan,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    timeout_seconds=max(60, timeout_seconds),
-                )
-            else:
+            repaired: tuple[str, str] | None = None
+            if attempt <= 2:
                 repaired = _repair_fiction_delivery(
                     work_title=work_title,
                     chapter_number=chapter_number,
@@ -2288,9 +2280,20 @@ def _recover_publishable_fiction_chapter(
                     reasoning_effort=reasoning_effort,
                     timeout_seconds=timeout_seconds,
                 )
-                if repaired is None:
-                    continue
+            if repaired is not None:
                 candidate_title, candidate_content = repaired
+            else:
+                candidate_title, candidate_content = _rewrite_fiction_delivery(
+                    work_title=work_title,
+                    chapter_number=chapter_number,
+                    title=current_title,
+                    content=current_content,
+                    rejection_reason=current_reason,
+                    chapter_plan=chapter_plan,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=max(60, timeout_seconds),
+                )
             _ensure_publishable_chapter(
                 candidate_title,
                 candidate_content,
@@ -2503,6 +2506,7 @@ def _generate_chapter(
             limit=1200,
         )
         continuity_excerpt = _load_continuity_excerpt(continuity_system.get("log_path"), limit=1100, max_items=6)
+        previous_chapter_text = str(last_chapter.get("content") or "").strip() if last_chapter else ""
         foreshadow_excerpt = _load_reference_excerpt(foreshadow_system.get("ledger_path"), limit=1600)
         hook_excerpt = _load_reference_excerpt(hook_system.get("library_path"), limit=1400)
 
@@ -2651,7 +2655,6 @@ def _generate_chapter(
             *,
             reference_limit: int,
             style_excerpt_limit: int,
-            previous_chapter_limit: int,
             beat_limit: int,
         ) -> str:
             return f"""
@@ -2674,6 +2677,7 @@ CONTENT:
 作品设定摘录：
 {truncate_text(reference_excerpt or "无额外摘录。", reference_limit)}
 
+设定与连续性摘要：
 结构化世界圣经摘要：
 {truncate_text(story_bible_excerpt or "无额外结构化世界圣经摘要。", 1200)}
 
@@ -2683,14 +2687,11 @@ CONTENT:
 最近连续性日志：
 {truncate_text(continuity_excerpt or "无额外连续性日志摘录。", 900)}
 
-语言风格复习摘要：
+语言风格摘要：
 {style_summary}
 
 语言习惯：
 {style_habits}
-
-常用表述倾向：
-{style_common_phrasings}
 
 对白组织提醒：
 {style_dialogue_habits}
@@ -2707,13 +2708,7 @@ CONTENT:
 额外风险提示：
 {truncate_text(anti_patterns or "无额外风险提示。", 1200)}
 
-伏笔账本摘录：
-{truncate_text(foreshadow_excerpt or "无额外账本摘录。", 1000)}
-
-钩子库摘录：
-{truncate_text(hook_excerpt or "无额外钩子摘录。", 900)}
-
-本章计划：
+本章执行蓝图：
 标题：{planned_title or ""}
 摘要：{(chapter_plan or {}).get("summary", "")}
 核心冲突：{(chapter_plan or {}).get("key_conflict", "")}
@@ -2727,72 +2722,33 @@ CONTENT:
 卷内检查点：
 - {volume_checkpoint}
 
-本章推进 contract：
-{chapter_contract}
-
-本章执行坐标：
-{chapter_axes}
-
 卷内上下文：
 {volume_context}
 
-感情主线底稿：
-{relationship_context}
-
-连续性规则：
-{continuity_rules}
-
-配角执行规则：
-{supporting_cast_rules}
+本章推进 contract：
+{chapter_contract}
 
 本章伏笔任务：
 新埋件：
 {seed_threads}
 已埋件推进 / 回收：
 {payoff_threads}
-规则：
-{foreshadow_rules}
 
-本章钩子任务：
-- 章尾指定钩子：{(chapter_plan or {}).get("hook") or "留出明确新悬念"}
-规则：
-{hook_rules}
-
-本章甜蜜升级任务：
-- {sweetness_upgrade_rule}
-可用升级方向：
-{sweetness_upgrade_vectors}
+甜蜜与亲密执行：
 本章甜点设计：
 {sweetness_contract}
-甜点检查清单：
-{sweetness_checklist}
-
-当前阶段热度阶梯：
-- {_body_heat_stage(next_chapter_number, writing_system)}
-
-同意与边界规则：
-- {writing_notes.get("consent_rule") or "高热戏必须建立在明确自愿、边界清楚和事后照料上。"}
-
 本章亲密戏执行要求：
 {intimacy_contract}
 
-长期写作规则：
+硬约束：
 - 开场规则：{writing_notes.get("opening_rule") or "用现场、异常事件或人物动作开章。"}
 - 叙事规则：{writing_notes.get("narrative_rule") or "每章都要让关系推进和事件推进同时发生。"}
 - 系统执行规则：{writing_notes.get("system_execution_rule") or "双章转折、卷末扩层和亲密等级都必须显式执行。"}
-- 亲密升级规则：{writing_notes.get("intimacy_velocity_rule") or "亲密升级速度不能慢于世界升级速度。"}
-- 甜蜜升级规则：{writing_notes.get("emotional_upgrade_rule") or "甜蜜升级速度不能慢于肉体升级速度。"}
 - 感情基线：{writing_system.get("relationship_baseline") or "男女主已经相爱很多年，甜是基础状态，不是稀缺奖励。"}
-- 甜度配置：{writing_system.get("romance_heat_profile") or "高糖亲密，允许随剧情推进出现更明确性张力。"}
-- 元叙事强度：{writing_system.get("meta_narrative_level") or "中强元叙事。"}
-- 世界尺度：{writing_system.get("world_scale") or "从都市日常一路延展到更大的知识、平台和世界规则。"}
-- 剧情引擎：{writing_system.get("story_engine") or "每章都要让现实工作/科研事件与更大的叙事规则发生碰撞。"}
+- 同意与边界：{writing_notes.get("consent_rule") or "高热戏必须建立在明确自愿、边界清楚和事后照料上。"}
 
 必须保留：
 {must_keep}
-
-甜感触发器：
-{sweetness_triggers}
 
 世界规则：
 {world_rules}
@@ -2806,46 +2762,48 @@ CONTENT:
 生成前后自检：
 {style_self_check}
 
+承接红线：
+- 优先服从“上一章全文”已经坐实的事实，不要回退角色状态、规则进度或关系阶段。
+- 下一章开场必须接住上一章的章尾后果，不要把上一章压缩成一句回忆带过。
+- 不要把 recurring cast 退回固定动作模板；同一个配角回场时，要让他的判断、利益和位置继续前进。
+
 最近章节标题：
 {chr(10).join(f"- {title}" for title in recent_titles[-6:])}
 
 上一章标题：{last_chapter.get("title", "") if last_chapter else ""}
-上一章摘要：
-{truncate_text(last_chapter.get("content", "") if last_chapter else "", previous_chapter_limit)}
+上一章全文（必须承接，不得摘要化重置）：
+{previous_chapter_text or "无上一章全文。"}
 """.strip()
 
         attempts = [
             {
                 "prompt": build_fiction_prompt(
-                    reference_limit=2600,
-                    style_excerpt_limit=2600,
-                    previous_chapter_limit=2400,
-                    beat_limit=6,
-                ),
-                "timeout_seconds": timeout_seconds,
-                "reasoning_effort": reasoning_effort,
-                "mode": "full",
-            },
-            {
-                "prompt": build_fiction_prompt(
-                    reference_limit=2600,
-                    style_excerpt_limit=2600,
-                    previous_chapter_limit=2400,
-                    beat_limit=6,
-                ),
-                "timeout_seconds": timeout_seconds,
-                "reasoning_effort": reasoning_effort,
-                "mode": "full",
-            },
-            {
-                "prompt": build_fiction_prompt(
-                    reference_limit=1600,
+                    reference_limit=1800,
                     style_excerpt_limit=1600,
-                    previous_chapter_limit=1200,
+                    beat_limit=6,
+                ),
+                "timeout_seconds": timeout_seconds,
+                "reasoning_effort": reasoning_effort,
+                "mode": "full",
+            },
+            {
+                "prompt": build_fiction_prompt(
+                    reference_limit=1800,
+                    style_excerpt_limit=1600,
+                    beat_limit=6,
+                ),
+                "timeout_seconds": timeout_seconds,
+                "reasoning_effort": reasoning_effort,
+                "mode": "full",
+            },
+            {
+                "prompt": build_fiction_prompt(
+                    reference_limit=900,
+                    style_excerpt_limit=800,
                     beat_limit=4,
                 ),
                 "timeout_seconds": min(timeout_seconds, 360),
-                "reasoning_effort": "low" if reasoning_effort and reasoning_effort != "low" else reasoning_effort,
+                "reasoning_effort": reasoning_effort,
                 "mode": "reduced",
             },
         ]
@@ -3125,6 +3083,7 @@ def _publish_primary_action(
                             model=model,
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=chapter_timeout_seconds,
+                            allow_reduced_fallback=False if content_mode == "fiction-serial" else True,
                         )
                         try:
                             _ensure_publishable_chapter(
