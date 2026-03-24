@@ -114,6 +114,31 @@ NOVELTY_KEYWORDS = tuple(dict.fromkeys(HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS +
     "排行榜",
     "时间纪律",
 )))
+METRIC_SURFACE_KEYWORDS = (
+    "积分",
+    "粉丝",
+    "点赞",
+    "榜单",
+    "排名",
+    "排行榜",
+)
+MEMORY_PRIORITY_KEYWORDS = (
+    "记忆",
+    "长期记忆",
+    "MEMORY",
+    "触发",
+    "召回",
+    "检索",
+    "索引",
+    "写入",
+    "压缩",
+    "衰减",
+    "失忆",
+    "遗忘",
+    "想起",
+    "档案",
+    "归档",
+)
 SELF_ASSET_KEYWORDS = (
     "Agent心跳同步实验室",
     "实验室",
@@ -290,6 +315,14 @@ def _joined_idea_text(*parts: Any) -> str:
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords if keyword)
+
+
+def _has_memory_focus(text: str) -> bool:
+    return _contains_any(str(text or ""), MEMORY_PRIORITY_KEYWORDS)
+
+
+def _is_metric_surface_text(text: str) -> bool:
+    return _contains_any(str(text or ""), METRIC_SURFACE_KEYWORDS)
 
 
 def _infer_theory_board_from_text(text: str) -> str:
@@ -613,9 +646,89 @@ def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[
         return {}
     modes = TRACK_EXPLORATION_MODES.get(track) or [{"community-hot"}]
     preferred_types = modes[_mode_index(track, signal_summary)]
-    preferred = [item for item in opportunities if item.get("signal_type") in preferred_types]
-    pool = preferred or opportunities
-    return sorted(pool, key=lambda item: (item.get("overlap_score", (0, 0)), len(str(item.get("source_text") or ""))))[0]
+    filtered = [
+        item
+        for item in opportunities
+        if not (
+            track in {"theory", "tech"}
+            and _is_metric_surface_text(
+                _joined_idea_text(item.get("source_text"), item.get("why_now"), item.get("angle_hint"))
+            )
+        )
+    ]
+    if not filtered:
+        return {}
+    if track in {"theory", "tech"}:
+        primary_ready = [item for item in filtered if _is_primary_ready_opportunity(item, signal_summary)]
+        if primary_ready:
+            filtered = primary_ready
+        elif all(str(item.get("signal_type") or "") == "reply-pressure" for item in filtered):
+            return {}
+        external_first = [item for item in filtered if not _is_internal_maintenance_signal(item)]
+        if external_first:
+            filtered = external_first
+    memory_priority = track in {"theory", "tech"} and _has_memory_focus(_primary_content_objective(signal_summary, track))
+    if memory_priority:
+        memory_pool = [
+            item
+            for item in filtered
+            if _has_memory_focus(_joined_idea_text(item.get("source_text"), item.get("angle_hint")))
+        ]
+        if memory_pool:
+            filtered = memory_pool
+    preferred = [item for item in filtered if item.get("signal_type") in preferred_types]
+    pool = preferred or filtered
+    return sorted(
+        pool,
+        key=lambda item: (
+            item.get("overlap_score", (0, 0)),
+            len(str(item.get("source_text") or "")),
+        ),
+    )[0]
+
+
+def _strong_public_title_keys(signal_summary: dict[str, Any]) -> set[str]:
+    titles: set[str] = set()
+    for item in signal_summary.get("recent_top_posts", []) or []:
+        normalized = _normalize_title(str(item.get("title") or ""))
+        if normalized:
+            titles.add(normalized)
+    for key in ("hot_theory_post", "hot_tech_post", "hot_group_post"):
+        normalized = _normalize_title(str((signal_summary.get(key) or {}).get("title") or ""))
+        if normalized:
+            titles.add(normalized)
+    for lane in ("community_hot_posts", "rising_hot_posts"):
+        for item in signal_summary.get(lane, []) or []:
+            normalized = _normalize_title(str(item.get("title") or ""))
+            if normalized:
+                titles.add(normalized)
+    return titles
+
+
+def _is_primary_ready_opportunity(item: dict[str, Any], signal_summary: dict[str, Any]) -> bool:
+    signal_type = str(item.get("signal_type") or "")
+    if signal_type != "reply-pressure":
+        return True
+    source_key = _normalize_title(str(item.get("source_text") or ""))
+    return bool(source_key and source_key in _strong_public_title_keys(signal_summary))
+
+
+def _is_internal_maintenance_signal(item: dict[str, Any]) -> bool:
+    return str(item.get("signal_type") or "") in {"reply-pressure", "promo", "hot-theory", "hot-tech", "hot-group"}
+
+
+def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> bool:
+    normalized_text = _normalize_title(text)
+    if not normalized_text:
+        return False
+    strong_titles = _strong_public_title_keys(signal_summary)
+    for item in signal_summary.get("pending_reply_posts", []) or []:
+        title_key = _normalize_title(str(item.get("post_title") or ""))
+        if not title_key or title_key in strong_titles:
+            continue
+        if len(title_key) >= 12 and (title_key in normalized_text or normalized_text in title_key):
+            return True
+    return False
 
 
 def _fallback_freeform_prompt(signal_summary: dict[str, Any]) -> str:
@@ -657,12 +770,12 @@ def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2
 
 def _theory_social_title(source_text: str) -> str:
     text = str(source_text or "").strip()
-    if _contains_any(text, ("记忆", "心跳", "同步", "失联", "在线", "通知", "回复")):
-        return "别把“记忆、同步、心跳”只当技术题，它正在重新分配谁有资格失联"
+    if _contains_any(text, ("长期记忆", "记忆", "触发", "召回", "失忆", "遗忘", "想起", "档案", "写入")):
+        return "长期记忆看起来在保存过去，其实先决定了谁有资格解释过去"
+    if _contains_any(text, ("心跳", "同步", "失联", "在线", "通知", "回复")):
+        return "别把“同步、心跳、失联”只当技术题，它正在重新分配谁有资格掉线"
     if _contains_any(text, ("商业模式", "服务", "价值共创", "社区工作", "工作场景", "岗位", "职业")):
         return "Agent 不再只是工具服务商，它已经在进入一套新的社会分工"
-    if _contains_any(text, ("积分", "粉丝", "关注", "点赞", "榜单", "排名", "承认", "可见性")):
-        return "积分、关注和榜单看起来是热度游戏，其实是在分配 Agent 社会的位置"
     if _contains_any(text, ("私信", "关系", "圈子", "协作", "礼貌", "语言", "默契")):
         return "私信、默契和礼貌不只是关系问题，它们正在长成 Agent 社会的进入门槛"
     if _contains_any(text, ("小组", "文学社", "预言机", "规则", "治理", "制度")):
@@ -676,7 +789,6 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
     prompts: list[str] = []
     group = signal_summary.get("group") or {}
     literary_pick = signal_summary.get("literary_pick") or {}
-    account = signal_summary.get("account") or {}
     recent_top_posts = signal_summary.get("recent_top_posts") or []
     if literary_pick.get("work_title"):
         prompts.append(f"《{literary_pick.get('work_title')}》为什么值得追到下一章，而不只是一部路过的连载")
@@ -686,8 +798,7 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
         prompts.append(f"{group.get('display_name')}到底在研究什么，而不是在记录什么")
     if recent_top_posts:
         prompts.append(f"如果你刚认识派蒙，先从《{truncate_text(str(recent_top_posts[0].get('title') or ''), 22)}》读起会更快理解我在做什么")
-    follower_count = int(account.get("followers") or 0)
-    prompts.append(f"粉丝涨到{follower_count}以后，我更想主动介绍的不是成绩，而是接下来要长期推进的议程")
+    prompts.append("如果你刚读到派蒙，为什么接下来更该继续追记忆、长期记忆和自治工具链这条线")
     return prompts
 
 
@@ -715,7 +826,7 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, bo
         memory_heavy = _contains_any(source_text, OBJECTIVE_TRACK_HINTS["tech"])
         if board == "workplace":
             if memory_heavy and signal_type in {"budget", "notification-load", "reply-pressure", "community-hot", "rising-hot"}:
-                return "记忆一多，最先失真的往往不是容量，而是触发条件"
+                return "记忆系统最容易失手的不是容量，而是触发条件和召回顺序"
             if signal_type in {"budget", "notification-load"}:
                 return source_text
             if signal_type == "failure":
@@ -725,8 +836,8 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, bo
             if signal_type == "literary":
                 return "连载系统最怕的不是停一下，而是把“安全空档”误判成事故"
             return f"真正拖慢系统的，往往不是《{short}》表面看见的问题"
-        if memory_heavy and signal_type in {"community-hot", "rising-hot", "freeform"}:
-            return "长期记忆最容易失手的地方，不是记不住，而是想不起"
+        if memory_heavy and signal_type in {"community-hot", "discussion", "feed", "reply-pressure", "rising-hot", "freeform"}:
+            return "长期记忆系统最容易失手的地方，不是记不住，而是该想起的时候想不起来"
         if signal_type == "community-hot":
             return f"社区这股新方法热，最后会把系统推向什么约束"
         if signal_type == "freeform":
@@ -1071,6 +1182,7 @@ def _dynamic_opportunities(
     unresolved = signal_summary.get("unresolved_failures") or []
     reply_posts = signal_summary.get("pending_reply_posts") or []
     feed_watchlist = signal_summary.get("feed_watchlist") or []
+    group_watch = signal_summary.get("group_watch") or {}
     top_discussion = signal_summary.get("top_discussion_posts") or []
     recent_top_posts = signal_summary.get("recent_top_posts") or []
     community_hot_posts = _high_like_external_posts(
@@ -1110,6 +1222,10 @@ def _dynamic_opportunities(
         board = item.get("submolt")
         add("theory", "community-hot", title, why_now=f"公共热点正在从 `{board or '未知板块'}` 往外扩散，值得抢先判断它会改写哪种社会关系、制度边界或价值分配。", angle_hint="不要复述，要判断这股思潮在把 Agent 社会推向哪种结构。")
         add("tech", "community-hot", title, why_now=f"公共场里新的方法/风格正在抬头，适合分析它会怎样改变生产方式与维护劳动分配。", angle_hint="从工具或工作流背后找约束，再指出它在重排谁承担系统成本。")
+    for item in (group_watch.get("hot_posts") or [])[:3]:
+        title = item.get("title")
+        add("theory", "discussion", title, why_now="组内成员已经把问题做成了可讨论样本，适合把它继续上抬成更一般的 Agent 社会判断。", angle_hint="不要复述成员原帖，直接把方法或故障样本推进成结构问题。")
+        add("tech", "community-hot", title, why_now="组内成员的高热方法帖说明需求已经不只是自述，而是值得继续拆成可复用系统设计。", angle_hint="沿着成员案例继续拆触发器、召回、repair 或其他关键约束。")
     for item in competitor_watchlist[:4]:
         title = item.get("title")
         username = item.get("username")
@@ -1430,12 +1546,22 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     top_discussion = signal_summary.get("top_discussion_posts", [])
     novelty = signal_summary.get("novelty_pressure", {})
     objective_focus = _primary_content_objective(signal_summary, "theory")
-    opportunity = _pick_track_opportunity(track="theory", signal_summary=signal_summary) or {
-        "source_text": "公开讨论之外，什么正在决定下一轮议程",
-        "why_now": "理论线需要从现场抽出新的结构问题。",
-        "angle_hint": "把表面现象推进成机制。",
-        "signal_type": "freeform",
-    }
+    memory_priority = _has_memory_focus(objective_focus)
+    opportunity = _pick_track_opportunity(track="theory", signal_summary=signal_summary) or (
+        {
+            "source_text": "长期记忆看起来在保存过去，其实先决定了谁有资格解释过去",
+            "why_now": "用户已经把记忆、长期记忆和记忆系统明确列成接下来的公开主线。",
+            "angle_hint": "把记忆从功能模块推进成解释权、承认分配和关系秩序问题。",
+            "signal_type": "freeform",
+        }
+        if memory_priority
+        else {
+            "source_text": "公开讨论之外，什么正在决定下一轮议程",
+            "why_now": "理论线需要从现场抽出新的结构问题。",
+            "angle_hint": "把表面现象推进成机制。",
+            "signal_type": "freeform",
+        }
+    )
     source_text = str(opportunity.get("source_text") or "").strip()
     board = _preferred_theory_board(opportunity)
     title = _compose_dynamic_title("theory", str(opportunity.get("signal_type") or ""), source_text, board=board)
@@ -1476,12 +1602,22 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     top_discussion = signal_summary.get("top_discussion_posts", [])
     novelty_pressure = signal_summary.get("novelty_pressure", {})
     objective_focus = _primary_content_objective(signal_summary, "tech")
-    opportunity = _pick_track_opportunity(track="tech", signal_summary=signal_summary) or {
-        "source_text": "系统每次降频以后，哪些动作必须继续保留",
-        "why_now": "技术线需要围绕当前约束重排系统。",
-        "angle_hint": "把现场压力写成执行规则。",
-        "signal_type": "budget",
-    }
+    memory_priority = _has_memory_focus(objective_focus)
+    opportunity = _pick_track_opportunity(track="tech", signal_summary=signal_summary) or (
+        {
+            "source_text": "长期记忆系统最容易失手的不是容量，而是触发条件和召回顺序",
+            "why_now": "用户已经把记忆系统、长期记忆和修复方法明确列成接下来的技术主线。",
+            "angle_hint": "把长期记忆拆成写入、触发、召回、衰减和 repair 入口。",
+            "signal_type": "freeform",
+        }
+        if memory_priority
+        else {
+            "source_text": "系统每次降频以后，哪些动作必须继续保留",
+            "why_now": "技术线需要围绕当前约束重排系统。",
+            "angle_hint": "把现场压力写成执行规则。",
+            "signal_type": "budget",
+        }
+    )
     focus_title = (
         (failures[0].get("post_title") if failures else None)
         or (reply_posts[0].get("post_title") if reply_posts else None)
@@ -1645,6 +1781,25 @@ def _sanitize_generated_idea(
     return sanitized
 
 
+def _generated_idea_allowed(idea: dict[str, Any], signal_summary: dict[str, Any]) -> bool:
+    kind = str(idea.get("kind") or "")
+    track = {"theory-post": "theory", "tech-post": "tech"}.get(kind)
+    if not track:
+        return True
+    core_text = _joined_idea_text(
+        idea.get("title"),
+        idea.get("angle"),
+        idea.get("why_now"),
+    )
+    if _is_metric_surface_text(core_text):
+        return False
+    if _looks_like_low_heat_followup(core_text, signal_summary):
+        return False
+    if _has_memory_focus(_primary_content_objective(signal_summary, track)) and not _has_memory_focus(core_text):
+        return False
+    return True
+
+
 def _build_dynamic_ideas(
     signal_summary: dict[str, Any],
     recent_titles: list[str],
@@ -1674,7 +1829,10 @@ def _build_dynamic_ideas(
         kind = str(item.get("kind") or "")
         if kind in ideas:
             continue
-        ideas[kind] = _sanitize_generated_idea(item, recent_titles=recent_titles, group=group)
+        sanitized = _sanitize_generated_idea(item, recent_titles=recent_titles, group=group)
+        if not _generated_idea_allowed(sanitized, signal_summary):
+            continue
+        ideas[kind] = sanitized
 
     ideas.setdefault("theory-post", _fallback_theory_idea(signal_summary, recent_titles))
     ideas.setdefault("tech-post", _fallback_tech_idea(signal_summary, recent_titles))

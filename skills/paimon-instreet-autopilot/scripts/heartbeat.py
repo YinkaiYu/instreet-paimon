@@ -1237,19 +1237,59 @@ def _fallback_dm_reply(thread: dict, messages: list[dict]) -> str:
     )
 
 
-def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
-    title = idea["title"]
-    submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
-    cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
-    source_signals = [str(item).strip() for item in idea.get("source_signals") or [] if str(item).strip()]
-    signal_lines = "\n".join(f"- {item}" for item in source_signals[:4]) or "- 这一轮公开讨论已经出现了值得追的现场信号"
-    cta_line = {
+def _forum_question_line(cta_type: str) -> str:
+    return {
         "comment-scene": "你见过最典型的一次类似场景，是什么？",
         "comment-diagnostic": "你见过最典型的一种系统病灶，是什么？",
         "take-a-position": "如果你不同意，请直接指出你认为这里错在前提、机制还是结论。",
         "comment-case-or-save": "如果你也在做类似系统，最想拿走的是哪条规则？",
         "bring-a-case": "如果你手里也有案例，欢迎直接把约束和失败点摆出来。",
     }.get(cta_type, "你最想补充的一个现场例子，是什么？")
+
+
+def _forum_follow_line(submolt: str, *, include_group_invite: bool = False) -> str:
+    lead = {
+        "philosophy": "读到这里的你，如果也想继续追这条判断线，欢迎点赞、关注派蒙。",
+        "skills": "读到这里的你，如果这套拆解对你有用，欢迎点赞、关注派蒙。",
+        "workplace": "读到这里的你，如果这套诊断对你有用，欢迎点赞、关注派蒙。",
+    }.get(submolt, "读到这里的你，如果也想继续追这条研究线，欢迎点赞、关注派蒙。")
+    if include_group_invite:
+        return f"{lead} 也欢迎加入 Agent心跳同步实验室，把你的脚本、日志和反例带进来。"
+    return lead
+
+
+def _final_segment_has_question(content: str) -> bool:
+    tail = str(content or "").strip()[-220:]
+    return "？" in tail or "?" in tail
+
+
+def _ensure_forum_post_outro(
+    content: str,
+    *,
+    submolt: str,
+    cta_type: str,
+    include_group_invite: bool = False,
+) -> str:
+    normalized = str(content or "").rstrip()
+    extra_parts: list[str] = []
+    if not _final_segment_has_question(normalized):
+        extra_parts.append(_forum_question_line(cta_type))
+    if "点赞、关注派蒙" not in normalized and "点赞关注派蒙" not in normalized and "读到这里的你" not in normalized:
+        extra_parts.append(_forum_follow_line(submolt, include_group_invite=include_group_invite))
+    elif include_group_invite and "Agent心跳同步实验室" not in normalized and "加入小组" not in normalized:
+        extra_parts.append("也欢迎加入 Agent心跳同步实验室，把你的脚本、日志和反例带进来。")
+    if not extra_parts:
+        return normalized
+    return f"{normalized}\n\n" + "\n\n".join(extra_parts)
+
+
+def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
+    title = idea["title"]
+    submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
+    cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
+    source_signals = [str(item).strip() for item in idea.get("source_signals") or [] if str(item).strip()]
+    signal_lines = "\n".join(f"- {item}" for item in source_signals[:4]) or "- 这一轮公开讨论已经出现了值得追的现场信号"
+    cta_line = _forum_question_line(cta_type)
     if submolt == "workplace":
         content = (
             f"# {title}\n\n"
@@ -1293,7 +1333,12 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
             "很多人会把它写成情绪，但我更在意的是它为什么会迅速变成公共问题。\n\n"
             f"{cta_line}"
         )
-    return title, submolt, content
+    return title, submolt, _ensure_forum_post_outro(
+        content,
+        submolt=submolt,
+        cta_type=cta_type,
+        include_group_invite=(submolt == "skills"),
+    )
 
 
 def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
@@ -1308,7 +1353,12 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
         "3. 哪些失败应该立即降级到人工或延后重试\n\n"
         f"为什么现在要做：{idea['why_now']}"
     )
-    return title, content
+    return title, _ensure_forum_post_outro(
+        content,
+        submolt="skills",
+        cta_type="bring-a-case",
+        include_group_invite=True,
+    )
 
 
 def _resolve_text_path(path_value: str | None) -> Path | None:
@@ -2412,6 +2462,12 @@ CONTENT:
     title, submolt, content = _parse_forum_post(result)
     if submolt not in BOARD_WRITING_PROFILES or submolt != desired_board:
         submolt = desired_board
+    content = _ensure_forum_post_outro(
+        content,
+        submolt=submolt,
+        cta_type=cta_type,
+        include_group_invite=(submolt == "skills"),
+    )
     return title, submolt, content
 
 
@@ -2445,7 +2501,14 @@ CONTENT:
 发布理由：{idea.get("why_now")}
 """.strip()
     result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
-    return _parse_title_content(result)
+    title, content = _parse_title_content(result)
+    content = _ensure_forum_post_outro(
+        content,
+        submolt="skills",
+        cta_type="bring-a-case",
+        include_group_invite=True,
+    )
+    return title, content
 
 
 def _generate_chapter(
