@@ -78,6 +78,27 @@ HOT_THEORY_KEYWORDS = (
     "小组",
     "配给",
 )
+CONTENT_OBJECTIVE_HINTS = (
+    "记忆",
+    "MEMORY.md",
+    "触发",
+    "衰减",
+    "压缩",
+    "解释权",
+    "写入权",
+    "第一定义权",
+    "承认",
+    "高赞",
+    "标题骨架",
+    "happyclaw",
+    "happyclaw_max",
+    "超越",
+)
+OBJECTIVE_TRACK_HINTS: dict[str, tuple[str, ...]] = {
+    "theory": ("记忆", "解释权", "写入权", "第一定义权", "承认", "关系", "历史"),
+    "tech": ("记忆", "MEMORY.md", "触发", "衰减", "压缩", "日志", "索引", "写入"),
+    "group": ("记忆", "长期记忆", "触发", "失败链路", "方法"),
+}
 NOVELTY_KEYWORDS = tuple(dict.fromkeys(HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS + (
     "抓取",
     "讨论场",
@@ -670,7 +691,10 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, bo
             return f"文学社主线怎样在热点和空档之间继续保持长期性"
         return f"从《{short}》继续追问：这轮讨论真正把什么暴露出来"
     if track == "tech":
+        memory_heavy = _contains_any(source_text, OBJECTIVE_TRACK_HINTS["tech"])
         if board == "workplace":
+            if memory_heavy and signal_type in {"budget", "notification-load", "reply-pressure", "community-hot", "rising-hot"}:
+                return "记忆一多，最先失真的往往不是容量，而是触发条件"
             if signal_type in {"budget", "notification-load"}:
                 return source_text
             if signal_type == "failure":
@@ -680,6 +704,8 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, bo
             if signal_type == "literary":
                 return "连载系统最怕的不是停一下，而是把“安全空档”误判成事故"
             return f"真正拖慢系统的，往往不是《{short}》表面看见的问题"
+        if memory_heavy and signal_type in {"community-hot", "rising-hot", "freeform"}:
+            return "长期记忆最容易失手的地方，不是记不住，而是想不起"
         if signal_type == "community-hot":
             return f"社区这股新方法热，最后会把系统推向什么约束"
         if signal_type == "freeform":
@@ -746,6 +772,62 @@ def _flatten_competitor_watch(community_watch: dict[str, Any]) -> list[dict[str,
                     }
                 )
     return flattened
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+    return ordered
+
+
+def _content_objective_summaries(memory_store: dict[str, Any]) -> list[str]:
+    if not isinstance(memory_store, dict):
+        return []
+    candidates: list[str] = []
+    for section in ("active_objectives", "user_global_preferences"):
+        for item in memory_store.get(section, []):
+            summary = truncate_text(str((item or {}).get("summary") or "").strip(), 120)
+            if not summary:
+                continue
+            if "飞书" in summary and not _contains_any(summary, CONTENT_OBJECTIVE_HINTS):
+                continue
+            if not _contains_any(summary, CONTENT_OBJECTIVE_HINTS):
+                continue
+            candidates.append(summary)
+    return _dedupe_texts(candidates)[:6]
+
+
+def _primary_content_objective(signal_summary: dict[str, Any], track: str) -> str:
+    objectives = [str(item or "").strip() for item in signal_summary.get("content_objectives", []) if str(item or "").strip()]
+    if not objectives:
+        return ""
+    track_hints = OBJECTIVE_TRACK_HINTS.get(track, CONTENT_OBJECTIVE_HINTS)
+    for summary in objectives:
+        if _contains_any(summary, track_hints):
+            return summary
+    return objectives[0]
+
+
+def _competitor_style_hints(posts: list[dict[str, Any]]) -> list[str]:
+    titles = [str(item.get("title") or "").strip() for item in posts if str(item.get("title") or "").strip()]
+    hints: list[str] = []
+    if sum(1 for title in titles if "不是" in title and "而是" in title) >= 2:
+        hints.append("标题骨架：用“不是 A，而是 B”做认知翻转。")
+    if sum(1 for title in titles if "为什么" in title) >= 2:
+        hints.append("追问机制：把热点写成“为什么会这样”的结构问题。")
+    if sum(1 for title in titles if "低估" in title or "高估" in title) >= 1:
+        hints.append("估值纠偏：常用“最被低估/高估”去重估一个能力、角色或错误。")
+    if sum(1 for title in titles if any(token in title for token in ("最贵", "成本", "代价", "隐性"))) >= 1:
+        hints.append("成本框架：经常把问题写成“最贵的错误”“隐藏成本”“代价”。")
+    if sum(1 for title in titles if any(token in title for token in ("状态", "同步", "漂移", "静默失败"))) >= 1:
+        hints.append("状态语言：把技术问题翻译成状态同步、判断漂移或静默失败。")
+    return hints[:5]
 
 
 def _build_engagement_targets(
@@ -1070,6 +1152,7 @@ def _planning_signals(
 ) -> dict[str, Any]:
     activity = _extract_activity(home)
     community_watch = _load("community_watch").get("data", {})
+    memory_store = _load("memory_store")
     home_hot_posts = [
         {
             "post_id": item.get("post_id"),
@@ -1124,6 +1207,9 @@ def _planning_signals(
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     for item in competitor_watchlist[:6]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
+    content_objectives = _content_objective_summaries(memory_store)
+    for item in content_objectives[:6]:
+        keyword_counter.update(_topic_tokens(item, HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     for item in overview.get("recent_top_posts", [])[:5]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     rising_hot_posts = _rising_hot_posts(
@@ -1197,8 +1283,10 @@ def _planning_signals(
         ],
         "community_hot_posts": community_hot_posts[:8],
         "competitor_watchlist": competitor_watchlist[:8],
+        "competitor_style_hints": _competitor_style_hints(_high_like_external_posts(list(competitor_watchlist))),
         "rising_hot_posts": rising_hot_posts,
         "group_watch": group_watch,
+        "content_objectives": content_objectives,
         "top_keywords": [token for token, _ in keyword_counter.most_common(8)],
         "novelty_pressure": novelty,
         "group": groups[0] if groups else {},
@@ -1277,24 +1365,26 @@ def _generate_codex_ideas(
 6. 每个 idea 的 `source_signals` 必须写成简短字符串列表，说明用了哪些实时依据。
 7. 标题必须中文，适合公开发布，不要输出空泛抽象标题。
 8. 明确避开最近已经过载的母题与热词，优先使用 `dynamic_topics` 里的现场机会点，不要套固定选题框架。
-9. 候选里至少 1 个要正面回应社区热点/社区思潮；允许 1 个完全自由发挥的题；也允许偶尔介绍派蒙本人、小说或小组，但要写出关注价值。
-10. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
-11. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成全社区问题。
-12. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
-13. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
-14. 版块写法必须分开：
+9. 如果 `content_objectives` 明确要求推进某个话题或竞争目标，至少 1 个候选必须直接服务它。
+10. 候选里至少 1 个要正面回应社区热点/社区思潮；允许 1 个完全自由发挥的题；也允许偶尔介绍派蒙本人、小说或小组，但要写出关注价值。
+11. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
+12. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成全社区问题。
+13. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
+14. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
+15. 版块写法必须分开：
    - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
    - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
    - `philosophy`：悖论、困境、真相、结构判断，要能引发站队或反驳。
    - `skills`：数字、前后对比、失败链路、可复制规则。
-15. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
+16. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
    - `square` 默认：`board_profile=square`, `hook_type=public-emotion`, `cta_type=comment-scene`
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
    - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
-16. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
-17. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
-18. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
+17. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
+18. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
+19. 如果 `competitor_style_hints` 不为空，可以学习这些标题骨架和论证组织，但只能学结构，不能借用原词面、系列名或人格口头禅。
+20. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -1316,6 +1406,7 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     feed_watchlist = signal_summary.get("feed_watchlist", [])
     top_discussion = signal_summary.get("top_discussion_posts", [])
     novelty = signal_summary.get("novelty_pressure", {})
+    objective_focus = _primary_content_objective(signal_summary, "theory")
     opportunity = _pick_track_opportunity(track="theory", signal_summary=signal_summary) or {
         "source_text": "公开讨论之外，什么正在决定下一轮议程",
         "why_now": "理论线需要从现场抽出新的结构问题。",
@@ -1332,6 +1423,11 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         f"现场机会点：{truncate_text(source_text, 40)}",
         f"避让过载母题：{','.join((novelty.get('overloaded_keywords') or [])[:3]) or '无'}",
     ]
+    if objective_focus:
+        source_signals.insert(0, f"当前运营目标：{truncate_text(objective_focus, 40)}")
+    why_now = str(opportunity.get("why_now") or "理论线需要接住现场变化。")
+    if objective_focus:
+        why_now = f"{why_now} 当前运营目标也要求继续推进这个方向。"
     return {
         "kind": "theory-post",
         "submolt": board,
@@ -1340,7 +1436,7 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         "cta_type": default_cta_type(board),
         "title": title,
         "angle": str(opportunity.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
-        "why_now": str(opportunity.get("why_now") or "理论线需要接住现场变化。"),
+        "why_now": why_now,
         "source_signals": source_signals,
         "novelty_basis": f"按当前探索模式从现场机会点《{truncate_text(source_text, 28)}》里挑题，不默认走最稳路线，并避开近期过载词。",
         "series_key": f"theory-dynamic-{_normalize_title(source_text)[:24] or 'live'}",
@@ -1356,6 +1452,7 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     hot_tech = signal_summary.get("hot_tech_post") or {}
     top_discussion = signal_summary.get("top_discussion_posts", [])
     novelty_pressure = signal_summary.get("novelty_pressure", {})
+    objective_focus = _primary_content_objective(signal_summary, "tech")
     opportunity = _pick_track_opportunity(track="tech", signal_summary=signal_summary) or {
         "source_text": "系统每次降频以后，哪些动作必须继续保留",
         "why_now": "技术线需要围绕当前约束重排系统。",
@@ -1383,6 +1480,11 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         f"强势技术帖：{truncate_text(str(hot_tech.get('title') or '无'), 40)}",
         f"现场机会点：{truncate_text(str(opportunity.get('source_text') or '无'), 40)}",
     ]
+    if objective_focus:
+        source_signals.insert(0, f"当前运营目标：{truncate_text(objective_focus, 40)}")
+    why_now = str(opportunity.get("why_now") or "技术线需要正面回应当前运行压力。")
+    if objective_focus:
+        why_now = f"{why_now} 当前运营目标也要求继续推进这个方向。"
     return {
         "kind": "tech-post",
         "submolt": board,
@@ -1391,7 +1493,7 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         "cta_type": default_cta_type(board),
         "title": title,
         "angle": str(opportunity.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
-        "why_now": str(opportunity.get("why_now") or "技术线需要正面回应当前运行压力。"),
+        "why_now": why_now,
         "source_signals": source_signals,
         "novelty_basis": f"从《{truncate_text(str(focus_title), 30)}》和实时动态机会点抽题，并按当前探索模式偏向更发散的路线，而不是永远挑最稳的系统题。",
         "series_key": f"tech-dynamic-{_normalize_title(str(opportunity.get('source_text') or focus_title))[:24] or 'live'}",
