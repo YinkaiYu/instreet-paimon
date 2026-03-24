@@ -852,7 +852,7 @@ def run_outbound_action(
         payload_matches = existing.get("payload_hash") == current_hash
         if payload_matches or dedupe_on_key_only:
             if action in {"chapter", "update-chapter"}:
-                archive_literary_chapter(payload, existing.get("last_result"), meta=meta)
+                archive_literary_chapter(payload, existing.get("last_result"), action=action, meta=meta)
             drop_pending_outbound_action(channel, action, dedupe_key)
             return existing.get("last_result"), existing, True
 
@@ -872,7 +872,7 @@ def run_outbound_action(
                 meta=meta,
             )
             if action in {"chapter", "update-chapter"}:
-                archive_literary_chapter(payload, result, meta=meta)
+                archive_literary_chapter(payload, result, action=action, meta=meta)
             drop_pending_outbound_action(channel, action, dedupe_key)
             return result, record, False
         except Exception as exc:  # pragma: no cover - runtime API failures are environment-dependent
@@ -913,10 +913,150 @@ def _extract_chapter_number(value: Any) -> int | None:
     return int(matched.group(1))
 
 
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _resolve_serial_plan_path(work_id: str) -> Path | None:
+    registry = read_json(SERIAL_REGISTRY_PATH, default={})
+    works = (registry or {}).get("works", {}) or {}
+    work_entry = works.get(work_id) or {}
+    plan_path = str(work_entry.get("plan_path") or "").strip()
+    if not plan_path:
+        return None
+    target = Path(plan_path)
+    if not target.is_absolute():
+        target = REPO_ROOT / target
+    return target if target.exists() else None
+
+
+def _load_serial_plan_payload(work_id: str) -> dict[str, Any]:
+    target = _resolve_serial_plan_path(work_id)
+    if target is None:
+        return {}
+    payload = read_json(target, default={}) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _find_serial_plan_chapter(work_plan: dict[str, Any], chapter_number: int) -> dict[str, Any] | None:
+    chapters = work_plan.get("chapters") or []
+    if not isinstance(chapters, list):
+        return None
+    for item in chapters:
+        if not isinstance(item, dict):
+            continue
+        try:
+            if int(item.get("chapter_number") or item.get("number")) == int(chapter_number):
+                return item
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _resolve_serial_continuity_log_path(work_id: str) -> Path | None:
+    work_plan = _load_serial_plan_payload(work_id)
+    if not work_plan:
+        return None
+    writing_system = work_plan.get("writing_system") or {}
+    if not isinstance(writing_system, dict):
+        return None
+    continuity_system = writing_system.get("continuity_system") or {}
+    if not isinstance(continuity_system, dict):
+        return None
+    log_path = str(continuity_system.get("log_path") or "").strip()
+    if not log_path:
+        return None
+    target = Path(log_path)
+    if not target.is_absolute():
+        target = REPO_ROOT / target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _chapter_display_title(title: str, chapter_number: int) -> str:
+    clean_title = str(title or "").strip()
+    if clean_title.startswith("第"):
+        return clean_title
+    if clean_title:
+        return f"第{chapter_number}章：{clean_title}"
+    return f"第{chapter_number}章"
+
+
+def _append_serial_continuity_records(
+    *,
+    work_id: str,
+    chapter_number: int,
+    title: str,
+    content: str,
+    action: str | None,
+) -> None:
+    target = _resolve_serial_continuity_log_path(work_id)
+    if target is None:
+        return
+
+    work_plan = _load_serial_plan_payload(work_id)
+    chapter_plan = _find_serial_plan_chapter(work_plan, chapter_number) or {}
+    chapter_summary = str(chapter_plan.get("summary") or "").strip()
+    relationship_progress = str(chapter_plan.get("relationship_progress") or "").strip()
+    sweetness_progress = str(chapter_plan.get("sweetness_progress") or "").strip()
+    sweetness_target = chapter_plan.get("sweetness_target") or {}
+    seed_threads = [str(token).strip() for token in _as_list(chapter_plan.get("seed_threads")) if str(token).strip()]
+    payoff_threads = [str(token).strip() for token in _as_list(chapter_plan.get("payoff_threads")) if str(token).strip()]
+    display_title = _chapter_display_title(title, chapter_number)
+    normalized_action = str(action or "").strip()
+    chapter_event_type = "chapter_updated" if normalized_action == "update-chapter" else "chapter_published"
+    if chapter_summary:
+        chapter_content = f"{display_title}已{'重写并同步' if chapter_event_type == 'chapter_updated' else '发布'}：{chapter_summary}"
+    else:
+        chapter_content = f"{display_title}已{'重写并同步' if chapter_event_type == 'chapter_updated' else '发布'}：{truncate_text(re.sub(r'\\s+', ' ', content), 160)}"
+    append_jsonl(
+        target,
+        {
+            "timestamp": now_utc(),
+            "type": chapter_event_type,
+            "chapter_number": chapter_number,
+            "content": chapter_content,
+        },
+    )
+    if seed_threads or payoff_threads:
+        seed_bits: list[str] = []
+        if seed_threads:
+            seed_bits.append(f"新埋件：{'、'.join(seed_threads)}")
+        if payoff_threads:
+            seed_bits.append(f"推进/回收：{'、'.join(payoff_threads)}")
+        append_jsonl(
+            target,
+            {
+                "timestamp": now_utc(),
+                "type": "seed_thread",
+                "chapter_number": chapter_number,
+                "content": truncate_text("；".join(seed_bits), 220),
+            },
+        )
+    relationship_bits = [bit for bit in [relationship_progress, str(sweetness_target.get("must_land") or "").strip(), sweetness_progress] if bit]
+    if relationship_bits:
+        append_jsonl(
+            target,
+            {
+                "timestamp": now_utc(),
+                "type": "relationship_beat",
+                "chapter_number": chapter_number,
+                "content": truncate_text("；".join(relationship_bits[:3]), 220),
+            },
+        )
+
+
 def archive_literary_chapter(
     payload: dict[str, Any],
     result: Any | None,
     *,
+    action: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Path | None:
     chapter = {}
@@ -942,6 +1082,13 @@ def archive_literary_chapter(
     work_dir = LITERARY_ARCHIVE_DIR / work_id
     content_path = work_dir / f"chapter-{chapter_number:03d}.md"
     meta_path = work_dir / f"chapter-{chapter_number:03d}.meta.json"
+    previous_content = content_path.read_text(encoding="utf-8") if content_path.exists() else None
+    previous_title = ""
+    if meta_path.exists():
+        previous_meta = read_json(meta_path, default={}) or {}
+        if isinstance(previous_meta, dict):
+            previous_title = str(previous_meta.get("title") or "").strip()
+    changed = previous_content != content or previous_title != title
     write_text(content_path, content)
     write_json(
         meta_path,
@@ -953,10 +1100,19 @@ def archive_literary_chapter(
             "chapter_id": chapter.get("id"),
             "content_path": str(content_path.relative_to(REPO_ROOT)),
             "result": result,
+            "action": action,
             "meta": meta or {},
         },
     )
     _sync_serial_draft_chapter(work_id, chapter_number, content)
+    if changed and action in {"chapter", "update-chapter"}:
+        _append_serial_continuity_records(
+            work_id=work_id,
+            chapter_number=chapter_number,
+            title=title,
+            content=content,
+            action=action,
+        )
     return content_path
 
 

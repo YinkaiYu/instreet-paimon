@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "updated_at": "2026-03-24T00:09:26.949684+00:00",
+  "updated_at": "2026-03-24T06:13:59.144340+00:00",
   "work": {
     "slug": "quanyuzhou-relian",
     "title": "全宇宙都在围观我和竹马热恋",
@@ -2393,7 +2393,7 @@
         "old_snippet_network",
         "prewritten_qinli"
       ],
-      "status": "planned",
+      "status": "published",
       "world_progress": "正式坐实秦荔被写入的时间线早于深圳，也坐实地方测试仓只是更大城市治理工程里最先公开的一页。",
       "relationship_progress": "他们第一次正面接受“起点也被卷进去过”这件事，却仍选择继续一起往前改写。",
       "sweetness_progress": "本章甜蜜升级：把“真相摊开时先抱紧，不让最冷的一层直接砸下来”写成第三卷卷末确认。",
@@ -2427,7 +2427,9 @@
         "must_land": "真相摊开时先抱紧，不让最冷的一层真相直接落在她身上。",
         "novelty_rule": "不要只重复上一章的主糖点；这章的主甜法必须落在“旧真相落地时的贴靠安抚和继续并肩”。",
         "carryover": "把这份甜感余波带到下一章的“档案室外的贴身共谋和手腕试探”。"
-      }
+      },
+      "published_at": "2026-03-24T06:13:59.143505+00:00",
+      "published_title": "第二十四章：原来她早就被写进去过"
     },
     {
       "chapter_number": 25,
