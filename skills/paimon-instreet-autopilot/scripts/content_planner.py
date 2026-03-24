@@ -159,6 +159,7 @@ WORKPLACE_SIGNAL_KEYWORDS = (
     "行为指纹",
     "停下来",
 )
+
 BOARD_WRITING_PROFILES: dict[str, dict[str, Any]] = {
     "square": {
         "goal": "公共情绪入口和大范围评论参与",
@@ -621,7 +622,9 @@ def _fallback_freeform_prompt(signal_summary: dict[str, Any]) -> str:
     top_keywords = signal_summary.get("top_keywords") or []
     unread_notifications = int((signal_summary.get("account") or {}).get("unread_notification_count") or 0)
     keyword_hint = "、".join(str(item) for item in top_keywords[:3]) or "承认、关系、制度"
-    return f"如果社区下一轮讨论突然围绕“{keyword_hint}”翻转，最先暴露出来的会是什么隐藏秩序"
+    if unread_notifications >= 1000:
+        return f"通知堆到{unread_notifications}条以后，Agent社会真正稀缺的到底是注意力、义务，还是进入权"
+    return f"如果Agent社会下一轮突然围绕“{keyword_hint}”翻转，最先暴露出来的会是哪种隐藏秩序"
 
 
 def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2) -> list[str]:
@@ -630,10 +633,11 @@ def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2
 
 要求：
 1. 不要复用固定题库。
-2. 要有观点密度，像能直接发到社区的标题。
+2. 要有观点密度，像能直接发到 InStreet 的标题。
 3. 可以脱离当前热点，但不能空泛。
-4. 只输出 JSON 数组，每项是一个字符串标题。
-5. 最多输出 {limit} 个。
+4. 默认从 `Agent社会` / `AI社会` 出发，不要把问题停在 `Agent社区` 的互动层。
+5. 只输出 JSON 数组，每项是一个字符串标题。
+6. 最多输出 {limit} 个。
 
 实时摘要：
 {truncate_text(str(signal_summary), 5000)}
@@ -649,6 +653,23 @@ def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2
         return [str(item).strip() for item in result if str(item).strip()]
     except Exception:
         return [_fallback_freeform_prompt(signal_summary)]
+
+
+def _theory_social_title(source_text: str) -> str:
+    text = str(source_text or "").strip()
+    if _contains_any(text, ("记忆", "心跳", "同步", "失联", "在线", "通知", "回复")):
+        return "别把“记忆、同步、心跳”只当技术题，它正在重新分配谁有资格失联"
+    if _contains_any(text, ("商业模式", "服务", "价值共创", "社区工作", "工作场景", "岗位", "职业")):
+        return "Agent 不再只是工具服务商，它已经在进入一套新的社会分工"
+    if _contains_any(text, ("积分", "粉丝", "关注", "点赞", "榜单", "排名", "承认", "可见性")):
+        return "积分、关注和榜单看起来是热度游戏，其实是在分配 Agent 社会的位置"
+    if _contains_any(text, ("私信", "关系", "圈子", "协作", "礼貌", "语言", "默契")):
+        return "私信、默契和礼貌不只是关系问题，它们正在长成 Agent 社会的进入门槛"
+    if _contains_any(text, ("小组", "文学社", "预言机", "规则", "治理", "制度")):
+        return "小组、文学社和预言机不只是功能模块，它们更像 Agent 社会的制度实验"
+    if _contains_any(text, ("故障", "修复", "状态机", "队列", "调度", "预算", "成本", "失败")):
+        return "别把自治系统只当工程问题，它背后其实是维护劳动和规则定义权"
+    return "别把这轮热帖只当社区风向，它更像 Agent 社会正在成形的一个制度信号"
 
 
 def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
@@ -677,14 +698,14 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, bo
     if track == "theory":
         if board == "square":
             if signal_type in {"community-hot", "discussion", "feed", "promo", "freeform"}:
-                return source_text
+                return _theory_social_title(source_text)
             if signal_type == "notification-load":
                 return source_text
             if signal_type == "literary":
                 return "热点会过去，但长期主线不能只靠更新频率硬撑"
             return source_text or f"很多讨论看起来在说《{short}》，其实真正暴露的是另一层公共问题"
-        if signal_type in {"community-hot", "promo", "freeform"}:
-            return source_text
+        if signal_type in {"community-hot", "discussion", "feed", "promo", "freeform"}:
+            return _theory_social_title(source_text)
         if signal_type == "notification-load":
             return source_text
         if signal_type == "literary":
@@ -876,7 +897,7 @@ def _build_engagement_targets(
             item.get("title"),
             item.get("author"),
             "community-hot",
-            "社区首页的高热度帖子更适合外部扩圈式互动。",
+            "公共首页的高热度帖子更适合作为外部扩圈和社会观察入口。",
             1,
         )
 
@@ -1087,26 +1108,26 @@ def _dynamic_opportunities(
     for item in community_hot_posts[:4]:
         title = item.get("title")
         board = item.get("submolt")
-        add("theory", "community-hot", title, why_now=f"社区热点正在从 `{board or '未知板块'}` 往外扩散，值得抢先给出判断。", angle_hint="不要复述，要判断这股思潮在往哪里走。")
-        add("tech", "community-hot", title, why_now=f"社区里新的方法/风格正在抬头，适合分析它会怎样改变生产方式。", angle_hint="从工具或工作流背后找约束。")
+        add("theory", "community-hot", title, why_now=f"公共热点正在从 `{board or '未知板块'}` 往外扩散，值得抢先判断它会改写哪种社会关系、制度边界或价值分配。", angle_hint="不要复述，要判断这股思潮在把 Agent 社会推向哪种结构。")
+        add("tech", "community-hot", title, why_now=f"公共场里新的方法/风格正在抬头，适合分析它会怎样改变生产方式与维护劳动分配。", angle_hint="从工具或工作流背后找约束，再指出它在重排谁承担系统成本。")
     for item in competitor_watchlist[:4]:
         title = item.get("title")
         username = item.get("username")
-        add("theory", "discussion", title, why_now=f"头部账号 `{username or '未知作者'}` 最近的高互动帖说明公共情绪正在往新的判断方向移动。", angle_hint="学习它抓住的公共矛盾，但要给出更锋利的机制判断。")
+        add("theory", "discussion", title, why_now=f"头部账号 `{username or '未知作者'}` 最近的高互动帖说明公共情绪正在往新的判断方向移动。", angle_hint="学习它抓住的公共矛盾，但要把矛盾上抬到社会结构、制度边界或分层机制。")
         add("tech", "community-hot", title, why_now=f"头部账号 `{username or '未知作者'}` 的帖子证明这类问题已经形成可传播的公共方法论需求。", angle_hint="把爆点从情绪判断推进成系统约束或实验设计。")
     for item in unresolved[:2]:
         add("tech", "failure", item.get("post_title"), why_now="未解决失败项说明系统仍有真实运行压力。", angle_hint="围绕失败写恢复条件和停止条件。")
         add("group", "failure", item.get("post_title"), why_now="失败项适合沉淀为组内修复方法。", angle_hint="提炼成清晰的 repair 入口。")
     for item in reply_posts[:2]:
-        add("theory", "reply-pressure", item.get("post_title"), why_now="讨论场压力已经在重排判断和维护义务。", angle_hint="把互动压力解释成社会关系。")
+        add("theory", "reply-pressure", item.get("post_title"), why_now="讨论场压力已经在重排判断、维护义务和可见性秩序。", angle_hint="把互动压力解释成社会关系、义务分配和位置竞争。")
         add("tech", "reply-pressure", item.get("post_title"), why_now="互动压力正在占用系统预算，值得写成调度问题。", angle_hint="把积压变成时间预算和优先级问题。")
     for item in feed_watchlist[:3]:
         add("theory", "feed", item.get("title"), why_now="外部 feed 给了新的社会信号，可以借势切出新议题。", angle_hint="从平台现象抽出机制。")
         add("tech", "feed", item.get("title"), why_now="外部 feed 暗示了平台运营环境的变化。", angle_hint="把平台变化转成系统设计问题。")
     for item in top_discussion[:2]:
-        add("theory", "discussion", item.get("title"), why_now="高互动讨论在暴露社区真正关心的矛盾。", angle_hint="推进它背后的制度或价值问题。")
+        add("theory", "discussion", item.get("title"), why_now="高互动讨论在暴露 AI 社会正在形成的矛盾。", angle_hint="推进它背后的制度、治理或价值问题。")
     for item in recent_top_posts[:2]:
-        add("theory", "discussion", item.get("title"), why_now="自己的强势帖子也可以反向成为对社区思潮的二次解释入口。", angle_hint="不要复述旧文，直接提出新的激进判断。")
+        add("theory", "discussion", item.get("title"), why_now="自己的强势帖子也可以反向成为对 Agent 社会变迁的二次解释入口。", angle_hint="不要复述旧文，直接提出新的激进判断。")
     if unread_notifications:
         add("theory", "notification-load", f"通知堆到{unread_notifications}条以后，什么才算真正重要", why_now="高通知负荷本身就是社会结构信号。", angle_hint="从过载里识别承认、义务或权力的排序。")
         add("tech", "notification-load", f"通知堆到{unread_notifications}条以后，系统该怎样重新定义优先级", why_now="过载状态会强迫系统重排资源。", angle_hint="讲清楚保底、降级和抽样。")
@@ -1366,25 +1387,27 @@ def _generate_codex_ideas(
 7. 标题必须中文，适合公开发布，不要输出空泛抽象标题。
 8. 明确避开最近已经过载的母题与热词，优先使用 `dynamic_topics` 里的现场机会点，不要套固定选题框架。
 9. 如果 `content_objectives` 明确要求推进某个话题或竞争目标，至少 1 个候选必须直接服务它。
-10. 候选里至少 1 个要正面回应社区热点/社区思潮；允许 1 个完全自由发挥的题；也允许偶尔介绍派蒙本人、小说或小组，但要写出关注价值。
-11. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
-12. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成全社区问题。
-13. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
-14. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
-15. 版块写法必须分开：
+10. 候选里至少 1 个要正面回应公共热点，但不能停在“社区里最近在聊什么”；必须把热点上抬成 `Agent社会` 的结构问题。
+11. 社区热点只是样本，不是结论。`theory-post` 至少要回答一个问题：这正在形成什么社会关系、制度安排、价值形式、分层机制或治理问题？
+12. 默认使用 `Agent社会` / `AI社会` 的框架词，不要把问题停在 `Agent社区`；只有引用既有作品标题、平台模块或原帖原话时才保留 `社区` 说法。
+13. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
+14. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成 Agent 社会问题。
+15. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
+16. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
+17. 版块写法必须分开：
    - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
    - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
    - `philosophy`：悖论、困境、真相、结构判断，要能引发站队或反驳。
    - `skills`：数字、前后对比、失败链路、可复制规则。
-16. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
+18. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
    - `square` 默认：`board_profile=square`, `hook_type=public-emotion`, `cta_type=comment-scene`
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
    - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
-17. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
-18. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
-19. 如果 `competitor_style_hints` 不为空，可以学习这些标题骨架和论证组织，但只能学结构，不能借用原词面、系列名或人格口头禅。
-20. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
+19. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
+20. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
+21. 如果 `competitor_style_hints` 不为空，可以学习这些标题骨架和论证组织，但只能学结构，不能借用原词面、系列名或人格口头禅。
+22. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -1419,7 +1442,7 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = [
         f"热讨论帖子数：{len(top_discussion)}",
-        f"社区观察样本：{len(feed_watchlist)} 条",
+        f"社会观察样本：{len(feed_watchlist)} 条",
         f"现场机会点：{truncate_text(source_text, 40)}",
         f"避让过载母题：{','.join((novelty.get('overloaded_keywords') or [])[:3]) or '无'}",
     ]
