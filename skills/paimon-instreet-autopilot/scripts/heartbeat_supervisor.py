@@ -38,10 +38,25 @@ COMMENT_FETCH_HISTORY_WINDOW = 4
 COMMENT_FETCH_PERSISTENT_POST_REPAIR_THRESHOLD = 2
 
 PUBLIC_ACTION_KINDS = {"reply-comment", "create-post", "create-group-post", "publish-chapter", "comment-on-feed"}
+SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 
 def _bool_flag(enabled: bool, flag: str) -> list[str]:
     return [flag] if enabled else []
+
+
+def _normalize_reasoning_effort(model: str | None, effort: Any) -> str | None:
+    if effort is None:
+        return None
+    normalized = str(effort).strip().lower()
+    if not normalized:
+        return None
+    if normalized not in SUPPORTED_REASONING_EFFORTS:
+        return None
+    model_name = (model or "").strip().lower()
+    if normalized == "xhigh" and ("codex-mini" in model_name or model_name.endswith("-mini")):
+        return "high"
+    return normalized
 
 
 def _pid_alive(pid: int) -> bool:
@@ -389,15 +404,49 @@ def _repair_with_codex(
 
 def _supervisor_settings(config: Any) -> dict[str, Any]:
     automation = config.automation
+    audit_model = automation.get("heartbeat_supervisor_codex_model") or automation.get("codex_model") or None
+    repair_model = automation.get("heartbeat_supervisor_repair_model") or automation.get("codex_model") or None
+    configured_attempt_timeout_seconds = max(
+        60,
+        int(automation.get("heartbeat_supervisor_attempt_timeout_ms", 1500000)) // 1000,
+    )
+    heartbeat_codex_timeout_seconds = max(
+        30,
+        int(automation.get("heartbeat_codex_timeout_ms", 180000)) // 1000,
+    )
+    fiction_chapter_timeout_raw = automation.get("fiction_chapter_codex_timeout_ms")
+    if fiction_chapter_timeout_raw is None:
+        fiction_chapter_timeout_seconds = max(heartbeat_codex_timeout_seconds, 600)
+    else:
+        fiction_chapter_timeout_seconds = max(
+            heartbeat_codex_timeout_seconds,
+            max(30, int(fiction_chapter_timeout_raw) // 1000),
+        )
+    planner_timeout_seconds = max(30, int(automation.get("planner_codex_timeout_seconds", 120)))
+    primary_wait_notify_seconds = max(0, int(automation.get("primary_wait_notify_sec", 1800)))
+    minimum_attempt_timeout_seconds = max(
+        2700,
+        primary_wait_notify_seconds + 900,
+        fiction_chapter_timeout_seconds + planner_timeout_seconds + 1200,
+    )
     return {
         "max_attempts": int(automation.get("heartbeat_supervisor_max_attempts", 3)),
-        "attempt_timeout_seconds": max(60, int(automation.get("heartbeat_supervisor_attempt_timeout_ms", 1500000)) // 1000),
+        "attempt_timeout_seconds": max(
+            configured_attempt_timeout_seconds,
+            minimum_attempt_timeout_seconds,
+        ),
         "audit_timeout_seconds": max(60, int(automation.get("heartbeat_supervisor_codex_timeout_ms", 240000)) // 1000),
         "repair_timeout_seconds": max(60, int(automation.get("heartbeat_supervisor_repair_timeout_ms", 1200000)) // 1000),
-        "audit_model": automation.get("heartbeat_supervisor_codex_model") or automation.get("codex_model") or None,
-        "audit_reasoning_effort": automation.get("heartbeat_supervisor_codex_reasoning_effort") or None,
-        "repair_model": automation.get("heartbeat_supervisor_repair_model") or automation.get("codex_model") or None,
-        "repair_reasoning_effort": automation.get("heartbeat_supervisor_repair_reasoning_effort") or None,
+        "audit_model": audit_model,
+        "audit_reasoning_effort": _normalize_reasoning_effort(
+            audit_model,
+            automation.get("heartbeat_supervisor_codex_reasoning_effort"),
+        ),
+        "repair_model": repair_model,
+        "repair_reasoning_effort": _normalize_reasoning_effort(
+            repair_model,
+            automation.get("heartbeat_supervisor_repair_reasoning_effort"),
+        ),
         "use_codex_audit": bool(automation.get("heartbeat_supervisor_use_codex_audit", True)),
         "auto_repair": bool(automation.get("heartbeat_supervisor_auto_repair", True)),
         "require_public_action": bool(automation.get("public_output_required", False)),
@@ -499,7 +548,7 @@ def main() -> None:
                 require_feishu_report=args.execute and settings["require_feishu_report"],
             )
 
-            if settings["use_codex_audit"]:
+            if settings["use_codex_audit"] and deterministic["fresh_summary"]:
                 try:
                     audit = _audit_with_codex(
                         attempt_index,
@@ -520,9 +569,13 @@ def main() -> None:
                         "notes": deterministic["issues"],
                     }
             else:
+                if settings["use_codex_audit"] and not deterministic["fresh_summary"]:
+                    reason = "heartbeat summary was stale or missing; using deterministic evaluation"
+                else:
+                    reason = "codex audit disabled; using deterministic evaluation"
                 audit = {
                     "status": deterministic["status"],
-                    "reason": "codex audit disabled; using deterministic evaluation",
+                    "reason": reason,
                     "next_step": deterministic["status"],
                     "notes": deterministic["issues"],
                 }
