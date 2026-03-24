@@ -124,6 +124,32 @@ def _rotate_sequence(items: list[str], start: int) -> list[str]:
     return items[start:] + items[:start]
 
 
+def _extract_result_id(result: Any) -> str | None:
+    if isinstance(result, dict):
+        direct_id = result.get("id")
+        if direct_id is not None and str(direct_id).strip():
+            return str(direct_id)
+        data = result.get("data")
+        if isinstance(data, dict):
+            nested_id = data.get("id")
+            if nested_id is not None and str(nested_id).strip():
+                return str(nested_id)
+            return None
+        if isinstance(data, (list, tuple)):
+            for item in data:
+                nested = _extract_result_id(item)
+                if nested:
+                    return nested
+            return None
+        return None
+    if isinstance(result, (list, tuple)):
+        for item in result:
+            nested = _extract_result_id(item)
+            if nested:
+                return nested
+    return None
+
+
 def _load_primary_cycle_state() -> dict[str, int]:
     state = read_json(
         PRIMARY_CYCLE_PATH,
@@ -3089,7 +3115,7 @@ def _publish_primary_action(
                             "publish_kind": kind,
                             "title": title,
                             "outbound_dedupe_key": dedupe_key,
-                            "result_id": (result or {}).get("data", {}).get("id"),
+                            "result_id": _extract_result_id(result),
                             "resolution": "deduped",
                         }
                     )
@@ -3099,7 +3125,7 @@ def _publish_primary_action(
                     "publish_kind": kind,
                     "title": title,
                     "submolt": submolt,
-                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "result_id": _extract_result_id(result),
                     "deduped": False,
                     "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
@@ -3241,7 +3267,7 @@ def _publish_primary_action(
                             "work_id": work_id,
                             "chapter_number": actual_next_chapter_number,
                             "outbound_dedupe_key": dedupe_key,
-                            "result_id": (result or {}).get("data", {}).get("id"),
+                            "result_id": _extract_result_id(result),
                             "resolution": "deduped",
                         }
                     )
@@ -3250,7 +3276,7 @@ def _publish_primary_action(
                     work_id,
                     chapter_number=actual_next_chapter_number,
                     title=title,
-                    result_id=(result or {}).get("data", {}).get("id"),
+                    result_id=_extract_result_id(result),
                 )
                 action = {
                     "kind": "publish-chapter",
@@ -3258,7 +3284,7 @@ def _publish_primary_action(
                     "work_id": work_id,
                     "chapter_number": actual_next_chapter_number,
                     "title": title,
-                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "result_id": _extract_result_id(result),
                     "deduped": False,
                     "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
@@ -3307,7 +3333,7 @@ def _publish_primary_action(
                             "group_id": group_id,
                             "title": title,
                             "outbound_dedupe_key": dedupe_key,
-                            "result_id": (result or {}).get("data", {}).get("id"),
+                            "result_id": _extract_result_id(result),
                             "resolution": "deduped",
                         }
                     )
@@ -3317,7 +3343,7 @@ def _publish_primary_action(
                     "publish_kind": kind,
                     "group_id": group_id,
                     "title": title,
-                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "result_id": _extract_result_id(result),
                     "deduped": False,
                     "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
@@ -3606,7 +3632,7 @@ def _reply_comments(
                         "post_title": task.get("post_title"),
                         "comment_id": comment_id,
                         "comment_author": task.get("comment_author"),
-                        "result_id": (result or {}).get("data", {}).get("id"),
+                        "result_id": _extract_result_id(result),
                         "deduped": deduped,
                         "outbound_dedupe_key": dedupe_key,
                         "outbound_status": record.get("status"),
@@ -3875,7 +3901,7 @@ def _engage_external_discussions(
                     "post_title": target.get("post_title"),
                     "post_author": target.get("post_author"),
                     "source": target.get("source"),
-                    "result_id": (result or {}).get("data", {}).get("id"),
+                    "result_id": _extract_result_id(result),
                     "deduped": deduped,
                     "outbound_status": record.get("status"),
                     "outbound_dedupe_key": dedupe_key,
@@ -3970,7 +3996,7 @@ def _reply_dms(
                     "kind": "reply-dm",
                     "thread_id": target["thread_id"],
                     "other_agent": thread.get("other_agent", {}).get("username") or target.get("other_agent"),
-                    "result_id": result.get("data", {}).get("id"),
+                    "result_id": _extract_result_id(result),
                 }
             )
         except ApiError as exc:
