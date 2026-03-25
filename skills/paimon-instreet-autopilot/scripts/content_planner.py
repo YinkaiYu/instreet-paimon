@@ -1199,6 +1199,7 @@ def _dynamic_opportunities(
     top_discussion = signal_summary.get("top_discussion_posts") or []
     high_quality_sources = signal_summary.get("high_quality_sources") or {}
     community_breakouts = high_quality_sources.get("community_breakouts") or []
+    zhihu_results = high_quality_sources.get("zhihu_results") or []
     research_papers = high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or []
     classic_texts = high_quality_sources.get("classic_texts") or []
     community_hot_posts = _high_like_external_posts(
@@ -1242,15 +1243,19 @@ def _dynamic_opportunities(
         add_source("tech", "community-breakout", title, why_now=note, quality_score=4.0, freshness_score=2.0)
 
     for item in research_papers[:5]:
-        title = str(item.get("title") or "").strip()
-        summary = truncate_text(str(item.get("summary") or item.get("abstract") or "").strip(), 160)
+        title = str(item.get("intent") or item.get("title") or "").strip()
+        summary = truncate_text(
+            str(item.get("relevance_note") or item.get("summary") or item.get("abstract") or "").strip(),
+            160,
+        )
+        bridge_terms = "、".join(str(term or "").strip() for term in list(item.get("bridge_terms") or [])[:3] if str(term or "").strip())
         add_source(
             "theory",
             "paper",
             title,
             why_now=summary,
-            angle_hint="把论文的问题意识翻译成 Agent 社会的新判断。",
-            quality_score=5.0,
+            angle_hint=bridge_terms or "把论文的问题意识翻译成 Agent 社会的新判断。",
+            quality_score=min(6.0, 3.0 + float(item.get("relevance_score") or 0.0) / 2.0),
             freshness_score=3.0,
         )
         add_source(
@@ -1258,10 +1263,16 @@ def _dynamic_opportunities(
             "paper",
             title,
             why_now=summary,
-            angle_hint="把论文里的方法、失败模式或约束改写成新的实践协议。",
-            quality_score=5.0,
+            angle_hint=bridge_terms or "把论文里的方法、失败模式或约束改写成新的实践协议。",
+            quality_score=min(6.0, 3.0 + float(item.get("relevance_score") or 0.0) / 2.0),
             freshness_score=3.0,
         )
+
+    for item in zhihu_results[:4]:
+        title = str(item.get("title") or "").strip()
+        summary = truncate_text(str(item.get("summary") or "").strip(), 120)
+        add_source("theory", "zhihu", title, why_now=summary, quality_score=2.5, freshness_score=1.5)
+        add_source("tech", "zhihu", title, why_now=summary, quality_score=2.0, freshness_score=1.5)
 
     for item in classic_texts[:5]:
         title = str(item.get("title") or "").strip()
@@ -1456,7 +1467,11 @@ def _planning_signals(
     research_titles.extend(str(item.get("title") or "") for item in competitor_watchlist[:8])
     research_titles.extend(str(item.get("title") or "") for item in rising_hot_posts[:6])
     research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("community_breakouts") or [])[:6])
-    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or [])[:8])
+    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("zhihu_results") or [])[:6])
+    research_titles.extend(
+        str(item.get("intent") or item.get("title") or "")
+        for item in (high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or [])[:8]
+    )
     research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("classic_texts") or [])[:8])
     research_titles.extend(content_objectives[:6])
     research_titles.extend(str(item.get("text") or "") for item in user_topic_hints[:6])
