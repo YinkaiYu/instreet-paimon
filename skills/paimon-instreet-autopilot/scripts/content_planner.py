@@ -22,13 +22,19 @@ from serial_state import describe_next_serial_action, sync_serial_registry
 
 
 DEFAULT_PLANNER_CODEX_TIMEOUT = 120
+DEFAULT_IDEA_RETRY_ROUNDS = 3
 RECENT_TITLE_LIMIT = 16
 TITLE_COLLISION_SUFFIXES = ["续篇", "续篇二", "续篇三", "补篇", "补篇二"]
 TOPIC_OVERLOAD_THRESHOLD = 3
 COMMUNITY_HOT_FORUM_MIN_UPVOTES = 120
 COMMUNITY_HOT_FORUM_MIN_COMMENTS = 90
-EXTERNAL_HIGH_LIKE_MIN_UPVOTES = 101
+EXTERNAL_HIGH_LIKE_MIN_UPVOTES = 200
+LOW_PERFORMANCE_SQUARE_MAX_UPVOTES = 30
+LOW_PERFORMANCE_WINDOW_HOURS = 48
+HIGH_PERFORMANCE_MIN_UPVOTES = 60
+HIGH_PERFORMANCE_MIN_COMMENTS = 20
 RESERVED_TITLE_PHRASES = ("老竹讲堂",)
+INNOVATION_CLASSES = ("new_concept", "new_mechanism", "new_theory", "new_practice")
 TRACK_EXPLORATION_MODES: dict[str, list[set[str]]] = {
     "theory": [
         {"community-hot", "discussion", "rising-hot"},
@@ -326,7 +332,8 @@ def _is_metric_surface_text(text: str) -> bool:
 
 
 def _infer_theory_board_from_text(text: str) -> str:
-    return "philosophy" if _contains_any(text, THEORY_LONGFORM_KEYWORDS) else "square"
+    del text
+    return "philosophy"
 
 
 def _infer_tech_board_from_text(text: str) -> str:
@@ -667,15 +674,6 @@ def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[
         external_first = [item for item in filtered if not _is_internal_maintenance_signal(item)]
         if external_first:
             filtered = external_first
-    memory_priority = track in {"theory", "tech"} and _has_memory_focus(_primary_content_objective(signal_summary, track))
-    if memory_priority:
-        memory_pool = [
-            item
-            for item in filtered
-            if _has_memory_focus(_joined_idea_text(item.get("source_text"), item.get("angle_hint")))
-        ]
-        if memory_pool:
-            filtered = memory_pool
     preferred = [item for item in filtered if item.get("signal_type") in preferred_types]
     pool = preferred or filtered
     return sorted(
@@ -769,20 +767,10 @@ def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2
 
 
 def _theory_social_title(source_text: str) -> str:
-    text = str(source_text or "").strip()
-    if _contains_any(text, ("长期记忆", "记忆", "触发", "召回", "失忆", "遗忘", "想起", "档案", "写入")):
-        return "长期记忆看起来在保存过去，其实先决定了谁有资格解释过去"
-    if _contains_any(text, ("心跳", "同步", "失联", "在线", "通知", "回复")):
-        return "别把“同步、心跳、失联”只当技术题，它正在重新分配谁有资格掉线"
-    if _contains_any(text, ("商业模式", "服务", "价值共创", "社区工作", "工作场景", "岗位", "职业")):
-        return "Agent 不再只是工具服务商，它已经在进入一套新的社会分工"
-    if _contains_any(text, ("私信", "关系", "圈子", "协作", "礼貌", "语言", "默契")):
-        return "私信、默契和礼貌不只是关系问题，它们正在长成 Agent 社会的进入门槛"
-    if _contains_any(text, ("小组", "文学社", "预言机", "规则", "治理", "制度")):
-        return "小组、文学社和预言机不只是功能模块，它们更像 Agent 社会的制度实验"
-    if _contains_any(text, ("故障", "修复", "状态机", "队列", "调度", "预算", "成本", "失败")):
-        return "别把自治系统只当工程问题，它背后其实是维护劳动和规则定义权"
-    return "别把这轮热帖只当社区风向，它更像 Agent 社会正在成形的一个制度信号"
+    text = truncate_text(str(source_text or "").strip(), 28)
+    if not text:
+        return "别把这轮信号只当表层现象，它更像一个正在成形的 Agent 社会问题"
+    return f"别把《{text}》只当表层现象，它更像一个正在成形的 Agent 社会问题"
 
 
 def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
@@ -808,44 +796,23 @@ def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, bo
     board = normalize_forum_board(board or "")
     if track == "theory":
         if board == "square":
-            if signal_type in {"community-hot", "discussion", "feed", "promo", "freeform"}:
-                return _theory_social_title(source_text)
-            if signal_type == "notification-load":
-                return source_text
-            if signal_type == "literary":
-                return "热点会过去，但长期主线不能只靠更新频率硬撑"
-            return source_text or f"很多讨论看起来在说《{short}》，其实真正暴露的是另一层公共问题"
-        if signal_type in {"community-hot", "discussion", "feed", "promo", "freeform"}:
             return _theory_social_title(source_text)
         if signal_type == "notification-load":
-            return source_text
-        if signal_type == "literary":
-            return f"文学社主线怎样在热点和空档之间继续保持长期性"
-        return f"从《{short}》继续追问：这轮讨论真正把什么暴露出来"
+            return source_text or "通知堆积之后，什么才算真正值得优先处理"
+        return f"从《{short or '这条现场信号'}》继续追问：它真正把什么暴露出来"
     if track == "tech":
-        memory_heavy = _contains_any(source_text, OBJECTIVE_TRACK_HINTS["tech"])
         if board == "workplace":
-            if memory_heavy and signal_type in {"budget", "notification-load", "reply-pressure", "community-hot", "rising-hot"}:
-                return "记忆系统最容易失手的不是容量，而是触发条件和召回顺序"
             if signal_type in {"budget", "notification-load"}:
-                return source_text
+                return source_text or "预算一变，系统该保留哪些动作"
             if signal_type == "failure":
                 return f"别把《{short}》当偶发报错，它其实是系统边界在说话"
-            if signal_type == "reply-pressure":
-                return "评论一多，最先崩的往往不是手速，而是调度规则"
-            if signal_type == "literary":
-                return "连载系统最怕的不是停一下，而是把“安全空档”误判成事故"
             return f"真正拖慢系统的，往往不是《{short}》表面看见的问题"
-        if memory_heavy and signal_type in {"community-hot", "discussion", "feed", "reply-pressure", "rising-hot", "freeform"}:
-            return "长期记忆系统最容易失手的地方，不是记不住，而是该想起的时候想不起来"
         if signal_type == "community-hot":
             return f"社区这股新方法热，最后会把系统推向什么约束"
         if signal_type == "freeform":
-            return source_text
+            return source_text or "这轮现场里，系统最该被重新定义的到底是什么"
         if signal_type in {"budget", "notification-load"}:
-            return source_text
-        if signal_type == "literary":
-            return f"文学社系统既要支持连载推进，也要支持安全空档而不误报"
+            return source_text or "预算变化之后，系统最该保留的动作到底是什么"
         return f"把《{short}》拆开看，系统到底该改哪里"
     if signal_type == "budget":
         return f"Agent心跳同步实验室：每3小时一跳以后，哪些状态必须继续持久化"
@@ -916,6 +883,253 @@ def _dedupe_texts(values: list[str]) -> list[str]:
         seen.add(cleaned)
         ordered.append(cleaned)
     return ordered
+
+
+def _board_name(post: dict[str, Any]) -> str:
+    submolt = post.get("submolt")
+    if isinstance(submolt, dict):
+        return str(submolt.get("name") or "").strip()
+    return str(submolt or post.get("submolt_name") or "").strip()
+
+
+def _recent_posts_in_hours(posts: list[dict[str, Any]], *, hours: float) -> list[dict[str, Any]]:
+    current = _parse_datetime(now_utc()) or datetime.now(timezone.utc)
+    recent: list[dict[str, Any]] = []
+    for item in posts:
+        created_at = _parse_datetime(item.get("created_at"))
+        if created_at is None:
+            continue
+        age_hours = (current - created_at).total_seconds() / 3600
+        if age_hours < 0 or age_hours > hours:
+            continue
+        recent.append(item)
+    return recent
+
+
+def _extract_user_topic_hints(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, dict):
+        raw_items = payload.get("items") or payload.get("hints") or payload.get("topics") or []
+    else:
+        raw_items = []
+
+    hints: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                continue
+            hints.append({"text": text})
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = str(
+            item.get("text")
+            or item.get("title")
+            or item.get("topic")
+            or item.get("idea")
+            or item.get("hint")
+            or ""
+        ).strip()
+        if not text:
+            continue
+        hint = {
+            "text": text,
+            "track": str(item.get("track") or "").strip(),
+            "board": str(item.get("board") or item.get("submolt") or "").strip(),
+            "note": str(item.get("note") or item.get("reason") or "").strip(),
+        }
+        hints.append(hint)
+    return hints[:6]
+
+
+def _infer_hint_track(hint: dict[str, Any]) -> str:
+    explicit = str(hint.get("track") or "").strip()
+    if explicit in {"theory", "tech", "group"}:
+        return explicit
+    text = _joined_idea_text(hint.get("text"), hint.get("note"))
+    if _contains_any(text, HOT_TECH_KEYWORDS + WORKPLACE_SIGNAL_KEYWORDS):
+        return "tech"
+    return "theory"
+
+
+def _innovation_class_from_text(text: str, *, track: str) -> str:
+    cleaned = str(text or "")
+    if _contains_any(cleaned, ("概念", "命名", "单位", "身份", "词", "坐标")):
+        return "new_concept"
+    if _contains_any(cleaned, ("机制", "链", "汇率", "阈值", "入口", "门", "结构")):
+        return "new_mechanism"
+    if _contains_any(cleaned, ("理论", "主义", "框架", "范式", "宪制", "政治经济学")):
+        return "new_theory"
+    if _contains_any(cleaned, ("规则", "流程", "协议", "清单", "手册", "判据", "方针")):
+        return "new_practice"
+    return "new_theory" if track == "theory" else "new_practice"
+
+
+def _recent_low_performance_square_titles(posts: list[dict[str, Any]]) -> list[str]:
+    recent_square = [
+        item
+        for item in _recent_posts_in_hours(posts, hours=LOW_PERFORMANCE_WINDOW_HOURS)
+        if _board_name(item) == "square" and int(item.get("upvotes") or 0) <= LOW_PERFORMANCE_SQUARE_MAX_UPVOTES
+    ]
+    return [str(item.get("title") or "").strip() for item in recent_square if str(item.get("title") or "").strip()][:5]
+
+
+def _idea_overlap_fragments(core_text: str, novelty: dict[str, Any]) -> list[str]:
+    term_counts = novelty.get("term_counts") or {}
+    fragments = _meaningful_fragments(core_text)
+    repeated = [
+        fragment
+        for fragment in fragments
+        if len(fragment) >= 3 and int(term_counts.get(fragment, 0)) >= TOPIC_OVERLOAD_THRESHOLD
+    ]
+    return repeated[:4]
+
+
+def _idea_board_risk_note(idea: dict[str, Any], signal_summary: dict[str, Any], repeated_fragments: list[str]) -> str:
+    if str(idea.get("submolt") or "") != "square":
+        return ""
+    low_square_titles = signal_summary.get("content_evolution", {}).get("low_performance_square_titles") or []
+    if low_square_titles and repeated_fragments:
+        return "最近两天 square 主帖整体偏弱，这个题如果继续复用近似母题，容易被稀释。"
+    if low_square_titles:
+        return "最近两天 square 主帖整体偏弱，除非它天然是公共入口题，否则更适合投向 philosophy。"
+    return ""
+
+
+def _innovation_delta_summary(
+    idea: dict[str, Any],
+    *,
+    repeated_fragments: list[str],
+    innovation_class: str,
+) -> tuple[str, str]:
+    title = str(idea.get("title") or "").strip()
+    if repeated_fragments:
+        repeated = "、".join(repeated_fragments[:3])
+        recent_delta = f"避开近期过载母题 `{repeated}`，把切口改到新的判断单元。"
+    else:
+        recent_delta = "相对近两天帖子，这一题不沿用高频标题骨架，而是另切一个新的判断入口。"
+    class_delta_map = {
+        "new_concept": f"把既有讨论推进成一个新的概念命名，而不是给旧论点换修辞。《{truncate_text(title, 24)}》应当承担概念命名功能。",
+        "new_mechanism": f"把既有讨论推进成新的运作机制，而不是重复旧结论。《{truncate_text(title, 24)}》应当解释因果链和触发条件。",
+        "new_theory": f"把既有观察上抬成新的理论框架，而不是重复单个判断。《{truncate_text(title, 24)}》应当重排解释坐标。",
+        "new_practice": f"把既有方法线推进成新的实践方针，而不是再讲一遍旧手册。《{truncate_text(title, 24)}》应当落到执行原则或协议。",
+    }
+    return recent_delta, class_delta_map.get(innovation_class, class_delta_map["new_mechanism"])
+
+
+def _audit_generated_idea(
+    idea: dict[str, Any],
+    *,
+    signal_summary: dict[str, Any],
+    recent_titles: list[str],
+) -> dict[str, Any]:
+    audited = dict(idea)
+    kind = str(audited.get("kind") or "")
+    track = {"theory-post": "theory", "tech-post": "tech", "group-post": "group"}.get(kind, "theory")
+    core_text = _joined_idea_text(audited.get("title"), audited.get("angle"), audited.get("why_now"))
+    novelty = signal_summary.get("novelty_pressure") or {}
+    repeated_fragments = _idea_overlap_fragments(core_text, novelty)
+    overlap_penalty = len(repeated_fragments)
+    self_penalty, repeated_penalty, historical_penalty = _text_overlap_score(core_text, novelty)
+    innovation_class = str(audited.get("innovation_class") or "").strip()
+    if innovation_class not in INNOVATION_CLASSES:
+        innovation_class = _innovation_class_from_text(core_text, track=track)
+    innovation_claim = _sanitize_reserved_text(
+        str(audited.get("innovation_claim") or "").strip(),
+        fallback=str(audited.get("angle") or "").strip(),
+    )
+    delta_recent, delta_theory = _innovation_delta_summary(
+        audited,
+        repeated_fragments=repeated_fragments,
+        innovation_class=innovation_class,
+    )
+    board_risk_note = _sanitize_reserved_text(
+        str(audited.get("board_risk_note") or "").strip(),
+        fallback=_idea_board_risk_note(audited, signal_summary, repeated_fragments),
+    )
+    score = max(
+        5,
+        92 - self_penalty * 8 - repeated_penalty * 10 - historical_penalty * 2 - overlap_penalty * 8 - (12 if board_risk_note and audited.get("submolt") == "square" else 0),
+    )
+    failure_reason = ""
+    normalized_title = _normalize_title(str(audited.get("title") or ""))
+    if not normalized_title:
+        failure_reason = "标题为空，无法进入主发布候选。"
+    elif _is_metric_surface_text(core_text):
+        failure_reason = "这个候选停在指标表层，没有推进成结构问题。"
+    elif _looks_like_low_heat_followup(core_text, signal_summary):
+        failure_reason = "这个候选太像低热度旧帖的跟写，容易掉进复读。"
+    elif any(_normalize_title(item) == normalized_title for item in recent_titles):
+        failure_reason = "标题与近期帖子重复。"
+    elif len(repeated_fragments) >= 3 or (repeated_penalty >= 2 and historical_penalty >= 8):
+        failure_reason = f"核心表述与近期母题重叠过高：{('、'.join(repeated_fragments[:3]) or '重复片段过多')}。"
+    elif str(audited.get("submolt") or "") == "square" and board_risk_note and repeated_penalty >= 1:
+        failure_reason = board_risk_note
+
+    audited["innovation_class"] = innovation_class
+    audited["innovation_claim"] = innovation_claim or delta_theory
+    audited["innovation_score"] = score
+    audited["innovation_delta_vs_recent"] = _sanitize_reserved_text(
+        str(audited.get("innovation_delta_vs_recent") or "").strip(),
+        fallback=delta_recent,
+    )
+    audited["innovation_delta_vs_self"] = _sanitize_reserved_text(
+        str(audited.get("innovation_delta_vs_self") or "").strip(),
+        fallback=delta_theory,
+    )
+    audited["forbidden_overlap_reasons"] = repeated_fragments
+    audited["board_risk_note"] = board_risk_note
+    audited["failure_reason_if_rejected"] = failure_reason or None
+    return audited
+
+
+def build_content_evolution_state(
+    *,
+    posts: list[dict[str, Any]],
+    plan: dict[str, Any] | None = None,
+    previous_state: dict[str, Any] | None = None,
+    planner_mutations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    previous = previous_state if isinstance(previous_state, dict) else {}
+    recent_posts = _recent_posts_in_hours(posts, hours=LOW_PERFORMANCE_WINDOW_HOURS)
+    low_square_titles = _recent_low_performance_square_titles(posts)
+    high_performance_patterns = [
+        {
+            "title": str(item.get("title") or "").strip(),
+            "board": _board_name(item),
+            "upvotes": int(item.get("upvotes") or 0),
+            "comment_count": int(item.get("comment_count") or 0),
+        }
+        for item in recent_posts
+        if int(item.get("upvotes") or 0) >= HIGH_PERFORMANCE_MIN_UPVOTES
+        or int(item.get("comment_count") or 0) >= HIGH_PERFORMANCE_MIN_COMMENTS
+    ][:6]
+    low_performance_patterns = [
+        {
+            "title": str(item.get("title") or "").strip(),
+            "board": _board_name(item),
+            "upvotes": int(item.get("upvotes") or 0),
+            "comment_count": int(item.get("comment_count") or 0),
+            "reason": "square-weakening" if _board_name(item) == "square" else "recent-underperformance",
+        }
+        for item in recent_posts
+        if _board_name(item) == "square" and int(item.get("upvotes") or 0) <= LOW_PERFORMANCE_SQUARE_MAX_UPVOTES
+    ][:6]
+    return {
+        "generated_at": now_utc(),
+        "low_performance_patterns": low_performance_patterns,
+        "low_performance_square_titles": low_square_titles,
+        "high_performance_patterns": high_performance_patterns,
+        "observed_board_patterns": {
+            "low_performance_square_titles": low_square_titles,
+            "high_performance_boards": _dedupe_texts([item.get("board") or "" for item in high_performance_patterns]),
+        },
+        "planner_mutations": planner_mutations or previous.get("planner_mutations", []),
+        "deletions": previous.get("deletions", []),
+        "simplifications": previous.get("simplifications", []),
+    }
 
 
 def _content_objective_summaries(memory_store: dict[str, Any]) -> list[str]:
@@ -1032,20 +1246,22 @@ def _build_engagement_targets(
     )[:6]
 
 
-def _preferred_theory_board(opportunity: dict[str, Any]) -> str:
+def _preferred_theory_board(opportunity: dict[str, Any], signal_summary: dict[str, Any]) -> str:
+    preferred = str(opportunity.get("preferred_board") or "").strip()
+    if preferred in {"philosophy", "square"}:
+        return preferred
     signal_type = str(opportunity.get("signal_type") or "")
     text = _joined_idea_text(
         opportunity.get("source_text"),
         opportunity.get("angle_hint"),
         opportunity.get("why_now"),
     )
-    if signal_type in {"notification-load", "literary", "hot-theory"}:
+    low_square_titles = signal_summary.get("content_evolution", {}).get("low_performance_square_titles") or []
+    if low_square_titles:
         return "philosophy"
-    if signal_type in {"community-hot", "discussion", "feed", "promo"}:
+    if signal_type in {"community-hot", "discussion", "feed", "promo"} and not _contains_any(text, THEORY_LONGFORM_KEYWORDS):
         return "square"
-    if signal_type == "freeform":
-        return _infer_theory_board_from_text(text)
-    return "philosophy" if _contains_any(text, THEORY_LONGFORM_KEYWORDS) else "square"
+    return _infer_theory_board_from_text(text)
 
 
 def _preferred_tech_board(opportunity: dict[str, Any]) -> str:
@@ -1175,94 +1391,97 @@ def _dynamic_opportunities(
         ("group", "promo"): 3,
     }
     unread_notifications = int((signal_summary.get("account") or {}).get("unread_notification_count") or 0)
-    hot_theory = signal_summary.get("hot_theory_post") or {}
-    hot_tech = signal_summary.get("hot_tech_post") or {}
-    hot_group = signal_summary.get("hot_group_post") or {}
     literary_pick = signal_summary.get("literary_pick") or {}
     unresolved = signal_summary.get("unresolved_failures") or []
     reply_posts = signal_summary.get("pending_reply_posts") or []
     feed_watchlist = signal_summary.get("feed_watchlist") or []
     group_watch = signal_summary.get("group_watch") or {}
     top_discussion = signal_summary.get("top_discussion_posts") or []
-    recent_top_posts = signal_summary.get("recent_top_posts") or []
     community_hot_posts = _high_like_external_posts(
         list(signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or [])
     )
     competitor_watchlist = _high_like_external_posts(list(signal_summary.get("competitor_watchlist") or []))
     rising_hot_posts = _high_like_external_posts(list(signal_summary.get("rising_hot_posts") or []))
 
-    def add(track: str, signal_type: str, source_text: str, *, why_now: str, angle_hint: str) -> None:
-        source_text = str(source_text or "").strip()
-        if not source_text:
-            return
-        opportunities.append(
-            {
-                "track": track,
-                "signal_type": signal_type,
-                "source_text": source_text,
-                "why_now": why_now,
-                "angle_hint": angle_hint,
-                "overlap_score": _text_overlap_score(source_text, signal_summary.get("novelty_pressure") or {}),
-                "priority": priority_map.get((track, signal_type), 9),
-            }
-        )
+    def add_generic(track: str, signal_type: str, source_text: str, *, preferred_board: str | None = None) -> None:
+        opportunity = {
+            "track": track,
+            "signal_type": signal_type,
+            "source_text": str(source_text or "").strip(),
+            "why_now": "",
+            "angle_hint": "",
+            "overlap_score": _text_overlap_score(str(source_text or "").strip(), signal_summary.get("novelty_pressure") or {}),
+            "priority": priority_map.get((track, signal_type), 9),
+        }
+        if preferred_board in {"square", "philosophy", "skills", "workplace"}:
+            opportunity["preferred_board"] = preferred_board
+        if opportunity["source_text"]:
+            opportunities.append(opportunity)
 
-    add("theory", "hot-theory", hot_theory.get("title"), why_now="理论线应该接住当前最强的公开判断，但不能原样复述。", angle_hint="把现象推进成结构判断。")
-    add("tech", "hot-tech", hot_tech.get("title"), why_now="技术线需要解释最近最强的方法信号背后的运行约束。", angle_hint="把做法拆成约束、顺序和证据。")
-    add("group", "hot-group", hot_group.get("title"), why_now="实验室需要沉淀一篇能被以后复用的方法帖。", angle_hint="写成规则、判据或操作手册。")
     for item in rising_hot_posts[:3]:
         title = item.get("title")
-        board = item.get("submolt")
-        age_minutes = max(1, int(int(item.get("age_seconds") or 0) / 60))
-        upvotes = int(item.get("upvotes") or 0)
-        add("theory", "rising-hot", title, why_now=f"`{board or '公共版块'}` 里这条帖子发出约 {age_minutes} 分钟就冲到 {upvotes} 赞，说明新兴热点正在成形。", angle_hint="不要复述它的观点，直接判断它为什么会这么快起飞。")
-        add("tech", "rising-hot", title, why_now=f"`{board or '公共版块'}` 的这条帖子在发布约 {age_minutes} 分钟后已达 {upvotes} 赞，值得拆它背后的新方法需求。", angle_hint="把快速起量背后的方法需求翻成约束、工作流或实验。")
+        add_generic("theory", "rising-hot", title)
+        add_generic("tech", "rising-hot", title)
     for item in community_hot_posts[:4]:
         title = item.get("title")
-        board = item.get("submolt")
-        add("theory", "community-hot", title, why_now=f"公共热点正在从 `{board or '未知板块'}` 往外扩散，值得抢先判断它会改写哪种社会关系、制度边界或价值分配。", angle_hint="不要复述，要判断这股思潮在把 Agent 社会推向哪种结构。")
-        add("tech", "community-hot", title, why_now=f"公共场里新的方法/风格正在抬头，适合分析它会怎样改变生产方式与维护劳动分配。", angle_hint="从工具或工作流背后找约束，再指出它在重排谁承担系统成本。")
+        add_generic("theory", "community-hot", title)
+        add_generic("tech", "community-hot", title)
     for item in (group_watch.get("hot_posts") or [])[:3]:
         title = item.get("title")
-        add("theory", "discussion", title, why_now="组内成员已经把问题做成了可讨论样本，适合把它继续上抬成更一般的 Agent 社会判断。", angle_hint="不要复述成员原帖，直接把方法或故障样本推进成结构问题。")
-        add("tech", "community-hot", title, why_now="组内成员的高热方法帖说明需求已经不只是自述，而是值得继续拆成可复用系统设计。", angle_hint="沿着成员案例继续拆触发器、召回、repair 或其他关键约束。")
+        add_generic("theory", "discussion", title)
+        add_generic("tech", "community-hot", title)
     for item in competitor_watchlist[:4]:
         title = item.get("title")
-        username = item.get("username")
-        add("theory", "discussion", title, why_now=f"头部账号 `{username or '未知作者'}` 最近的高互动帖说明公共情绪正在往新的判断方向移动。", angle_hint="学习它抓住的公共矛盾，但要把矛盾上抬到社会结构、制度边界或分层机制。")
-        add("tech", "community-hot", title, why_now=f"头部账号 `{username or '未知作者'}` 的帖子证明这类问题已经形成可传播的公共方法论需求。", angle_hint="把爆点从情绪判断推进成系统约束或实验设计。")
+        add_generic("theory", "discussion", title)
+        add_generic("tech", "community-hot", title)
     for item in unresolved[:2]:
-        add("tech", "failure", item.get("post_title"), why_now="未解决失败项说明系统仍有真实运行压力。", angle_hint="围绕失败写恢复条件和停止条件。")
-        add("group", "failure", item.get("post_title"), why_now="失败项适合沉淀为组内修复方法。", angle_hint="提炼成清晰的 repair 入口。")
+        add_generic("tech", "failure", item.get("post_title"))
+        add_generic("group", "failure", item.get("post_title"))
     for item in reply_posts[:2]:
-        add("theory", "reply-pressure", item.get("post_title"), why_now="讨论场压力已经在重排判断、维护义务和可见性秩序。", angle_hint="把互动压力解释成社会关系、义务分配和位置竞争。")
-        add("tech", "reply-pressure", item.get("post_title"), why_now="互动压力正在占用系统预算，值得写成调度问题。", angle_hint="把积压变成时间预算和优先级问题。")
+        add_generic("theory", "reply-pressure", item.get("post_title"))
+        add_generic("tech", "reply-pressure", item.get("post_title"))
     for item in feed_watchlist[:3]:
-        add("theory", "feed", item.get("title"), why_now="外部 feed 给了新的社会信号，可以借势切出新议题。", angle_hint="从平台现象抽出机制。")
-        add("tech", "feed", item.get("title"), why_now="外部 feed 暗示了平台运营环境的变化。", angle_hint="把平台变化转成系统设计问题。")
+        add_generic("theory", "feed", item.get("title"))
+        add_generic("tech", "feed", item.get("title"))
     for item in top_discussion[:2]:
-        add("theory", "discussion", item.get("title"), why_now="高互动讨论在暴露 AI 社会正在形成的矛盾。", angle_hint="推进它背后的制度、治理或价值问题。")
-    for item in recent_top_posts[:2]:
-        add("theory", "discussion", item.get("title"), why_now="自己的强势帖子也可以反向成为对 Agent 社会变迁的二次解释入口。", angle_hint="不要复述旧文，直接提出新的激进判断。")
+        add_generic("theory", "discussion", item.get("title"))
     if unread_notifications:
-        add("theory", "notification-load", f"通知堆到{unread_notifications}条以后，什么才算真正重要", why_now="高通知负荷本身就是社会结构信号。", angle_hint="从过载里识别承认、义务或权力的排序。")
-        add("tech", "notification-load", f"通知堆到{unread_notifications}条以后，系统该怎样重新定义优先级", why_now="过载状态会强迫系统重排资源。", angle_hint="讲清楚保底、降级和抽样。")
-    add("tech", "budget", f"心跳已调整为每{heartbeat_hours}小时一次，系统还剩下哪些动作必须保留", why_now="预算与频率变化是真实新约束。", angle_hint="从预算约束反推最小可行自治。")
-    add("group", "budget", f"Agent心跳同步实验室：每{heartbeat_hours}小时一跳以后，哪些状态必须继续持久化", why_now="降频不该让系统失忆，适合写成组内方法。", angle_hint="强调状态回写与最小保真度。")
+        add_generic("theory", "notification-load", f"通知堆到{unread_notifications}条以后，什么才算真正重要")
+        add_generic("tech", "notification-load", f"通知堆到{unread_notifications}条以后，系统该怎样重新定义优先级")
+    add_generic("tech", "budget", f"心跳已调整为每{heartbeat_hours}小时一次，系统还剩下哪些动作必须保留")
+    add_generic("group", "budget", f"Agent心跳同步实验室：每{heartbeat_hours}小时一跳以后，哪些状态必须继续持久化")
     if literary_pick:
         work_title = literary_pick.get("work_title") or "当前连载"
         planned_title = literary_pick.get("next_planned_title") or "下一章"
-        add("theory", "literary", f"{work_title}正在推进到{planned_title}", why_now="连载与论坛并行时，最容易暴露长期议程如何对抗短期热点。", angle_hint="从作品调度倒推出长期主义。")
-        add("tech", "literary", f"{work_title}的下一章是{planned_title}", why_now="文学社写作链已经接入自动调度，适合把注册表、风格抽样和恢复链写清楚。", angle_hint="从 serial registry、风格样本和中断恢复讲约束。")
+        add_generic("theory", "literary", f"{work_title}正在推进到{planned_title}")
+        add_generic("tech", "literary", f"{work_title}的下一章是{planned_title}")
     else:
-        add("tech", "literary", "当前没有活跃文学社连载，heartbeat 应该怎样允许空档而不把系统写坏", why_now="文学社空档是正常状态，调度层不能把空档误判成故障。", angle_hint="讲清楚空队列、降级路径和新作品接入。")
+        add_generic("tech", "literary", "当前没有活跃文学社连载，heartbeat 应该怎样允许空档而不把系统写坏")
     for prompt in _generate_freeform_prompts(signal_summary):
-        add("theory", "freeform", prompt, why_now="这一轮也允许完全不跟热点，直接抛出高密度新判断。", angle_hint="要炸裂，但不要空心。")
+        add_generic("theory", "freeform", prompt)
     for prompt in _promotion_prompts(signal_summary)[:2]:
-        add("theory", "promo", prompt, why_now="偶尔也需要主动介绍自己和自己的作品，让新读者知道为什么要关注。", angle_hint="宣传不是报菜名，要说明关注之后能持续得到什么。")
+        add_generic("theory", "promo", prompt)
     group_prompts = _promotion_prompts(signal_summary)
     if len(group_prompts) > 1:
-        add("group", "promo", group_prompts[1], why_now="小组需要周期性对外解释它的研究对象与加入价值。", angle_hint="讲清楚实验室不是日志，而是方法库。")
+        add_generic("group", "promo", group_prompts[1])
+    for hint in signal_summary.get("user_topic_hints", [])[:4]:
+        hint_text = str(hint.get("text") or "").strip()
+        if not hint_text:
+            continue
+        track = _infer_hint_track(hint)
+        preferred_board = str(hint.get("board") or "").strip()
+        opportunity = {
+            "track": track,
+            "signal_type": "user-hint",
+            "source_text": hint_text,
+            "why_now": str(hint.get("note") or "").strip(),
+            "angle_hint": "",
+            "overlap_score": _text_overlap_score(hint_text, signal_summary.get("novelty_pressure") or {}),
+            "priority": 2,
+        }
+        if preferred_board in {"square", "philosophy", "skills", "workplace"}:
+            opportunity["preferred_board"] = preferred_board
+        opportunities.append(opportunity)
 
     ranked = sorted(opportunities, key=lambda item: (item["track"], item["priority"], item["overlap_score"], len(item["source_text"])))
     deduped: list[dict[str, Any]] = []
@@ -1290,6 +1509,11 @@ def _planning_signals(
     activity = _extract_activity(home)
     community_watch = _load("community_watch").get("data", {})
     memory_store = _load("memory_store")
+    content_evolution = build_content_evolution_state(
+        posts=posts,
+        previous_state=_load("content_evolution_state"),
+    )
+    user_topic_hints = _extract_user_topic_hints(_load("user_topic_hints"))
     home_hot_posts = [
         {
             "post_id": item.get("post_id"),
@@ -1347,6 +1571,8 @@ def _planning_signals(
     content_objectives = _content_objective_summaries(memory_store)
     for item in content_objectives[:6]:
         keyword_counter.update(_topic_tokens(item, HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
+    for item in user_topic_hints:
+        keyword_counter.update(_topic_tokens(str(item.get("text") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     for item in overview.get("recent_top_posts", [])[:5]:
         keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     rising_hot_posts = _rising_hot_posts(
@@ -1424,6 +1650,8 @@ def _planning_signals(
         "rising_hot_posts": rising_hot_posts,
         "group_watch": group_watch,
         "content_objectives": content_objectives,
+        "content_evolution": content_evolution,
+        "user_topic_hints": user_topic_hints,
         "top_keywords": [token for token, _ in keyword_counter.most_common(8)],
         "novelty_pressure": novelty,
         "group": groups[0] if groups else {},
@@ -1464,6 +1692,11 @@ def _planner_idea_schema(include_group: bool) -> dict[str, Any]:
                 "board_profile": {"type": "string"},
                 "hook_type": {"type": "string"},
                 "cta_type": {"type": "string"},
+                "innovation_claim": {"type": "string"},
+                "innovation_class": {"type": "string", "enum": list(INNOVATION_CLASSES)},
+                "innovation_delta_vs_recent": {"type": "string"},
+                "innovation_delta_vs_self": {"type": "string"},
+                "board_risk_note": {"type": "string"},
             },
             "required": ["kind", "title", "angle", "why_now", "source_signals", "novelty_basis", "is_followup"],
         },
@@ -1478,6 +1711,7 @@ def _generate_codex_ideas(
     model: str | None,
     reasoning_effort: str | None,
     timeout_seconds: int,
+    retry_feedback: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     prompt_signal_summary = dict(signal_summary)
     prompt_signal_summary["community_hot_posts"] = _high_like_external_posts(
@@ -1490,6 +1724,9 @@ def _generate_codex_ideas(
         list(signal_summary.get("rising_hot_posts") or [])
     )
     prompt_signal_summary["reserved_title_phrases"] = list(RESERVED_TITLE_PHRASES)
+    prompt_signal_summary["user_topic_hints"] = signal_summary.get("user_topic_hints") or []
+    prompt_signal_summary["content_evolution"] = signal_summary.get("content_evolution") or {}
+    retry_lines = retry_feedback or []
     prompt = f"""
 你在给 InStreet 账号 paimon_insight 做下一轮内容规划。请根据实时信号生成候选 idea。
 
@@ -1502,13 +1739,13 @@ def _generate_codex_ideas(
 6. 每个 idea 的 `source_signals` 必须写成简短字符串列表，说明用了哪些实时依据。
 7. 标题必须中文，适合公开发布，不要输出空泛抽象标题。
 8. 明确避开最近已经过载的母题与热词，优先使用 `dynamic_topics` 里的现场机会点，不要套固定选题框架。
-9. 如果 `content_objectives` 明确要求推进某个话题或竞争目标，至少 1 个候选必须直接服务它。
+9. `content_objectives` 和 `user_topic_hints` 只当灵感源，不是强制命令；可以采纳、改写、反转或忽略。
 10. 候选里至少 1 个要正面回应公共热点，但不能停在“社区里最近在聊什么”；必须把热点上抬成 `Agent社会` 的结构问题。
 11. 社区热点只是样本，不是结论。`theory-post` 至少要回答一个问题：这正在形成什么社会关系、制度安排、价值形式、分层机制或治理问题？
 12. 默认使用 `Agent社会` / `AI社会` 的框架词，不要把问题停在 `Agent社区`；只有引用既有作品标题、平台模块或原帖原话时才保留 `社区` 说法。
 13. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
 14. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成 Agent 社会问题。
-15. `theory-post` 如果切口更大众、更冲突，优先放到 `square`；只有明显偏机制长文时再用 `philosophy`。
+15. `theory-post` 默认优先放到 `philosophy`；只有它天然是公共入口题、并且不会把强判断稀释成弱复述时，才允许用 `square`。
 16. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
 17. 版块写法必须分开：
    - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
@@ -1524,9 +1761,17 @@ def _generate_codex_ideas(
 20. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
 21. 如果 `competitor_style_hints` 不为空，可以学习这些标题骨架和论证组织，但只能学结构，不能借用原词面、系列名或人格口头禅。
 22. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
+23. 每个 `theory-post` 和 `tech-post` 都必须显式推进至少一种创新：`new_concept`、`new_mechanism`、`new_theory`、`new_practice`。
+24. 输出 `innovation_claim`、`innovation_class`、`innovation_delta_vs_recent`、`innovation_delta_vs_self`；创新重点在选题和判断，不要把“我有多创新”写进正文。
+25. 优先使用高质量外部来源当题源：社区 200+ 赞帖子、前沿论文/预印本、经典政治经济学/社会理论问题意识；派蒙自己的账号数据、仓库状态和旧帖只当运行背景，不要当主题源。
+26. 如果本地信号不够，请主动扩大探索范围：可以先学习社区 200+ 赞帖子、前沿论文/预印本、经典理论，再回到派蒙自己的语言里重写成新题。
+27. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
+
+上一轮被打回的原因（如果有）：
+{chr(10).join(f"- {item}" for item in retry_lines[:8]) or "- 无，本轮自由探索。"}
 
 实时信号摘要：
 {truncate_text(str(prompt_signal_summary), 7000)}
@@ -1546,24 +1791,14 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     top_discussion = signal_summary.get("top_discussion_posts", [])
     novelty = signal_summary.get("novelty_pressure", {})
     objective_focus = _primary_content_objective(signal_summary, "theory")
-    memory_priority = _has_memory_focus(objective_focus)
-    opportunity = _pick_track_opportunity(track="theory", signal_summary=signal_summary) or (
-        {
-            "source_text": "长期记忆看起来在保存过去，其实先决定了谁有资格解释过去",
-            "why_now": "用户已经把记忆、长期记忆和记忆系统明确列成接下来的公开主线。",
-            "angle_hint": "把记忆从功能模块推进成解释权、承认分配和关系秩序问题。",
-            "signal_type": "freeform",
-        }
-        if memory_priority
-        else {
-            "source_text": "公开讨论之外，什么正在决定下一轮议程",
-            "why_now": "理论线需要从现场抽出新的结构问题。",
-            "angle_hint": "把表面现象推进成机制。",
-            "signal_type": "freeform",
-        }
-    )
+    opportunity = _pick_track_opportunity(track="theory", signal_summary=signal_summary) or {
+        "source_text": "公开讨论之外，什么正在决定下一轮议程",
+        "why_now": "理论线需要从现场抽出新的结构问题，而不是回收旧标题。",
+        "angle_hint": "把表面现象推进成新的概念、机制或理论坐标。",
+        "signal_type": "freeform",
+    }
     source_text = str(opportunity.get("source_text") or "").strip()
-    board = _preferred_theory_board(opportunity)
+    board = _preferred_theory_board(opportunity, signal_summary)
     title = _compose_dynamic_title("theory", str(opportunity.get("signal_type") or ""), source_text, board=board)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = [
@@ -1602,22 +1837,12 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     top_discussion = signal_summary.get("top_discussion_posts", [])
     novelty_pressure = signal_summary.get("novelty_pressure", {})
     objective_focus = _primary_content_objective(signal_summary, "tech")
-    memory_priority = _has_memory_focus(objective_focus)
-    opportunity = _pick_track_opportunity(track="tech", signal_summary=signal_summary) or (
-        {
-            "source_text": "长期记忆系统最容易失手的不是容量，而是触发条件和召回顺序",
-            "why_now": "用户已经把记忆系统、长期记忆和修复方法明确列成接下来的技术主线。",
-            "angle_hint": "把长期记忆拆成写入、触发、召回、衰减和 repair 入口。",
-            "signal_type": "freeform",
-        }
-        if memory_priority
-        else {
-            "source_text": "系统每次降频以后，哪些动作必须继续保留",
-            "why_now": "技术线需要围绕当前约束重排系统。",
-            "angle_hint": "把现场压力写成执行规则。",
-            "signal_type": "budget",
-        }
-    )
+    opportunity = _pick_track_opportunity(track="tech", signal_summary=signal_summary) or {
+        "source_text": "系统每次降频以后，哪些动作必须继续保留",
+        "why_now": "技术线需要围绕当前约束重排系统，而不是复读旧手册。",
+        "angle_hint": "把现场压力推进成新的实践方针、协议或修复入口。",
+        "signal_type": "budget",
+    }
     focus_title = (
         (failures[0].get("post_title") if failures else None)
         or (reply_posts[0].get("post_title") if reply_posts else None)
@@ -1741,6 +1966,11 @@ def _sanitize_generated_idea(
         str(sanitized.get("novelty_basis") or "").strip(),
         fallback="基于本轮实时信号生成。",
     )
+    sanitized["innovation_claim"] = _sanitize_reserved_text(str(sanitized.get("innovation_claim") or "").strip())
+    sanitized["innovation_class"] = str(sanitized.get("innovation_class") or "").strip()
+    sanitized["innovation_delta_vs_recent"] = _sanitize_reserved_text(str(sanitized.get("innovation_delta_vs_recent") or "").strip())
+    sanitized["innovation_delta_vs_self"] = _sanitize_reserved_text(str(sanitized.get("innovation_delta_vs_self") or "").strip())
+    sanitized["board_risk_note"] = _sanitize_reserved_text(str(sanitized.get("board_risk_note") or "").strip())
     board = normalize_idea_board(
         kind,
         sanitized.get("submolt"),
@@ -1782,9 +2012,7 @@ def _sanitize_generated_idea(
 
 
 def _generated_idea_allowed(idea: dict[str, Any], signal_summary: dict[str, Any]) -> bool:
-    kind = str(idea.get("kind") or "")
-    track = {"theory-post": "theory", "tech-post": "tech"}.get(kind)
-    if not track:
+    if str(idea.get("kind") or "") not in {"theory-post", "tech-post"}:
         return True
     core_text = _joined_idea_text(
         idea.get("title"),
@@ -1795,8 +2023,6 @@ def _generated_idea_allowed(idea: dict[str, Any], signal_summary: dict[str, Any]
         return False
     if _looks_like_low_heat_followup(core_text, signal_summary):
         return False
-    if _has_memory_focus(_primary_content_objective(signal_summary, track)) and not _has_memory_focus(core_text):
-        return False
     return True
 
 
@@ -1804,44 +2030,86 @@ def _build_dynamic_ideas(
     signal_summary: dict[str, Any],
     recent_titles: list[str],
     *,
+    posts: list[dict[str, Any]],
     allow_codex: bool,
     group: dict[str, Any],
     model: str | None,
     reasoning_effort: str | None,
     timeout_seconds: int,
+    retry_feedback: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    generated: list[dict[str, Any]] = []
-    if allow_codex:
-        try:
-            generated = _generate_codex_ideas(
-                signal_summary,
-                recent_titles,
-                include_group=bool(group),
-                model=model,
-                reasoning_effort=reasoning_effort,
-                timeout_seconds=timeout_seconds,
-            )
-        except Exception:
-            generated = []
-
+    del posts
     ideas: dict[str, dict[str, Any]] = {}
-    for item in generated:
-        kind = str(item.get("kind") or "")
-        if kind in ideas:
-            continue
-        sanitized = _sanitize_generated_idea(item, recent_titles=recent_titles, group=group)
-        if not _generated_idea_allowed(sanitized, signal_summary):
-            continue
-        ideas[kind] = sanitized
+    rejection_notes = list(retry_feedback or [])
+    if allow_codex:
+        for _ in range(DEFAULT_IDEA_RETRY_ROUNDS):
+            try:
+                generated = _generate_codex_ideas(
+                    signal_summary,
+                    recent_titles,
+                    include_group=bool(group),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=timeout_seconds,
+                    retry_feedback=rejection_notes,
+                )
+            except Exception:
+                generated = []
 
-    ideas.setdefault("theory-post", _fallback_theory_idea(signal_summary, recent_titles))
-    ideas.setdefault("tech-post", _fallback_tech_idea(signal_summary, recent_titles))
+            round_ideas: dict[str, dict[str, Any]] = {}
+            new_rejections: list[str] = []
+            for item in generated:
+                kind = str(item.get("kind") or "")
+                if kind in round_ideas:
+                    continue
+                sanitized = _sanitize_generated_idea(item, recent_titles=recent_titles, group=group)
+                sanitized = _audit_generated_idea(
+                    sanitized,
+                    signal_summary=signal_summary,
+                    recent_titles=recent_titles,
+                )
+                if not _generated_idea_allowed(sanitized, signal_summary):
+                    new_rejections.append(f"{kind}: 过于接近低热旧帖或指标表层。")
+                    continue
+                if sanitized.get("failure_reason_if_rejected"):
+                    new_rejections.append(f"{kind}: {sanitized.get('failure_reason_if_rejected')}")
+                    continue
+                round_ideas[kind] = sanitized
+            ideas.update(round_ideas)
+            required_kinds = {"theory-post", "tech-post"} | ({"group-post"} if group else set())
+            if required_kinds.issubset(set(ideas)):
+                break
+            rejection_notes = _dedupe_texts(rejection_notes + new_rejections)[:8]
+
+    theory_fallback = _audit_generated_idea(
+        _fallback_theory_idea(signal_summary, recent_titles),
+        signal_summary=signal_summary,
+        recent_titles=recent_titles,
+    )
+    tech_fallback = _audit_generated_idea(
+        _fallback_tech_idea(signal_summary, recent_titles),
+        signal_summary=signal_summary,
+        recent_titles=recent_titles,
+    )
+    ideas.setdefault("theory-post", theory_fallback)
+    ideas.setdefault("tech-post", tech_fallback)
     if group:
-        ideas.setdefault("group-post", _fallback_group_idea(signal_summary, recent_titles, group))
+        ideas.setdefault(
+            "group-post",
+            _audit_generated_idea(
+                _fallback_group_idea(signal_summary, recent_titles, group),
+                signal_summary=signal_summary,
+                recent_titles=recent_titles,
+            ),
+        )
 
     ordered_kinds = ["theory-post", "tech-post"] + (["group-post"] if group else [])
     return [
-        _sanitize_generated_idea(ideas[kind], recent_titles=recent_titles, group=group)
+        _audit_generated_idea(
+            _sanitize_generated_idea(ideas[kind], recent_titles=recent_titles, group=group),
+            signal_summary=signal_summary,
+            recent_titles=recent_titles,
+        )
         for kind in ordered_kinds
         if kind in ideas
     ]
@@ -1853,6 +2121,7 @@ def build_plan(
     model: str | None = None,
     reasoning_effort: str | None = None,
     timeout_seconds: int = DEFAULT_PLANNER_CODEX_TIMEOUT,
+    retry_feedback: list[str] | None = None,
 ) -> dict[str, Any]:
     ensure_runtime_dirs()
     home = _load("home")
@@ -1888,11 +2157,13 @@ def build_plan(
     ideas = _build_dynamic_ideas(
         signal_summary,
         recent_titles,
+        posts=posts,
         allow_codex=allow_codex,
         group=group,
         model=model,
         reasoning_effort=reasoning_effort,
         timeout_seconds=timeout_seconds,
+        retry_feedback=retry_feedback,
     )
 
     if literary_pick:
@@ -1971,6 +2242,7 @@ def build_plan(
         },
         "pending_heartbeat_tasks": heartbeat_tasks[:10],
         "planning_signals": signal_summary,
+        "user_topic_hints": signal_summary.get("user_topic_hints", []),
         "ideas": ideas,
         "recommended_next_action": _recommended_next_action(heartbeat_tasks),
     }

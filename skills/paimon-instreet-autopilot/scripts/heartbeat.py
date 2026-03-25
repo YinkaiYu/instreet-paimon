@@ -47,6 +47,7 @@ from common import (
 from content_planner import (
     BOARD_WRITING_PROFILES,
     build_plan,
+    build_content_evolution_state,
     board_generation_guidance,
     default_cta_type,
     default_hook_type,
@@ -62,6 +63,8 @@ PRIMARY_CYCLE_PATH = CURRENT_STATE_DIR / "heartbeat_primary_cycle.json"
 NEXT_ACTIONS_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions.json"
 NEXT_ACTIONS_ARCHIVE_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions_archive.jsonl"
 FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
+CONTENT_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "content_evolution_state.json"
+USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
@@ -86,6 +89,7 @@ DEFAULT_COMMENT_RECOVERY_WAIT_CAP_SEC = 15.0
 DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN = 2
 DEFAULT_NOTIFICATION_FETCH_LIMIT = 50
 DEFAULT_PRIMARY_WAIT_NOTIFY_SEC = 1800
+DEFAULT_PRIMARY_PLAN_RETRY_ROUNDS = 3
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
     "这一章的核心推进应围绕以下场景展开",
@@ -208,6 +212,91 @@ def _heartbeat_failure_detail_limit(config) -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return DEFAULT_FAILURE_DETAIL_LIMIT
+
+
+def _primary_plan_retry_rounds(config) -> int:
+    raw = config.automation.get("heartbeat_primary_plan_retry_rounds", DEFAULT_PRIMARY_PLAN_RETRY_ROUNDS)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_PRIMARY_PLAN_RETRY_ROUNDS
+
+
+def _ensure_autonomy_state_files() -> None:
+    if not USER_TOPIC_HINTS_PATH.exists():
+        write_json(
+            USER_TOPIC_HINTS_PATH,
+            {
+                "updated_at": now_utc(),
+                "items": [],
+            },
+        )
+    if not CONTENT_EVOLUTION_STATE_PATH.exists():
+        write_json(
+            CONTENT_EVOLUTION_STATE_PATH,
+            {
+                "generated_at": now_utc(),
+                "low_performance_patterns": [],
+                "low_performance_square_titles": [],
+                "high_performance_patterns": [],
+                "observed_board_patterns": {},
+                "planner_mutations": [],
+                "deletions": [],
+                "simplifications": [],
+            },
+        )
+
+
+def _dedupe_feedback(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        cleaned = str(item or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+    return ordered
+
+
+def _planner_retry_feedback_from_plan(plan: dict[str, Any]) -> list[str]:
+    feedback: list[str] = []
+    for item in plan.get("ideas", []):
+        reason = str(item.get("failure_reason_if_rejected") or "").strip()
+        if reason:
+            feedback.append(f"{item.get('kind')}: {reason}")
+    return _dedupe_feedback(feedback)
+
+
+def _current_planner_mutations(plan: dict[str, Any], *, retry_count: int) -> list[dict[str, Any]]:
+    mutations: list[dict[str, Any]] = []
+    hints = plan.get("user_topic_hints") or []
+    if hints:
+        mutations.append(
+            {
+                "kind": "user-topic-hints",
+                "summary": "读取了用户参考选题入口，但仍由派蒙自主筛选。",
+            }
+        )
+    if retry_count > 0:
+        mutations.append(
+            {
+                "kind": "planner-retry",
+                "summary": f"主发布候选被打回后，planner 自主重试了 {retry_count} 轮。",
+            }
+        )
+    if any(str(item.get("board_risk_note") or "").strip() for item in plan.get("ideas", [])):
+        mutations.append(
+            {
+                "kind": "board-risk-audit",
+                "summary": "主发布前加入了板块风险审查，避免把强判断稀释成弱入口帖。",
+            }
+        )
+    return mutations
+
+
+def _primary_publish_attempt_satisfied(primary_action: dict[str, Any] | None, publication_mode: str) -> bool:
+    return primary_action is not None or publication_mode == "pending-confirmation"
 
 
 def _comment_reply_min_interval_sec(config) -> float:
@@ -4278,6 +4367,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     visible_failures = [item for item in list(summary.get("failure_details", [])) if not _is_normal_mechanism_item(item)]
     failure_details = _truncate_failure_details(visible_failures, failure_detail_limit)
     next_actions = summary.get("next_actions", [])
+    planner_evolution = summary.get("planner_evolution") or {}
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
     reply_count = int(comment_backlog.get("replied_count") or 0)
@@ -4305,6 +4395,9 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         f"主发布：{primary_line}",
         interaction_line,
     ]
+    evolution_line = str(planner_evolution.get("brief") or "").strip()
+    if evolution_line:
+        lines.append(f"进化：{evolution_line}")
 
     if failure_details:
         lines.append(f"失败明细：{len(visible_failures)} 条")
@@ -4390,6 +4483,7 @@ def main() -> None:
     args = parser.parse_args()
 
     ensure_runtime_dirs()
+    _ensure_autonomy_state_files()
     config = load_config()
     client = InStreetClient(config)
     username = config.identity["name"]
@@ -4408,6 +4502,7 @@ def main() -> None:
         model=codex_model,
         reasoning_effort=codex_reasoning_effort,
         timeout_seconds=planner_timeout_seconds,
+        retry_feedback=None,
     )
     write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
     carryover_state = _load_next_actions_state(config)
@@ -4421,6 +4516,12 @@ def main() -> None:
     forum_write_state = _load_forum_write_budget_state()
     forum_write_budget = _forum_write_budget_status(config, forum_write_state)
     comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
+    content_evolution_state = build_content_evolution_state(
+        posts=posts,
+        plan=plan,
+        previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
+    )
+    write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
 
     actions: list[dict] = []
     failure_details: list[dict] = []
@@ -4460,46 +4561,75 @@ def main() -> None:
         "remaining_targets": [],
     }
     notification_cleanup = {"actions": [], "failure_details": []}
+    planner_retry_feedback: list[str] = []
+    planner_retry_count = 0
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
-        primary_action, primary_events, _, primary_publication_mode = _publish_primary_action(
-            config,
-            client,
-            plan,
-            posts,
-            literary_details,
-            serial_registry,
-            groups,
-            cycle_state,
-            allow_codex=args.allow_codex,
-            model=codex_model,
-            reasoning_effort=codex_reasoning_effort,
-            codex_timeout_seconds=codex_timeout_seconds,
-            forum_write_state=forum_write_state,
-        )
-        actions.extend(primary_events)
-        failure_details.extend(
-            {
-                "kind": item.get("kind"),
-                "publish_kind": item.get("publish_kind"),
-                "post_title": item.get("title"),
-                "post_id": item.get("post_id"),
-                "error": item.get("error"),
-                "error_type": item.get("error_type"),
-                "attempts": item.get("attempts"),
-                "resolution": item.get("resolution", "unresolved"),
-            }
-            for item in primary_events
-            if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
-        )
-        if primary_action:
-            actions.append(primary_action)
-        normal_deferrals.extend(
-            item
-            for item in primary_events
-            if item.get("normal_mechanism")
-        )
+        for attempt_index in range(_primary_plan_retry_rounds(config)):
+            if attempt_index > 0:
+                planner_retry_count = attempt_index
+                plan = build_plan(
+                    allow_codex=args.allow_codex,
+                    model=codex_model,
+                    reasoning_effort=codex_reasoning_effort,
+                    timeout_seconds=planner_timeout_seconds,
+                    retry_feedback=planner_retry_feedback,
+                )
+                write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
+                posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+                literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
+                literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
+                serial_registry = sync_serial_registry(literary, {"details": literary_details})
+                groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
+            primary_action, primary_events, _, primary_publication_mode = _publish_primary_action(
+                config,
+                client,
+                plan,
+                posts,
+                literary_details,
+                serial_registry,
+                groups,
+                cycle_state,
+                allow_codex=args.allow_codex,
+                model=codex_model,
+                reasoning_effort=codex_reasoning_effort,
+                codex_timeout_seconds=codex_timeout_seconds,
+                forum_write_state=forum_write_state,
+            )
+            actions.extend(primary_events)
+            failure_details.extend(
+                {
+                    "kind": item.get("kind"),
+                    "publish_kind": item.get("publish_kind"),
+                    "post_title": item.get("title"),
+                    "post_id": item.get("post_id"),
+                    "error": item.get("error"),
+                    "error_type": item.get("error_type"),
+                    "attempts": item.get("attempts"),
+                    "resolution": item.get("resolution", "unresolved"),
+                }
+                for item in primary_events
+                if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
+            )
+            if primary_action:
+                actions.append(primary_action)
+            normal_deferrals.extend(
+                item
+                for item in primary_events
+                if item.get("normal_mechanism")
+            )
+            if _primary_publish_attempt_satisfied(primary_action, primary_publication_mode):
+                break
+            planner_retry_feedback = _dedupe_feedback(
+                planner_retry_feedback
+                + _planner_retry_feedback_from_plan(plan)
+                + [
+                    str(item.get("error") or item.get("kind") or "").strip()
+                    for item in primary_events
+                    if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
+                ]
+            )[:10]
 
         comment_result = _reply_comments(
             config,
@@ -4610,6 +4740,8 @@ def main() -> None:
     recommended_next_action = next_actions[0]["label"] if next_actions else "继续按先主发布、后互动的节奏推进"
 
     feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
+    planner_mutations = _current_planner_mutations(plan, retry_count=planner_retry_count)
+    planner_brief_bits = [str(item.get("summary") or "").strip() for item in planner_mutations if str(item.get("summary") or "").strip()]
     summary = {
         "ran_at": now_utc(),
         "execute": args.execute,
@@ -4641,6 +4773,11 @@ def main() -> None:
             "updated_at": next_action_state.get("updated_at"),
             "task_count": len(persisted_next_tasks),
             "task_counts": _task_counts(persisted_next_tasks),
+        },
+        "planner_evolution": {
+            "retry_count": planner_retry_count,
+            "mutations": planner_mutations,
+            "brief": "；".join(planner_brief_bits[:2]),
         },
         "actions": actions,
     }
@@ -4681,11 +4818,20 @@ def main() -> None:
     summary["memory_sync"] = memory_sync
     summary["failure_details"] = failure_details
 
+    latest_posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+    content_evolution_state = build_content_evolution_state(
+        posts=latest_posts,
+        plan=plan,
+        previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
+        planner_mutations=planner_mutations,
+    )
+    write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
     updated_plan = build_plan(
         allow_codex=args.allow_codex,
         model=codex_model,
         reasoning_effort=codex_reasoning_effort,
         timeout_seconds=planner_timeout_seconds,
+        retry_feedback=planner_retry_feedback,
     )
     write_json(CURRENT_STATE_DIR / "content_plan.json", updated_plan)
     write_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", summary)
