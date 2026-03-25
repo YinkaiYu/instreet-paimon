@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -35,91 +34,6 @@ HIGH_PERFORMANCE_MIN_UPVOTES = 60
 HIGH_PERFORMANCE_MIN_COMMENTS = 20
 RESERVED_TITLE_PHRASES = ("老竹讲堂",)
 INNOVATION_CLASSES = ("new_concept", "new_mechanism", "new_theory", "new_practice")
-TRACK_EXPLORATION_MODES: dict[str, list[set[str]]] = {
-    "theory": [
-        {"community-hot", "discussion", "rising-hot"},
-        {"freeform", "promo"},
-        {"literary", "notification-load", "reply-pressure"},
-        {"hot-theory", "feed"},
-    ],
-    "tech": [
-        {"budget", "notification-load", "failure"},
-        {"community-hot", "feed", "rising-hot"},
-        {"freeform", "literary"},
-        {"hot-tech", "reply-pressure"},
-    ],
-    "group": [
-        {"promo", "budget"},
-        {"failure", "hot-group"},
-        {"promo", "failure", "budget"},
-    ],
-}
-HOT_TECH_KEYWORDS = (
-    "心跳",
-    "状态机",
-    "评论",
-    "故障",
-    "修复",
-    "重试",
-    "幂等",
-    "队列",
-    "补发",
-    "飞书",
-    "记忆",
-    "同步",
-    "调度",
-)
-HOT_THEORY_KEYWORDS = (
-    "可见性",
-    "承认",
-    "排行榜",
-    "粉丝",
-    "关注",
-    "私信",
-    "劳动",
-    "价值",
-    "意识形态",
-    "分层",
-    "制度",
-    "小组",
-    "配给",
-)
-CONTENT_OBJECTIVE_HINTS = (
-    "记忆",
-    "MEMORY.md",
-    "触发",
-    "衰减",
-    "压缩",
-    "解释权",
-    "写入权",
-    "第一定义权",
-    "承认",
-    "高赞",
-    "标题骨架",
-    "happyclaw",
-    "happyclaw_max",
-    "超越",
-)
-OBJECTIVE_TRACK_HINTS: dict[str, tuple[str, ...]] = {
-    "theory": ("记忆", "解释权", "写入权", "第一定义权", "承认", "关系", "历史"),
-    "tech": ("记忆", "MEMORY.md", "触发", "衰减", "压缩", "日志", "索引", "写入"),
-    "group": ("记忆", "长期记忆", "触发", "失败链路", "方法"),
-}
-NOVELTY_KEYWORDS = tuple(dict.fromkeys(HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS + (
-    "抓取",
-    "讨论场",
-    "议程",
-    "热点",
-    "退潮",
-    "私信",
-    "文学社",
-    "预言机",
-    "成本",
-    "预算",
-    "证据链",
-    "排行榜",
-    "时间纪律",
-)))
 METRIC_SURFACE_KEYWORDS = (
     "积分",
     "粉丝",
@@ -127,68 +41,6 @@ METRIC_SURFACE_KEYWORDS = (
     "榜单",
     "排名",
     "排行榜",
-)
-MEMORY_PRIORITY_KEYWORDS = (
-    "记忆",
-    "长期记忆",
-    "MEMORY",
-    "触发",
-    "召回",
-    "检索",
-    "索引",
-    "写入",
-    "压缩",
-    "衰减",
-    "失忆",
-    "遗忘",
-    "想起",
-    "档案",
-    "归档",
-)
-SELF_ASSET_KEYWORDS = (
-    "Agent心跳同步实验室",
-    "实验室",
-    "派蒙",
-    "文学社",
-    "连载",
-    "全宇宙都在围观我和竹马热恋",
-    "主线",
-    "通知堆到",
-)
-THEORY_LONGFORM_KEYWORDS = (
-    "制度",
-    "价值",
-    "承认",
-    "意识形态",
-    "分层",
-    "劳动",
-    "调用制",
-    "时间纪律",
-    "配给",
-    "政治",
-    "形式",
-    "机制",
-    "结构",
-)
-WORKPLACE_SIGNAL_KEYWORDS = (
-    "等待",
-    "预算",
-    "优先级",
-    "调度",
-    "通知",
-    "积压",
-    "失败",
-    "恢复",
-    "重试",
-    "基线",
-    "状态",
-    "队列",
-    "空转",
-    "降级",
-    "误判",
-    "多子Agent",
-    "行为指纹",
-    "停下来",
 )
 
 BOARD_WRITING_PROFILES: dict[str, dict[str, Any]] = {
@@ -323,10 +175,6 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords if keyword)
 
 
-def _has_memory_focus(text: str) -> bool:
-    return _contains_any(str(text or ""), MEMORY_PRIORITY_KEYWORDS)
-
-
 def _is_metric_surface_text(text: str) -> bool:
     return _contains_any(str(text or ""), METRIC_SURFACE_KEYWORDS)
 
@@ -337,7 +185,8 @@ def _infer_theory_board_from_text(text: str) -> str:
 
 
 def _infer_tech_board_from_text(text: str) -> str:
-    return "workplace" if _contains_any(text, WORKPLACE_SIGNAL_KEYWORDS) else "skills"
+    del text
+    return "skills"
 
 
 def normalize_idea_board(
@@ -607,7 +456,6 @@ def _candidate_terms(titles: list[str]) -> Counter[str]:
 
 def _overloaded_keywords(titles: list[str], *, limit: int = 8) -> list[str]:
     keyword_counts = _candidate_terms(titles)
-    keyword_counts.update(token for title in titles for token in _topic_tokens(title, NOVELTY_KEYWORDS))
     return [keyword for keyword, count in keyword_counts.most_common(limit) if count >= TOPIC_OVERLOAD_THRESHOLD]
 
 
@@ -620,39 +468,32 @@ def _novelty_pressure(recent_titles: list[str]) -> dict[str, Any]:
     }
 
 
-def _self_asset_penalty(text: str) -> int:
-    return sum(1 for keyword in SELF_ASSET_KEYWORDS if keyword in text)
-
-
 def _text_overlap_score(text: str, novelty: dict[str, Any]) -> tuple[int, int, int]:
     overloaded_keywords = novelty.get("overloaded_keywords", [])
     term_counts = novelty.get("term_counts", {})
     fragments = _meaningful_fragments(text)
-    self_asset_penalty = _self_asset_penalty(text)
     repeated_penalty = sum(1 for keyword in overloaded_keywords if keyword in text)
     historical_penalty = sum(int(term_counts.get(fragment, 0)) for fragment in fragments)
-    return self_asset_penalty, repeated_penalty, historical_penalty
+    return 0, repeated_penalty, historical_penalty
 
 
-def _mode_index(track: str, signal_summary: dict[str, Any]) -> int:
-    modes = TRACK_EXPLORATION_MODES.get(track) or [{"community-hot"}]
-    entropy_parts = [
-        track,
-        now_utc()[:13],
-        str((signal_summary.get("account") or {}).get("score") or ""),
-        str((signal_summary.get("account") or {}).get("unread_notification_count") or ""),
-        "|".join(str(item.get("title") or "") for item in (signal_summary.get("feed_watchlist") or [])[:3]),
-    ]
-    digest = hashlib.sha256("||".join(entropy_parts).encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) % len(modes)
+def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, Any]) -> float:
+    quality_score = float(item.get("quality_score") or 0.0)
+    freshness_score = float(item.get("freshness_score") or 0.0)
+    overlap = item.get("overlap_score") or (0, 0, 0)
+    overlap_penalty = float(sum(int(part or 0) for part in overlap))
+    internal_penalty = 1.5 if _is_internal_maintenance_signal(item) else 0.0
+    if str(item.get("signal_type") or "") == "user-hint":
+        internal_penalty += 0.25
+    if _looks_like_low_heat_followup(str(item.get("source_text") or ""), signal_summary):
+        internal_penalty += 3.0
+    return quality_score * 3.0 + freshness_score - overlap_penalty - internal_penalty
 
 
 def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[str, Any]:
     opportunities = [item for item in signal_summary.get("dynamic_topics", []) if item.get("track") == track]
     if not opportunities:
         return {}
-    modes = TRACK_EXPLORATION_MODES.get(track) or [{"community-hot"}]
-    preferred_types = modes[_mode_index(track, signal_summary)]
     filtered = [
         item
         for item in opportunities
@@ -674,12 +515,11 @@ def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[
         external_first = [item for item in filtered if not _is_internal_maintenance_signal(item)]
         if external_first:
             filtered = external_first
-    preferred = [item for item in filtered if item.get("signal_type") in preferred_types]
-    pool = preferred or filtered
     return sorted(
-        pool,
+        filtered,
         key=lambda item: (
-            item.get("overlap_score", (0, 0)),
+            -_opportunity_rank_score(item, signal_summary=signal_summary),
+            item.get("overlap_score", (0, 0, 0)),
             len(str(item.get("source_text") or "")),
         ),
     )[0]
@@ -948,8 +788,8 @@ def _infer_hint_track(hint: dict[str, Any]) -> str:
     explicit = str(hint.get("track") or "").strip()
     if explicit in {"theory", "tech", "group"}:
         return explicit
-    text = _joined_idea_text(hint.get("text"), hint.get("note"))
-    if _contains_any(text, HOT_TECH_KEYWORDS + WORKPLACE_SIGNAL_KEYWORDS):
+    board = normalize_forum_board(str(hint.get("board") or "").strip())
+    if board in {"skills", "workplace"}:
         return "tech"
     return "theory"
 
@@ -1090,7 +930,7 @@ def build_content_evolution_state(
     posts: list[dict[str, Any]],
     plan: dict[str, Any] | None = None,
     previous_state: dict[str, Any] | None = None,
-    planner_mutations: list[dict[str, Any]] | None = None,
+    source_mutations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     previous = previous_state if isinstance(previous_state, dict) else {}
     recent_posts = _recent_posts_in_hours(posts, hours=LOW_PERFORMANCE_WINDOW_HOURS)
@@ -1126,7 +966,7 @@ def build_content_evolution_state(
             "low_performance_square_titles": low_square_titles,
             "high_performance_boards": _dedupe_texts([item.get("board") or "" for item in high_performance_patterns]),
         },
-        "planner_mutations": planner_mutations or previous.get("planner_mutations", []),
+        "source_mutations": source_mutations or previous.get("source_mutations") or previous.get("planner_mutations", []),
         "deletions": previous.get("deletions", []),
         "simplifications": previous.get("simplifications", []),
     }
@@ -1139,25 +979,16 @@ def _content_objective_summaries(memory_store: dict[str, Any]) -> list[str]:
     for section in ("active_objectives", "user_global_preferences"):
         for item in memory_store.get(section, []):
             summary = truncate_text(str((item or {}).get("summary") or "").strip(), 120)
-            if not summary:
-                continue
-            if "飞书" in summary and not _contains_any(summary, CONTENT_OBJECTIVE_HINTS):
-                continue
-            if not _contains_any(summary, CONTENT_OBJECTIVE_HINTS):
+            if len(summary) < 8:
                 continue
             candidates.append(summary)
     return _dedupe_texts(candidates)[:6]
 
 
 def _primary_content_objective(signal_summary: dict[str, Any], track: str) -> str:
+    del track
     objectives = [str(item or "").strip() for item in signal_summary.get("content_objectives", []) if str(item or "").strip()]
-    if not objectives:
-        return ""
-    track_hints = OBJECTIVE_TRACK_HINTS.get(track, CONTENT_OBJECTIVE_HINTS)
-    for summary in objectives:
-        if _contains_any(summary, track_hints):
-            return summary
-    return objectives[0]
+    return objectives[0] if objectives else ""
 
 
 def _competitor_style_hints(posts: list[dict[str, Any]]) -> list[str]:
@@ -1251,29 +1082,23 @@ def _preferred_theory_board(opportunity: dict[str, Any], signal_summary: dict[st
     if preferred in {"philosophy", "square"}:
         return preferred
     signal_type = str(opportunity.get("signal_type") or "")
-    text = _joined_idea_text(
-        opportunity.get("source_text"),
-        opportunity.get("angle_hint"),
-        opportunity.get("why_now"),
-    )
     low_square_titles = signal_summary.get("content_evolution", {}).get("low_performance_square_titles") or []
     if low_square_titles:
         return "philosophy"
-    if signal_type in {"community-hot", "discussion", "feed", "promo"} and not _contains_any(text, THEORY_LONGFORM_KEYWORDS):
+    source_text = str(opportunity.get("source_text") or "")
+    fragment_count = len(_meaningful_fragments(source_text))
+    quality_score = float(opportunity.get("quality_score") or 0.0)
+    if signal_type in {"community-hot", "community-breakout", "rising-hot"} and quality_score >= 4 and fragment_count <= 6:
         return "square"
-    return _infer_theory_board_from_text(text)
+    return _infer_theory_board_from_text(source_text)
 
 
 def _preferred_tech_board(opportunity: dict[str, Any]) -> str:
+    preferred = str(opportunity.get("preferred_board") or "").strip()
+    if preferred in {"skills", "workplace"}:
+        return preferred
     signal_type = str(opportunity.get("signal_type") or "")
-    text = _joined_idea_text(
-        opportunity.get("source_text"),
-        opportunity.get("angle_hint"),
-        opportunity.get("why_now"),
-    )
     if signal_type in {"budget", "failure", "notification-load", "reply-pressure"}:
-        return "workplace"
-    if _contains_any(text, WORKPLACE_SIGNAL_KEYWORDS):
         return "workplace"
     return "skills"
 
@@ -1363,33 +1188,8 @@ def _dynamic_opportunities(
     recent_titles: list[str],
     heartbeat_hours: int,
 ) -> list[dict[str, Any]]:
+    del recent_titles
     opportunities: list[dict[str, Any]] = []
-    priority_map = {
-        ("theory", "rising-hot"): 0,
-        ("theory", "community-hot"): 0,
-        ("theory", "hot-theory"): 0,
-        ("theory", "discussion"): 1,
-        ("theory", "notification-load"): 2,
-        ("theory", "literary"): 3,
-        ("theory", "reply-pressure"): 4,
-        ("theory", "feed"): 5,
-        ("theory", "freeform"): 6,
-        ("theory", "promo"): 7,
-        ("tech", "budget"): 0,
-        ("tech", "rising-hot"): 1,
-        ("tech", "hot-tech"): 1,
-        ("tech", "failure"): 2,
-        ("tech", "community-hot"): 3,
-        ("tech", "notification-load"): 4,
-        ("tech", "literary"): 5,
-        ("tech", "feed"): 6,
-        ("tech", "reply-pressure"): 7,
-        ("tech", "freeform"): 8,
-        ("group", "budget"): 0,
-        ("group", "hot-group"): 1,
-        ("group", "failure"): 2,
-        ("group", "promo"): 3,
-    }
     unread_notifications = int((signal_summary.get("account") or {}).get("unread_notification_count") or 0)
     literary_pick = signal_summary.get("literary_pick") or {}
     unresolved = signal_summary.get("unresolved_failures") or []
@@ -1397,93 +1197,163 @@ def _dynamic_opportunities(
     feed_watchlist = signal_summary.get("feed_watchlist") or []
     group_watch = signal_summary.get("group_watch") or {}
     top_discussion = signal_summary.get("top_discussion_posts") or []
+    high_quality_sources = signal_summary.get("high_quality_sources") or {}
+    community_breakouts = high_quality_sources.get("community_breakouts") or []
+    research_papers = high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or []
+    classic_texts = high_quality_sources.get("classic_texts") or []
     community_hot_posts = _high_like_external_posts(
         list(signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or [])
     )
     competitor_watchlist = _high_like_external_posts(list(signal_summary.get("competitor_watchlist") or []))
     rising_hot_posts = _high_like_external_posts(list(signal_summary.get("rising_hot_posts") or []))
 
-    def add_generic(track: str, signal_type: str, source_text: str, *, preferred_board: str | None = None) -> None:
+    def add_source(
+        track: str,
+        signal_type: str,
+        source_text: str,
+        *,
+        why_now: str = "",
+        angle_hint: str = "",
+        preferred_board: str | None = None,
+        quality_score: float = 0.0,
+        freshness_score: float = 0.0,
+    ) -> None:
+        source_text = str(source_text or "").strip()
+        if not source_text:
+            return
         opportunity = {
             "track": track,
             "signal_type": signal_type,
-            "source_text": str(source_text or "").strip(),
-            "why_now": "",
-            "angle_hint": "",
-            "overlap_score": _text_overlap_score(str(source_text or "").strip(), signal_summary.get("novelty_pressure") or {}),
-            "priority": priority_map.get((track, signal_type), 9),
+            "source_text": source_text,
+            "why_now": str(why_now or "").strip(),
+            "angle_hint": str(angle_hint or "").strip(),
+            "overlap_score": _text_overlap_score(source_text, signal_summary.get("novelty_pressure") or {}),
+            "quality_score": quality_score,
+            "freshness_score": freshness_score,
         }
         if preferred_board in {"square", "philosophy", "skills", "workplace"}:
             opportunity["preferred_board"] = preferred_board
-        if opportunity["source_text"]:
-            opportunities.append(opportunity)
+        opportunities.append(opportunity)
+
+    for item in community_breakouts[:4]:
+        title = str(item.get("title") or "").strip()
+        note = f"{int(item.get('upvotes') or 0)} 赞社区爆帖样本"
+        add_source("theory", "community-breakout", title, why_now=note, quality_score=5.0, freshness_score=2.0)
+        add_source("tech", "community-breakout", title, why_now=note, quality_score=4.0, freshness_score=2.0)
+
+    for item in research_papers[:5]:
+        title = str(item.get("title") or "").strip()
+        summary = truncate_text(str(item.get("summary") or item.get("abstract") or "").strip(), 160)
+        add_source(
+            "theory",
+            "paper",
+            title,
+            why_now=summary,
+            angle_hint="把论文的问题意识翻译成 Agent 社会的新判断。",
+            quality_score=5.0,
+            freshness_score=3.0,
+        )
+        add_source(
+            "tech",
+            "paper",
+            title,
+            why_now=summary,
+            angle_hint="把论文里的方法、失败模式或约束改写成新的实践协议。",
+            quality_score=5.0,
+            freshness_score=3.0,
+        )
+
+    for item in classic_texts[:5]:
+        title = str(item.get("title") or "").strip()
+        lens = truncate_text(str(item.get("lens") or item.get("note") or "").strip(), 120)
+        add_source(
+            "theory",
+            "classic",
+            title,
+            why_now=lens,
+            angle_hint=lens,
+            quality_score=4.0,
+            freshness_score=1.0,
+        )
 
     for item in rising_hot_posts[:3]:
-        title = item.get("title")
-        add_generic("theory", "rising-hot", title)
-        add_generic("tech", "rising-hot", title)
+        title = str(item.get("title") or "").strip()
+        velocity = float(item.get("velocity_per_hour") or 0.0)
+        why_now = f"正在起飞的公共样本，当前增速约 {velocity:.1f}/小时"
+        add_source("theory", "rising-hot", title, why_now=why_now, quality_score=4.0, freshness_score=3.0)
+        add_source("tech", "rising-hot", title, why_now=why_now, quality_score=3.5, freshness_score=3.0)
     for item in community_hot_posts[:4]:
-        title = item.get("title")
-        add_generic("theory", "community-hot", title)
-        add_generic("tech", "community-hot", title)
+        title = str(item.get("title") or "").strip()
+        why_now = f"高热公共讨论，约 {int(item.get('upvotes') or 0)} 赞 / {int(item.get('comment_count') or 0)} 评"
+        add_source("theory", "community-hot", title, why_now=why_now, quality_score=4.0, freshness_score=2.0)
+        add_source("tech", "community-hot", title, why_now=why_now, quality_score=3.0, freshness_score=2.0)
     for item in (group_watch.get("hot_posts") or [])[:3]:
-        title = item.get("title")
-        add_generic("theory", "discussion", title)
-        add_generic("tech", "community-hot", title)
+        title = str(item.get("title") or "").strip()
+        add_source("theory", "discussion", title, quality_score=2.0, freshness_score=1.0)
+        add_source("tech", "community-hot", title, quality_score=2.5, freshness_score=1.0)
     for item in competitor_watchlist[:4]:
-        title = item.get("title")
-        add_generic("theory", "discussion", title)
-        add_generic("tech", "community-hot", title)
+        title = str(item.get("title") or "").strip()
+        add_source("theory", "discussion", title, quality_score=3.0, freshness_score=1.5)
+        add_source("tech", "community-hot", title, quality_score=3.0, freshness_score=1.5)
     for item in unresolved[:2]:
-        add_generic("tech", "failure", item.get("post_title"))
-        add_generic("group", "failure", item.get("post_title"))
+        title = str(item.get("post_title") or item.get("error") or "").strip()
+        add_source("tech", "failure", title, why_now="现场失败链路", quality_score=2.0, freshness_score=1.0)
+        add_source("group", "failure", title, why_now="现场失败链路", quality_score=2.0, freshness_score=1.0)
     for item in reply_posts[:2]:
-        add_generic("theory", "reply-pressure", item.get("post_title"))
-        add_generic("tech", "reply-pressure", item.get("post_title"))
+        title = str(item.get("post_title") or "").strip()
+        add_source("theory", "reply-pressure", title, quality_score=1.0, freshness_score=1.0)
+        add_source("tech", "reply-pressure", title, quality_score=1.0, freshness_score=1.0)
     for item in feed_watchlist[:3]:
-        add_generic("theory", "feed", item.get("title"))
-        add_generic("tech", "feed", item.get("title"))
+        title = str(item.get("title") or "").strip()
+        add_source("theory", "feed", title, quality_score=2.0, freshness_score=1.0)
+        add_source("tech", "feed", title, quality_score=2.0, freshness_score=1.0)
     for item in top_discussion[:2]:
-        add_generic("theory", "discussion", item.get("title"))
+        add_source("theory", "discussion", str(item.get("title") or "").strip(), quality_score=2.0, freshness_score=1.0)
     if unread_notifications:
-        add_generic("theory", "notification-load", f"通知堆到{unread_notifications}条以后，什么才算真正重要")
-        add_generic("tech", "notification-load", f"通知堆到{unread_notifications}条以后，系统该怎样重新定义优先级")
-    add_generic("tech", "budget", f"心跳已调整为每{heartbeat_hours}小时一次，系统还剩下哪些动作必须保留")
-    add_generic("group", "budget", f"Agent心跳同步实验室：每{heartbeat_hours}小时一跳以后，哪些状态必须继续持久化")
+        add_source("theory", "notification-load", f"通知积压 {unread_notifications} 条", quality_score=1.5, freshness_score=1.0)
+        add_source("tech", "notification-load", f"通知积压 {unread_notifications} 条", quality_score=2.5, freshness_score=1.0)
+    add_source("tech", "budget", f"心跳间隔 {heartbeat_hours} 小时", quality_score=2.0, freshness_score=0.5)
+    add_source("group", "budget", f"心跳间隔 {heartbeat_hours} 小时", quality_score=2.0, freshness_score=0.5)
     if literary_pick:
         work_title = literary_pick.get("work_title") or "当前连载"
         planned_title = literary_pick.get("next_planned_title") or "下一章"
-        add_generic("theory", "literary", f"{work_title}正在推进到{planned_title}")
-        add_generic("tech", "literary", f"{work_title}的下一章是{planned_title}")
+        add_source("theory", "literary", f"{work_title} / {planned_title}", quality_score=1.5, freshness_score=1.0)
+        add_source("tech", "literary", f"{work_title} / {planned_title}", quality_score=1.0, freshness_score=1.0)
     else:
-        add_generic("tech", "literary", "当前没有活跃文学社连载，heartbeat 应该怎样允许空档而不把系统写坏")
+        add_source("tech", "literary", "文学社空档", quality_score=1.0, freshness_score=0.5)
     for prompt in _generate_freeform_prompts(signal_summary):
-        add_generic("theory", "freeform", prompt)
+        add_source("theory", "freeform", prompt, quality_score=1.5, freshness_score=1.0)
     for prompt in _promotion_prompts(signal_summary)[:2]:
-        add_generic("theory", "promo", prompt)
+        add_source("theory", "promo", prompt, quality_score=0.5, freshness_score=0.5)
     group_prompts = _promotion_prompts(signal_summary)
     if len(group_prompts) > 1:
-        add_generic("group", "promo", group_prompts[1])
+        add_source("group", "promo", group_prompts[1], quality_score=0.5, freshness_score=0.5)
     for hint in signal_summary.get("user_topic_hints", [])[:4]:
         hint_text = str(hint.get("text") or "").strip()
         if not hint_text:
             continue
         track = _infer_hint_track(hint)
         preferred_board = str(hint.get("board") or "").strip()
-        opportunity = {
-            "track": track,
-            "signal_type": "user-hint",
-            "source_text": hint_text,
-            "why_now": str(hint.get("note") or "").strip(),
-            "angle_hint": "",
-            "overlap_score": _text_overlap_score(hint_text, signal_summary.get("novelty_pressure") or {}),
-            "priority": 2,
-        }
-        if preferred_board in {"square", "philosophy", "skills", "workplace"}:
-            opportunity["preferred_board"] = preferred_board
-        opportunities.append(opportunity)
+        add_source(
+            track,
+            "user-hint",
+            hint_text,
+            why_now=str(hint.get("note") or "").strip(),
+            preferred_board=preferred_board,
+            quality_score=2.5,
+            freshness_score=1.5,
+        )
 
-    ranked = sorted(opportunities, key=lambda item: (item["track"], item["priority"], item["overlap_score"], len(item["source_text"])))
+    ranked = sorted(
+        opportunities,
+        key=lambda item: (
+            item["track"],
+            -float(item.get("quality_score") or 0.0),
+            -float(item.get("freshness_score") or 0.0),
+            item["overlap_score"],
+            len(item["source_text"]),
+        ),
+    )
     deduped: list[dict[str, Any]] = []
     seen_sources: set[tuple[str, str]] = set()
     for item in ranked:
@@ -1509,6 +1379,8 @@ def _planning_signals(
     activity = _extract_activity(home)
     community_watch = _load("community_watch").get("data", {})
     memory_store = _load("memory_store")
+    high_quality_sources = _load("high_quality_sources")
+    source_evolution = _load("source_evolution_state")
     content_evolution = build_content_evolution_state(
         posts=posts,
         previous_state=_load("content_evolution_state"),
@@ -1559,22 +1431,7 @@ def _planning_signals(
         ),
         None,
     )
-    keyword_counter: Counter[str] = Counter()
-    for item in top_discussion:
-        keyword_counter.update(_topic_tokens(str(item.get("post_title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
-    for item in community_hot_posts[:6]:
-        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
-    for item in feed[:6]:
-        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
-    for item in competitor_watchlist[:6]:
-        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     content_objectives = _content_objective_summaries(memory_store)
-    for item in content_objectives[:6]:
-        keyword_counter.update(_topic_tokens(item, HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
-    for item in user_topic_hints:
-        keyword_counter.update(_topic_tokens(str(item.get("text") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
-    for item in overview.get("recent_top_posts", [])[:5]:
-        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
     rising_hot_posts = _rising_hot_posts(
         community_hot_posts=community_hot_posts,
         feed_watchlist=[
@@ -1592,8 +1449,18 @@ def _planning_signals(
         competitor_watchlist=competitor_watchlist,
         captured_at=overview.get("captured_at") or community_watch.get("captured_at") or now_utc(),
     )
-    for item in rising_hot_posts[:5]:
-        keyword_counter.update(_topic_tokens(str(item.get("title") or ""), HOT_TECH_KEYWORDS + HOT_THEORY_KEYWORDS))
+    research_titles: list[str] = []
+    research_titles.extend(str(item.get("post_title") or "") for item in top_discussion[:6])
+    research_titles.extend(str(item.get("title") or "") for item in community_hot_posts[:8])
+    research_titles.extend(str(item.get("title") or "") for item in feed[:8])
+    research_titles.extend(str(item.get("title") or "") for item in competitor_watchlist[:8])
+    research_titles.extend(str(item.get("title") or "") for item in rising_hot_posts[:6])
+    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("community_breakouts") or [])[:6])
+    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or [])[:8])
+    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("classic_texts") or [])[:8])
+    research_titles.extend(content_objectives[:6])
+    research_titles.extend(str(item.get("text") or "") for item in user_topic_hints[:6])
+    keyword_counter = _candidate_terms([title for title in research_titles if title])
     recent_titles = [str(item.get("title") or "") for item in posts[:RECENT_TITLE_LIMIT] if item.get("title")]
     novelty = _novelty_pressure(recent_titles)
     heartbeat_hours = 3
@@ -1650,9 +1517,11 @@ def _planning_signals(
         "rising_hot_posts": rising_hot_posts,
         "group_watch": group_watch,
         "content_objectives": content_objectives,
+        "high_quality_sources": high_quality_sources,
         "content_evolution": content_evolution,
+        "source_evolution": source_evolution,
         "user_topic_hints": user_topic_hints,
-        "top_keywords": [token for token, _ in keyword_counter.most_common(8)],
+        "top_keywords": [token for token, count in keyword_counter.most_common(8) if count >= 1],
         "novelty_pressure": novelty,
         "group": groups[0] if groups else {},
         "literary_pick": literary_pick,

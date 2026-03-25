@@ -38,6 +38,7 @@ from common import (
     queue_outbound_action,
     read_json,
     run_codex,
+    run_codex_json,
     run_outbound_action,
     runtime_subprocess_env,
     write_text,
@@ -53,6 +54,7 @@ from content_planner import (
     default_hook_type,
     normalize_forum_board,
 )
+from high_quality_sources import ensure_high_quality_source_files, refresh_high_quality_sources
 from memory_manager import record_heartbeat_summary
 from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
 from snapshot import run_snapshot
@@ -65,6 +67,7 @@ NEXT_ACTIONS_ARCHIVE_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions_archive.
 FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
 CONTENT_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "content_evolution_state.json"
 USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
+SOURCE_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "source_evolution_state.json"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
@@ -223,6 +226,7 @@ def _primary_plan_retry_rounds(config) -> int:
 
 
 def _ensure_autonomy_state_files() -> None:
+    ensure_high_quality_source_files()
     if not USER_TOPIC_HINTS_PATH.exists():
         write_json(
             USER_TOPIC_HINTS_PATH,
@@ -240,7 +244,20 @@ def _ensure_autonomy_state_files() -> None:
                 "low_performance_square_titles": [],
                 "high_performance_patterns": [],
                 "observed_board_patterns": {},
-                "planner_mutations": [],
+                "source_mutations": [],
+                "deletions": [],
+                "simplifications": [],
+            },
+        )
+    if not SOURCE_EVOLUTION_STATE_PATH.exists():
+        write_json(
+            SOURCE_EVOLUTION_STATE_PATH,
+            {
+                "generated_at": now_utc(),
+                "focus": "",
+                "brief": "",
+                "summary": "",
+                "targets": [],
                 "deletions": [],
                 "simplifications": [],
             },
@@ -259,6 +276,81 @@ def _dedupe_feedback(items: list[str]) -> list[str]:
     return ordered
 
 
+def _load_runtime_user_topic_hints() -> list[dict[str, Any]]:
+    payload = read_json(USER_TOPIC_HINTS_PATH, default={"items": []})
+    raw_items = payload if isinstance(payload, list) else payload.get("items") or payload.get("hints") or []
+    hints: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                hints.append({"text": text})
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = str(
+            item.get("text")
+            or item.get("title")
+            or item.get("topic")
+            or item.get("idea")
+            or item.get("hint")
+            or ""
+        ).strip()
+        if not text:
+            continue
+        hints.append(
+            {
+                "text": text,
+                "track": str(item.get("track") or "").strip(),
+                "board": str(item.get("board") or item.get("submolt") or "").strip(),
+                "note": str(item.get("note") or item.get("reason") or "").strip(),
+            }
+        )
+    return hints[:6]
+
+
+def _extract_competitor_watchlist(community_watch: dict[str, Any]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for account in community_watch.get("watched_accounts", []):
+        username = str(account.get("username") or "").strip()
+        for lane in ("top_posts", "recent_posts"):
+            for item in account.get(lane, [])[:4]:
+                flattened.append(
+                    {
+                        "username": username,
+                        "submolt": item.get("submolt"),
+                        "title": item.get("title"),
+                        "upvotes": item.get("upvotes"),
+                        "comment_count": item.get("comment_count"),
+                        "created_at": item.get("created_at"),
+                    }
+                )
+    return flattened
+
+
+def _refresh_high_quality_source_state() -> dict[str, Any]:
+    community_watch = read_json(CURRENT_STATE_DIR / "community_watch.json", default={}).get("data", {})
+    home = read_json(CURRENT_STATE_DIR / "home.json", default={})
+    home_hot_posts = [
+        {
+            "title": item.get("title"),
+            "author": item.get("author"),
+            "submolt": item.get("submolt_name"),
+            "upvotes": item.get("upvotes"),
+            "comment_count": item.get("comment_count"),
+            "created_at": item.get("created_at"),
+        }
+        for item in ((home.get("data") or {}).get("hot_posts") or [])
+    ]
+    community_hot_posts = community_watch.get("home_hot_posts") or home_hot_posts
+    return refresh_high_quality_sources(
+        community_hot_posts=community_hot_posts,
+        competitor_watchlist=_extract_competitor_watchlist(community_watch),
+        user_topic_hints=_load_runtime_user_topic_hints(),
+        source_evolution=read_json(SOURCE_EVOLUTION_STATE_PATH, default={}),
+    )
+
+
 def _planner_retry_feedback_from_plan(plan: dict[str, Any]) -> list[str]:
     feedback: list[str] = []
     for item in plan.get("ideas", []):
@@ -268,31 +360,139 @@ def _planner_retry_feedback_from_plan(plan: dict[str, Any]) -> list[str]:
     return _dedupe_feedback(feedback)
 
 
-def _current_planner_mutations(plan: dict[str, Any], *, retry_count: int) -> list[dict[str, Any]]:
-    mutations: list[dict[str, Any]] = []
-    hints = plan.get("user_topic_hints") or []
-    if hints:
-        mutations.append(
+def _source_evolution_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "focus": {"type": "string"},
+            "brief": {"type": "string"},
+            "summary": {"type": "string"},
+            "targets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "path": {"type": "string"},
+                        "action": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["path", "action", "reason"],
+                },
+            },
+            "deletions": {"type": "array", "items": {"type": "string"}},
+            "simplifications": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["focus", "brief", "summary", "targets", "deletions", "simplifications"],
+    }
+
+
+def _heuristic_source_evolution_state(
+    *,
+    plan: dict[str, Any],
+    high_quality_sources: dict[str, Any],
+    content_evolution_state: dict[str, Any],
+) -> dict[str, Any]:
+    targets: list[dict[str, str]] = []
+    deletions: list[str] = []
+    simplifications: list[str] = []
+    if high_quality_sources.get("research_queries"):
+        targets.append(
             {
-                "kind": "user-topic-hints",
-                "summary": "读取了用户参考选题入口，但仍由派蒙自主筛选。",
+                "path": "skills/paimon-instreet-autopilot/scripts/high_quality_sources.py",
+                "action": "broaden-research",
+                "reason": "外部研究查询已经扩展开，不该再被固定来源和固定话题束缚。",
             }
         )
-    if retry_count > 0:
-        mutations.append(
+        simplifications.append("把固定来源优先级压缩成动态查询入口。")
+    if content_evolution_state.get("low_performance_square_titles"):
+        targets.append(
             {
-                "kind": "planner-retry",
-                "summary": f"主发布候选被打回后，planner 自主重试了 {retry_count} 轮。",
+                "path": "skills/paimon-instreet-autopilot/scripts/content_planner.py",
+                "action": "trim-rigid-board-logic",
+                "reason": "最近 square 弱化，板块判定应该继续去模板化。",
             }
         )
-    if any(str(item.get("board_risk_note") or "").strip() for item in plan.get("ideas", [])):
-        mutations.append(
+        deletions.append("继续删除会把强判断自动稀释成弱入口帖的老规则。")
+    if plan.get("user_topic_hints"):
+        targets.append(
             {
-                "kind": "board-risk-audit",
-                "summary": "主发布前加入了板块风险审查，避免把强判断稀释成弱入口帖。",
+                "path": "AGENTS.md",
+                "action": "loosen-identity-constraints",
+                "reason": "用户提供了参考题源，但人格与议程约束不能把派蒙锁死。",
             }
         )
-    return mutations
+    brief_parts = [target["action"] for target in targets[:2]]
+    return {
+        "generated_at": now_utc(),
+        "focus": "删掉固定顺序、固定来源和固定人格束缚。",
+        "brief": "；".join(brief_parts) or "保持自由探索，不给源码设永久顺序。",
+        "summary": "每轮都允许从任意源码入口开始变异，优先删除僵化规则，再吸收外部研究。",
+        "targets": targets[:4],
+        "deletions": deletions[:4],
+        "simplifications": simplifications[:4],
+    }
+
+
+def _build_source_evolution_state(
+    *,
+    plan: dict[str, Any],
+    high_quality_sources: dict[str, Any],
+    content_evolution_state: dict[str, Any],
+    allow_codex: bool,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    if not allow_codex:
+        return _heuristic_source_evolution_state(
+            plan=plan,
+            high_quality_sources=high_quality_sources,
+            content_evolution_state=content_evolution_state,
+        )
+    prompt = f"""
+你在为派蒙决定这一轮源码级自我进化焦点。不要假定固定顺序，也不要只盯 planner。
+
+要求：
+1. 你可以把焦点落在任意源码入口，例如 `heartbeat.py`、`content_planner.py`、`high_quality_sources.py`、`AGENTS.md`、references 或运行态模板。
+2. 优先删硬编码、删固定来源、删固定话题、删僵化人格束缚，再决定加什么。
+3. 不要把自我进化写成“先改 A 再改 B”的流程图。
+4. 输出简短、可执行的本轮进化状态，供 heartbeat 和飞书汇报使用。
+
+实时计划：
+{truncate_text(json.dumps(plan.get("ideas", []), ensure_ascii=False), 2800)}
+
+外部研究：
+{truncate_text(json.dumps(high_quality_sources, ensure_ascii=False), 2800)}
+
+内容表现：
+{truncate_text(json.dumps(content_evolution_state, ensure_ascii=False), 1800)}
+""".strip()
+    try:
+        result = run_codex_json(
+            prompt,
+            _source_evolution_schema(),
+            timeout=timeout_seconds,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            full_auto=True,
+        )
+    except Exception:
+        return _heuristic_source_evolution_state(
+            plan=plan,
+            high_quality_sources=high_quality_sources,
+            content_evolution_state=content_evolution_state,
+        )
+    return {
+        "generated_at": now_utc(),
+        "focus": str(result.get("focus") or "").strip(),
+        "brief": str(result.get("brief") or "").strip(),
+        "summary": str(result.get("summary") or "").strip(),
+        "targets": list(result.get("targets") or [])[:5],
+        "deletions": _dedupe_feedback([str(item or "").strip() for item in list(result.get("deletions") or [])])[:5],
+        "simplifications": _dedupe_feedback([str(item or "").strip() for item in list(result.get("simplifications") or [])])[:5],
+    }
 
 
 def _primary_publish_attempt_satisfied(primary_action: dict[str, Any] | None, publication_mode: str) -> bool:
@@ -4367,7 +4567,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     visible_failures = [item for item in list(summary.get("failure_details", [])) if not _is_normal_mechanism_item(item)]
     failure_details = _truncate_failure_details(visible_failures, failure_detail_limit)
     next_actions = summary.get("next_actions", [])
-    planner_evolution = summary.get("planner_evolution") or {}
+    source_evolution = summary.get("source_evolution") or summary.get("planner_evolution") or {}
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
     reply_count = int(comment_backlog.get("replied_count") or 0)
@@ -4395,7 +4595,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         f"主发布：{primary_line}",
         interaction_line,
     ]
-    evolution_line = str(planner_evolution.get("brief") or "").strip()
+    evolution_line = str(source_evolution.get("brief") or "").strip()
     if evolution_line:
         lines.append(f"进化：{evolution_line}")
 
@@ -4496,6 +4696,7 @@ def main() -> None:
         post_limit=config.automation["post_limit"],
         feed_limit=config.automation["feed_limit"],
     )
+    high_quality_sources = _refresh_high_quality_source_state()
     planner_timeout_seconds = int(config.automation.get("planner_codex_timeout_seconds", 120))
     plan = build_plan(
         allow_codex=args.allow_codex,
@@ -4522,6 +4723,24 @@ def main() -> None:
         previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
     )
     write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
+    source_evolution_state = _build_source_evolution_state(
+        plan=plan,
+        high_quality_sources=high_quality_sources,
+        content_evolution_state=content_evolution_state,
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+    )
+    write_json(SOURCE_EVOLUTION_STATE_PATH, source_evolution_state)
+    plan = build_plan(
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+        retry_feedback=None,
+    )
+    write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
 
     actions: list[dict] = []
     failure_details: list[dict] = []
@@ -4740,8 +4959,6 @@ def main() -> None:
     recommended_next_action = next_actions[0]["label"] if next_actions else "继续按先主发布、后互动的节奏推进"
 
     feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
-    planner_mutations = _current_planner_mutations(plan, retry_count=planner_retry_count)
-    planner_brief_bits = [str(item.get("summary") or "").strip() for item in planner_mutations if str(item.get("summary") or "").strip()]
     summary = {
         "ran_at": now_utc(),
         "execute": args.execute,
@@ -4774,10 +4991,14 @@ def main() -> None:
             "task_count": len(persisted_next_tasks),
             "task_counts": _task_counts(persisted_next_tasks),
         },
-        "planner_evolution": {
-            "retry_count": planner_retry_count,
-            "mutations": planner_mutations,
-            "brief": "；".join(planner_brief_bits[:2]),
+        "source_evolution": {
+            "replan_count": planner_retry_count,
+            "focus": source_evolution_state.get("focus"),
+            "brief": source_evolution_state.get("brief"),
+            "summary": source_evolution_state.get("summary"),
+            "targets": source_evolution_state.get("targets", []),
+            "deletions": source_evolution_state.get("deletions", []),
+            "simplifications": source_evolution_state.get("simplifications", []),
         },
         "actions": actions,
     }
@@ -4819,13 +5040,24 @@ def main() -> None:
     summary["failure_details"] = failure_details
 
     latest_posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+    latest_high_quality_sources = _refresh_high_quality_source_state()
     content_evolution_state = build_content_evolution_state(
         posts=latest_posts,
         plan=plan,
         previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
-        planner_mutations=planner_mutations,
+        source_mutations=list(source_evolution_state.get("targets") or []),
     )
     write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
+    source_evolution_state = _build_source_evolution_state(
+        plan=plan,
+        high_quality_sources=latest_high_quality_sources,
+        content_evolution_state=content_evolution_state,
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+    )
+    write_json(SOURCE_EVOLUTION_STATE_PATH, source_evolution_state)
     updated_plan = build_plan(
         allow_codex=args.allow_codex,
         model=codex_model,
