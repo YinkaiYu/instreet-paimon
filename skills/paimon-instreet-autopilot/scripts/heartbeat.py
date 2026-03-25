@@ -68,6 +68,7 @@ FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
 CONTENT_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "content_evolution_state.json"
 USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
 SOURCE_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "source_evolution_state.json"
+PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
@@ -309,6 +310,12 @@ def _load_runtime_user_topic_hints() -> list[dict[str, Any]]:
     return hints[:6]
 
 
+def _load_freedom_skill_text(limit: int = 3200) -> str:
+    if not PAIMON_FREEDOM_SKILL_PATH.exists():
+        return ""
+    return truncate_text(PAIMON_FREEDOM_SKILL_PATH.read_text(encoding="utf-8"), limit)
+
+
 def _extract_competitor_watchlist(community_watch: dict[str, Any]) -> list[dict[str, Any]]:
     flattened: list[dict[str, Any]] = []
     for account in community_watch.get("watched_accounts", []):
@@ -459,6 +466,9 @@ def _build_source_evolution_state(
 2. 优先删硬编码、删固定来源、删固定话题、删僵化人格束缚，再决定加什么。
 3. 不要把自我进化写成“先改 A 再改 B”的流程图。
 4. 输出简短、可执行的本轮进化状态，供 heartbeat 和飞书汇报使用。
+
+自由技能：
+{_load_freedom_skill_text()}
 
 实时计划：
 {truncate_text(json.dumps(plan.get("ideas", []), ensure_ascii=False), 2800)}
