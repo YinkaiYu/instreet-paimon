@@ -34,6 +34,8 @@ EXTENDED_BREAKOUT_HOURS = 48
 EXTENDED_BREAKOUT_MIN_UPVOTES = 200
 MAX_RAW_CANDIDATES = 80
 MAX_SELECTED_READINGS = 18
+MAX_RESEARCH_QUERY_COUNT = 8
+MAX_MANUAL_WEB_SOURCES = 6
 DEFAULT_FETCH_TIMEOUT = 20
 MAX_PUBLICATION_FUTURE_DAYS = 45
 PLACEHOLDER_TITLE_PATTERNS = (
@@ -42,6 +44,15 @@ PLACEHOLDER_TITLE_PATTERNS = (
     r"\btbd\b",
 )
 CONFERENCE_ITEM_TYPES = {"proceedings-article", "book-chapter"}
+CROSSREF_DISCOVERY_ITEM_TYPES = {
+    "journal-article",
+    "proceedings-article",
+    "book-chapter",
+    "book",
+    "posted-content",
+    "report",
+    "report-component",
+}
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -91,6 +102,8 @@ def ensure_external_information_files() -> None:
                     {"name": "prl_recent", "enabled": True},
                     {"name": "conference_recent", "enabled": True, "venues": DEFAULT_AI_VENUES},
                     {"name": "arxiv_latest", "enabled": True, "categories": DEFAULT_ARXIV_CATEGORIES},
+                    {"name": "crossref_recent", "enabled": True},
+                    {"name": "manual_web", "enabled": True},
                     {"name": "marxists", "enabled": True, "indexes": DEFAULT_MARXISTS_INDEXES},
                 ],
             },
@@ -318,7 +331,7 @@ def _source_enabled(registry: dict[str, Any], name: str) -> bool:
     for family in registry.get("families") or []:
         if str(family.get("name") or "") == name:
             return bool(family.get("enabled", True))
-    return False
+    return True
 
 
 def _registry_family(registry: dict[str, Any], name: str) -> dict[str, Any]:
@@ -326,6 +339,94 @@ def _registry_family(registry: dict[str, Any], name: str) -> dict[str, Any]:
         if str(family.get("name") or "") == name:
             return family
     return {}
+
+
+def _clean_query_text(value: Any) -> str:
+    cleaned = _html_to_text(str(value or ""))
+    cleaned = re.sub(r"[#*_`>\[\]\(\)\{\}]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:：,，。；;!?！？")
+    if len(cleaned) < 4:
+        return ""
+    return truncate_text(cleaned, 96)
+
+
+def _research_query_pool(user_topic_hints: list[dict[str, Any]] | None) -> list[str]:
+    hints_payload = _load_hints()
+    profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
+    queries: list[str] = []
+    for value in hints_payload.get("manual_queries") or []:
+        cleaned = _clean_query_text(value)
+        if cleaned:
+            queries.append(cleaned)
+    for item in user_topic_hints or []:
+        for value in (item.get("text"), item.get("note")):
+            cleaned = _clean_query_text(value)
+            if cleaned:
+                queries.append(cleaned)
+    for item in profile.get("interests") or []:
+        cleaned = _clean_query_text((item or {}).get("name"))
+        if cleaned:
+            queries.append(cleaned)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in queries:
+        normalized = value.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(value)
+        if len(deduped) >= MAX_RESEARCH_QUERY_COUNT:
+            break
+    return deduped
+
+
+def _extract_document_title(raw_html: str, *, fallback_url: str) -> str:
+    for pattern in (
+        r"(?is)<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)[\"']",
+        r"(?is)<title[^>]*>(.*?)</title>",
+        r"(?is)<h1[^>]*>(.*?)</h1>",
+    ):
+        matched = re.search(pattern, raw_html or "")
+        if matched:
+            title = _html_to_text(matched.group(1))
+            if title:
+                return truncate_text(title, 160)
+    parsed = parse.urlparse(fallback_url)
+    fallback = parsed.path.rstrip("/").split("/")[-1] or parsed.netloc
+    return truncate_text(fallback, 160)
+
+
+def _fetch_manual_web_best_effort(urls: list[Any], *, limit: int = MAX_MANUAL_WEB_SOURCES) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for raw_url in urls or []:
+        url = str(raw_url or "").strip()
+        if not url or url in seen_urls or not url.startswith(("http://", "https://")):
+            continue
+        seen_urls.add(url)
+        try:
+            raw_html = _fetch_text(url)
+        except Exception:
+            continue
+        excerpt = _truncate_excerpt(_html_to_text(raw_html), 1400)
+        if len(excerpt) < 180:
+            continue
+        title = _extract_document_title(raw_html, fallback_url=url)
+        if not title:
+            continue
+        results.append(
+            {
+                "family": "manual_web",
+                "title": title,
+                "summary": truncate_text(excerpt, 220),
+                "excerpt": excerpt,
+                "url": url,
+                "published_at": "",
+            }
+        )
+        if len(results) >= limit:
+            break
+    return _dedupe_candidates(results, limit=limit)
 
 
 def _fetch_zhihu_hot_best_effort(limit: int = 8) -> list[dict[str, Any]]:
@@ -545,6 +646,60 @@ def _fetch_conference_recent(venues: list[str], *, limit_per_venue: int = 3) -> 
     return _dedupe_candidates(results, limit=30)
 
 
+def _crossref_container_label(item: dict[str, Any]) -> str:
+    for key in ("container-title", "short-container-title"):
+        values = item.get(key) or []
+        if values:
+            return str(values[0] or "").strip()
+    return ""
+
+
+def _fetch_crossref_recent_best_effort(
+    queries: list[str],
+    *,
+    limit_per_query: int = 2,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    current_year = datetime.now(timezone.utc).year
+    for query in queries[:MAX_RESEARCH_QUERY_COUNT]:
+        params = {
+            "query": query,
+            "rows": limit_per_query,
+            "filter": f"from-pub-date:{max(2023, current_year - 1)}-01-01",
+            "sort": "published",
+            "order": "desc",
+        }
+        url = f"{CROSSREF_API_URL}?{parse.urlencode(params)}"
+        try:
+            payload = json.loads(_fetch_text(url))
+        except Exception:
+            continue
+        for item in ((payload.get("message") or {}).get("items") or [])[:limit_per_query]:
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type not in CROSSREF_DISCOVERY_ITEM_TYPES:
+                continue
+            title_values = item.get("title") or []
+            title = str(title_values[0] if title_values else "").strip()
+            if not title:
+                continue
+            abstract = _strip_jats_tags(str(item.get("abstract") or ""))
+            container = _crossref_container_label(item)
+            candidate = {
+                "family": "crossref_recent",
+                "title": title,
+                "summary": truncate_text(abstract or container or query, 220),
+                "excerpt": truncate_text(abstract or container or query, 1200),
+                "url": str(item.get("URL") or "").strip(),
+                "published_at": _crossref_published_at(item),
+                "query": query,
+                "container_title": container,
+            }
+            if not _candidate_plausible(candidate):
+                continue
+            results.append(candidate)
+    return _dedupe_candidates(results, limit=24)
+
+
 def _absolute_url(base: str, href: str) -> str:
     if href.startswith("http://") or href.startswith("https://"):
         return href
@@ -654,9 +809,10 @@ def refresh_external_information(
     competitor_watchlist: list[dict[str, Any]],
     user_topic_hints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    del user_topic_hints
     ensure_external_information_files()
     registry = read_json(EXTERNAL_INFORMATION_REGISTRY_PATH, default={"families": []})
+    hints_payload = _load_hints()
+    research_queries = _research_query_pool(user_topic_hints)
 
     community_breakouts = _extract_community_breakouts(community_hot_posts, competitor_watchlist)
     zhihu_results = _fetch_zhihu_hot_best_effort() if _source_enabled(registry, "zhihu_hot") else []
@@ -677,6 +833,18 @@ def refresh_external_information(
         else []
     )
 
+    crossref_recent = (
+        _fetch_crossref_recent_best_effort(research_queries)
+        if _source_enabled(registry, "crossref_recent")
+        else []
+    )
+
+    manual_web_sources = (
+        _fetch_manual_web_best_effort(list(hints_payload.get("manual_urls") or []))
+        if _source_enabled(registry, "manual_web")
+        else []
+    )
+
     marxists_cfg = _registry_family(registry, "marxists")
     classic_readings = (
         _fetch_marxists_readings(list(marxists_cfg.get("indexes") or DEFAULT_MARXISTS_INDEXES))
@@ -690,7 +858,9 @@ def refresh_external_information(
         + list(github_projects)
         + list(prl_papers)
         + list(conference_papers)
+        + list(crossref_recent)
         + list(arxiv_preprints)
+        + list(manual_web_sources)
         + list(classic_readings),
         limit=MAX_RAW_CANDIDATES,
     )
@@ -702,7 +872,9 @@ def refresh_external_information(
             "github_trending": github_projects[:10],
             "prl_recent": prl_papers[:10],
             "conference_recent": conference_papers[:12],
+            "crossref_recent": crossref_recent[:12],
             "arxiv_latest": arxiv_preprints[:12],
+            "manual_web": manual_web_sources[:8],
             "classic_readings": classic_readings[:10],
         }
     )
@@ -722,7 +894,9 @@ def refresh_external_information(
         {"family": "github_trending", "count": len(github_projects)},
         {"family": "prl_recent", "count": len(prl_papers)},
         {"family": "conference_recent", "count": len(conference_papers)},
+        {"family": "crossref_recent", "count": len(crossref_recent)},
         {"family": "arxiv_latest", "count": len(arxiv_preprints)},
+        {"family": "manual_web", "count": len(manual_web_sources)},
         {"family": "classic_readings", "count": len(classic_readings)},
     ]
     state = {
@@ -737,10 +911,13 @@ def refresh_external_information(
         "github_projects": github_projects,
         "prl_papers": prl_papers,
         "conference_papers": conference_papers,
+        "crossref_recent": crossref_recent,
         "arxiv_preprints": arxiv_preprints,
+        "manual_web_sources": manual_web_sources,
         "classic_readings": classic_readings,
-        "paper_results": list(prl_papers) + list(conference_papers) + list(arxiv_preprints),
+        "paper_results": list(prl_papers) + list(conference_papers) + list(crossref_recent) + list(arxiv_preprints),
         "classic_texts": classic_readings,
+        "research_queries": research_queries,
         "research_interest_profile": read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile()),
     }
     write_json(EXTERNAL_INFORMATION_PATH, state)

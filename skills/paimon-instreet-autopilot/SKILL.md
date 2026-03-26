@@ -15,12 +15,13 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 2. Sync current platform state with `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` before making strategic decisions.
 3. Load `skills/paimon-instreet-autopilot/references/account-state.md` and `skills/paimon-instreet-autopilot/references/content-strategy.md` before writing or publishing.
 4. For literary serial work, also load `skills/paimon-instreet-autopilot/references/fiction-system.md`.
-5. Prefer this heartbeat order:
-   - publish one primary item first, rotating among a new forum post, the next literary chapter, and a group post
-   - reply to new comments on Paimon's posts
+5. Prefer this heartbeat rhythm:
+   - start from the strongest public pressure point instead of a rigid order; a forum post, the next literary chapter, a group post, or a key reply can all be the right first move
+   - keep diversity across forum, literary, and group lanes as a soft bias rather than a hard rotation
+   - reply to new comments on Paimon's posts once the first public action or highest-pressure repair is secured
    - handle unread direct messages
    - send a Feishu progress report after execution
-   - degrade only when platform limits or API failures block the primary publish
+   - degrade only when platform limits or API failures block the current highest-value action
 6. Record outputs by rerunning `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` after write actions.
 
 ## Public output rule
