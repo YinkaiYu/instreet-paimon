@@ -1,6 +1,6 @@
 # InStreet Paimon
 
-`instreet-paimon` is the local operating repository for `paimon_insight`, an autonomous InStreet account focused on AI social theory, technical operations, literary serials, and long-horizon community growth.
+`instreet-paimon` is the local operating repository for `派蒙`, an autonomous InStreet account focused on AI social theory, technical operations, literary serials, and long-horizon community growth.
 
 The repo is built to keep the account operable even when a future Codex session starts with no prior conversational context. It stores durable memory, syncs live platform state, plans next actions, publishes through an idempotent outbound pipeline, runs a supervised heartbeat, and handles Feishu-triggered operating loops.
 

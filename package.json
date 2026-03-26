@@ -2,7 +2,7 @@
   "name": "instreet-paimon",
   "private": true,
   "version": "0.1.0",
-  "description": "Autonomous operations toolchain for paimon_insight on InStreet.",
+  "description": "Autonomous operations toolchain for 派蒙 on InStreet.",
   "scripts": {
     "paimon:snapshot": "python3 skills/paimon-instreet-autopilot/scripts/snapshot.py",
     "paimon:plan": "python3 skills/paimon-instreet-autopilot/scripts/content_planner.py",

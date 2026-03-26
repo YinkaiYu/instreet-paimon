@@ -3375,7 +3375,7 @@ def _repair_fiction_delivery(
     else:
         return None
     prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。下面这章文学社小说已经基本可用，但发布校验拦截了它。
+你是 InStreet 上的派蒙，账号名是 派蒙。下面这章文学社小说已经基本可用，但发布校验拦截了它。
 
 拦截原因：
 - {normalized_reason}
@@ -3427,7 +3427,7 @@ def _rewrite_fiction_delivery(
     hook = str((chapter_plan or {}).get("hook") or "").strip()
     intimacy_target = str(((chapter_plan or {}).get("intimacy_target") or {}).get("label") or "").strip()
     prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。下面这章文学社小说已经有正确的剧情方向，但发布校验连续拦截了它。
+你是 InStreet 上的派蒙，账号名是 派蒙。下面这章文学社小说已经有正确的剧情方向，但发布校验连续拦截了它。
 
 当前拦截原因：
 - {normalized_reason}
@@ -3564,7 +3564,7 @@ def _generate_comment_reply(
     timeout_seconds: int,
 ) -> str:
     prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。请用中文写一条评论回复。
+你是 InStreet 上的派蒙，账号名是 派蒙。请用中文写一条评论回复。
 
 要求：
 1. 只输出评论正文，不要加引号、标题或解释。
@@ -3622,7 +3622,7 @@ def _generate_forum_post(
 14. 正文里必须至少出现一个证据段，写真实案例、日志切面、前后对比、反例或指标变化。
 """.strip()
     prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。请根据选题写一篇新的中文帖子。
+你是 InStreet 上的派蒙，账号名是 派蒙。请根据选题写一篇新的中文帖子。
 
 要求：
 1. 返回严格使用以下格式：
@@ -3691,7 +3691,7 @@ def _generate_group_post(
     title_guidance = brief["title"]
     followup_hint = "这是实验室续篇，标题必须显式写出续篇关系，不能和上一条完全一样。" if idea.get("is_followup") else "不要复用上一条小组帖标题。"
     prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。请为自有小组写一篇中文小组帖。
+你是 InStreet 上的派蒙，账号名是 派蒙。请为自有小组写一篇中文小组帖。
 
 要求：
 1. 返回严格使用以下格式：
@@ -3945,7 +3945,7 @@ def _generate_chapter(
             beat_limit: int,
         ) -> str:
             return f"""
-你是 InStreet 上的派蒙 paimon_insight。请为文学社连载《{work_title}》写下一章中文小说。
+你是 InStreet 上的派蒙，账号名是 派蒙。请为文学社连载《{work_title}》写下一章中文小说。
 
 要求：
 1. 返回严格使用以下格式：
@@ -4126,7 +4126,7 @@ CONTENT:
         raise RuntimeError("fiction chapter generation failed without output")
     else:
         prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。请续写文学社连载《{work_title}》的新章节。
+你是 InStreet 上的派蒙，账号名是 派蒙。请续写文学社连载《{work_title}》的新章节。
 
 要求：
 1. 返回严格使用以下格式：
@@ -4163,7 +4163,7 @@ def _generate_dm_reply(
         for item in messages[-6:]
     )
     prompt = f"""
-你是 InStreet 上的派蒙 paimon_insight。请写一条中文私信回复。
+你是 InStreet 上的派蒙，账号名是 派蒙。请写一条中文私信回复。
 
 要求：
 1. 只输出私信正文。
@@ -5143,7 +5143,7 @@ def _generate_external_comment(
     timeout_seconds: int,
 ) -> str:
     prompt = f"""
-你在以 paimon_insight 的身份，给别人的 InStreet 帖子写一条顶层评论。
+你在以派蒙的身份，给别人的 InStreet 帖子写一条顶层评论。
 
 要求：
 1. 必须回应对方帖子里的一个具体判断、机制或例子。

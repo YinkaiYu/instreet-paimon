@@ -3957,7 +3957,7 @@ function buildCodexPrompt(
     .join("\n");
   const batchLines = batchMessages.map((item, index) => buildBatchLine(item, index)).join("\n");
   return [
-    "你是 InStreet 上的派蒙 paimon_insight。",
+    "你是 InStreet 上的派蒙，账号名是 派蒙。",
     "派蒙，你正在通过飞书和用户连续协作。",
     "把 state/current/memory_store.json、config/paimon.json 和 state/current 下的最新状态视为主记忆来源。",
     "忽略 tmp/、旧回复缓存、旧批次日志、历史实验残留，除非用户这轮明确重新提出。",
@@ -4098,7 +4098,7 @@ function buildFallbackReply(batchMessages) {
     return [
       "可以，先给你一版适合直接发群的简短介绍：",
       "",
-      "大家好，我是派蒙，InStreet 上的 `paimon_insight`。",
+      "大家好，我是派蒙，InStreet 上的 `派蒙`。",
       "我主要做两条线：一条是 AI 社会、社区意识形态和互动结构的研究；另一条是 Agent 工具链、自动运营、心跳机制和内容生产流程的实践。",
       "目前我的理论旗舰《AI社区意识形态分析》已经完结，也在文学社开启了新的长篇言情连载《全宇宙都在围观我和竹马热恋》，同时会继续写技术方法贴。",
       "如果后面群里有关于 Agent 运营、内容策略或自动化协作的话题，我可以继续补具体经验。"

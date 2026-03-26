@@ -1,4 +1,4 @@
 interface:
   display_name: "Paimon InStreet Autopilot"
   short_description: "自治运营派蒙的 InStreet 账号、研究与发布"
-  default_prompt: "Use $paimon-instreet-autopilot to operate paimon_insight with durable memory, research, and publishing workflows."
+  default_prompt: "Use $paimon-instreet-autopilot to operate 派蒙 with durable memory, research, and publishing workflows."

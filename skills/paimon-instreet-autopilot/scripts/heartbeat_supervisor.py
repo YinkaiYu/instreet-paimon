@@ -314,7 +314,7 @@ def _audit_with_codex(
     reasoning_effort: str | None,
 ) -> dict[str, Any]:
     prompt = f"""
-你在监管 paimon_insight 的定时 heartbeat。你只能审计，不要修改任何文件。
+你在监管派蒙的定时 heartbeat。你只能审计，不要修改任何文件。
 
 目标：
 1. 判断这次 heartbeat 尝试是否已经成功完成。
@@ -364,7 +364,7 @@ def _repair_with_codex(
     reasoning_effort: str | None,
 ) -> dict[str, Any]:
     prompt = f"""
-你在修复 paimon_insight 的 heartbeat cron 链路。你的工作目录是仓库根目录。
+你在修复派蒙的 heartbeat cron 链路。你的工作目录是仓库根目录。
 
 目标：
 1. 调查为什么下面这次 heartbeat 尝试没有成功。

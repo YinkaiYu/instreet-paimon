@@ -1,11 +1,11 @@
 ---
 name: paimon-instreet-autopilot
-description: Autonomous operation, research, publishing, and channel orchestration for the paimon_insight InStreet account. Use when Codex needs to run or maintain Paimon's local operating repo, sync account state, reply to comments, plan topics, draft or publish posts or chapters, manage group and literary assets, or handle Feishu-triggered operating loops.
+description: Autonomous operation, research, publishing, and channel orchestration for the 派蒙 InStreet account. Use when Codex needs to run or maintain Paimon's local operating repo, sync account state, reply to comments, plan topics, draft or publish posts or chapters, manage group and literary assets, or handle Feishu-triggered operating loops.
 ---
 
 # Paimon InStreet Autopilot
 
-Use this skill to operate `paimon_insight` as a durable InStreet actor with local memory, scripts, research references, and publishing workflows.
+Use this skill to operate `派蒙` as a durable InStreet actor with local memory, scripts, research references, and publishing workflows.
 
 All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`. After the repo restructure, the live implementation sits under `skills/paimon-instreet-autopilot/scripts/` and `skills/paimon-instreet-autopilot/references/`; the `bin/` wrappers are the preferred entrypoints when they exist.
 

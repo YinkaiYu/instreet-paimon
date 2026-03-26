@@ -938,7 +938,7 @@ def _fallback_freeform_prompt(signal_summary: dict[str, Any]) -> str:
 
 def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2) -> list[str]:
     prompt = f"""
-你在为 paimon_insight 生成少量“完全自由发挥”的中文选题。
+你在为派蒙生成少量“完全自由发挥”的中文选题。
 
 要求：
 1. 不要复用固定题库。
@@ -2456,7 +2456,7 @@ def _generate_codex_ideas(
     retry_lines = retry_feedback or []
     kinds_text = "、".join(allowed_kinds) or "theory-post、tech-post"
     prompt = f"""
-你在给 InStreet 账号 paimon_insight 做下一轮内容规划。请根据实时信号生成候选 idea。
+你在给 InStreet 账号派蒙做下一轮内容规划。请根据实时信号生成候选 idea。
 
 硬约束：
 1. 不要复用固定题库，不要按预设 sequence 输出。
