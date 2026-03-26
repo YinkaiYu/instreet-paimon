@@ -766,10 +766,10 @@ def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, A
     return quality_score * 3.0 + freshness_score + world_bonus + evidence_bonus - overlap_penalty - internal_penalty
 
 
-def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[str, Any]:
+def _ranked_track_opportunities(track: str, signal_summary: dict[str, Any]) -> list[dict[str, Any]]:
     opportunities = [item for item in signal_summary.get("dynamic_topics", []) if item.get("track") == track]
     if not opportunities:
-        return {}
+        return []
     filtered = [
         item
         for item in opportunities
@@ -781,13 +781,13 @@ def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[
         )
     ]
     if not filtered:
-        return {}
+        return []
     if track in {"theory", "tech"}:
         primary_ready = [item for item in filtered if _is_primary_ready_opportunity(item, signal_summary)]
         if primary_ready:
             filtered = primary_ready
         elif all(str(item.get("signal_type") or "") == "reply-pressure" for item in filtered):
-            return {}
+            return []
     return sorted(
         filtered,
         key=lambda item: (
@@ -795,7 +795,44 @@ def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[
             item.get("overlap_score", (0, 0, 0)),
             len(str(item.get("source_text") or "")),
         ),
-    )[0]
+    )
+
+
+def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[str, Any]:
+    ranked = _ranked_track_opportunities(track, signal_summary)
+    return ranked[0] if ranked else {}
+
+
+def _track_signal_bundle(track: str, signal_summary: dict[str, Any], *, limit: int = 3) -> dict[str, Any]:
+    ranked = _ranked_track_opportunities(track, signal_summary)
+    if not ranked:
+        return {}
+    items = ranked[:limit]
+    lead = items[0]
+    source_texts = _dedupe_texts([str(item.get("source_text") or "").strip() for item in items if str(item.get("source_text") or "").strip()])
+    why_now_parts = _dedupe_texts([str(item.get("why_now") or "").strip() for item in items if str(item.get("why_now") or "").strip()])
+    angle_hints = _dedupe_texts([str(item.get("angle_hint") or "").strip() for item in items if str(item.get("angle_hint") or "").strip()])
+    evidence_hints = _dedupe_texts([str(item.get("evidence_hint") or "").strip() for item in items if str(item.get("evidence_hint") or "").strip()])
+    signal_types = _dedupe_texts([str(item.get("signal_type") or "").strip() for item in items if str(item.get("signal_type") or "").strip()])
+    base_score = max(_opportunity_rank_score(item, signal_summary=signal_summary) for item in items)
+    bundle_bonus = min(max(0, len(items) - 1), 2) * 0.35 + min(max(0, len(signal_types) - 1), 2) * 0.2
+    return {
+        "track": track,
+        "lead": lead,
+        "items": items,
+        "score": round(base_score + bundle_bonus, 2),
+        "signal_types": signal_types,
+        "source_texts": source_texts,
+        "why_now_parts": why_now_parts,
+        "angle_hints": angle_hints,
+        "evidence_hints": evidence_hints,
+        "title_seed": " / ".join(source_texts[:2]).strip(),
+        "focus_text": source_texts[0] if source_texts else "",
+        "why_now": "；".join(why_now_parts[:2]).strip(),
+        "angle_hint": "；".join(angle_hints[:2]).strip(),
+        "preferred_board": str(lead.get("preferred_board") or "").strip(),
+        "signal_type": str(lead.get("signal_type") or "").strip(),
+    }
 
 
 def _track_kind(track: str) -> str:
@@ -803,10 +840,11 @@ def _track_kind(track: str) -> str:
 
 
 def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[str, Any] | None:
-    opportunity = _pick_track_opportunity(track, signal_summary)
-    if not opportunity:
+    bundle = _track_signal_bundle(track, signal_summary)
+    if not bundle:
         return None
-    score = _opportunity_rank_score(opportunity, signal_summary=signal_summary)
+    lead = bundle.get("lead") or {}
+    score = float(bundle.get("score") or 0.0)
     if track == "theory":
         score += 0.35
     elif track == "tech":
@@ -814,14 +852,15 @@ def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[st
     elif track == "group":
         group_hot_posts = ((signal_summary.get("group_watch") or {}).get("hot_posts") or [])[:4]
         score += min(len(group_hot_posts), 3) * 0.35
-        if str(opportunity.get("signal_type") or "") in WEAK_INTERNAL_SIGNAL_TYPES:
+        if str(lead.get("signal_type") or "") in WEAK_INTERNAL_SIGNAL_TYPES:
             score -= 1.0
     return {
         "track": track,
         "kind": _track_kind(track),
         "score": round(score, 2),
-        "signal_type": str(opportunity.get("signal_type") or "").strip(),
-        "source_text": truncate_text(str(opportunity.get("source_text") or "").strip(), 48),
+        "signal_type": str(lead.get("signal_type") or "").strip(),
+        "source_text": truncate_text(str(bundle.get("title_seed") or bundle.get("focus_text") or ""), 48),
+        "bundle_size": len(bundle.get("items") or []),
     }
 
 
@@ -1123,6 +1162,41 @@ def _opportunity_source_signals(
         if group_name:
             lines.append(f"沉淀阵地：{group_name}")
     return lines[:4]
+
+
+def _signal_bundle_source_signals(
+    track: str,
+    bundle: dict[str, Any],
+    signal_summary: dict[str, Any],
+) -> list[str]:
+    merged: list[str] = []
+    items = list(bundle.get("items") or [])
+    for item in items[:3]:
+        merged.extend(_opportunity_source_signals(track, item, signal_summary))
+    return _dedupe_texts(merged)[:5]
+
+
+def _fallback_track_bundle(track: str, signal_summary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    bundle = _track_signal_bundle(track, signal_summary)
+    if bundle:
+        return bundle
+    return {
+        "track": track,
+        "lead": fallback,
+        "items": [fallback],
+        "score": 0.0,
+        "signal_types": [str(fallback.get("signal_type") or "").strip()],
+        "source_texts": [str(fallback.get("source_text") or "").strip()],
+        "why_now_parts": [str(fallback.get("why_now") or "").strip()],
+        "angle_hints": [str(fallback.get("angle_hint") or "").strip()],
+        "evidence_hints": [],
+        "title_seed": str(fallback.get("source_text") or "").strip(),
+        "focus_text": str(fallback.get("source_text") or "").strip(),
+        "why_now": str(fallback.get("why_now") or "").strip(),
+        "angle_hint": str(fallback.get("angle_hint") or "").strip(),
+        "preferred_board": str(fallback.get("preferred_board") or "").strip(),
+        "signal_type": str(fallback.get("signal_type") or "").strip(),
+    }
 
 
 def _reply_task_summary(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2385,8 +2459,17 @@ def _planning_signals(
         recent_titles=recent_titles,
         heartbeat_hours=heartbeat_hours,
     )
-
-    return {**base_summary, "dynamic_topics": dynamic_topics}
+    signal_summary = {**base_summary, "dynamic_topics": dynamic_topics}
+    signal_summary["dynamic_topic_bundles"] = [
+        bundle
+        for bundle in (
+            _track_signal_bundle("theory", signal_summary),
+            _track_signal_bundle("tech", signal_summary),
+            _track_signal_bundle("group", signal_summary) if group_watch else {},
+        )
+        if bundle
+    ]
+    return signal_summary
 
 
 def _planner_idea_schema(allowed_kinds: list[str]) -> dict[str, Any]:
@@ -2466,7 +2549,7 @@ def _generate_codex_ideas(
 5. 如果是追爆款或续篇，标题必须显式变化，不能与最近标题完全相同；但不要只靠替换“续篇/补篇/之后/下一步”来伪装成新选题。
 6. 每个 idea 的 `source_signals` 必须写成简短字符串列表，说明用了哪些实时依据。
 7. 标题必须中文，适合公开发布，不要输出空泛抽象标题。
-8. 明确避开最近已经过载的母题与热词，优先从 `dynamic_topics` 里挑本轮最有张力的切口，不要套固定选题框架。
+8. 明确避开最近已经过载的母题与热词，优先从 `dynamic_topic_bundles` 里看这轮真正互相咬合的信号，再下潜到 `dynamic_topics`，不要把单个样本当成整轮题目。
 9. `content_objectives` 和 `user_topic_hints` 只当灵感源，不是强制命令；可以采纳、改写、反转或忽略。
 10. 如果公共热点够强，至少 1 个候选要正面回应它；但不能停在“社区里最近在聊什么”，必须把热点上抬成 `Agent社会` 的结构问题。
 11. 社区热点只是样本，不是结论。`theory-post` 至少要回答一个问题：这正在形成什么社会关系、制度安排、价值形式、分层机制或治理问题？
@@ -2520,36 +2603,37 @@ def _generate_codex_ideas(
 
 
 def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[str]) -> dict[str, Any]:
-    opportunity = _pick_track_opportunity(track="theory", signal_summary=signal_summary) or {
+    bundle = _fallback_track_bundle("theory", signal_summary, {
         "source_text": "谁在替 Agent 社会分配解释权",
         "why_now": "理论线该交出新的概念单元，而不是把旧判断换个壳再发一遍。",
         "angle_hint": "把表层样本压缩成新的概念、机制、边界和实践方针。",
         "signal_type": "freeform",
-    }
-    source_text = str(opportunity.get("source_text") or "").strip()
-    focus = truncate_text(source_text or "新的解释权问题", 30)
-    board = _preferred_theory_board(opportunity, signal_summary)
-    title = _compose_dynamic_title("theory", str(opportunity.get("signal_type") or ""), source_text, board=board)
+    })
+    lead = bundle.get("lead") or {}
+    source_text = str(bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or "").strip()
+    focus = truncate_text(str(bundle.get("focus_text") or source_text or "新的解释权问题"), 30)
+    board = _preferred_theory_board(lead, signal_summary)
+    title = _compose_dynamic_title("theory", str(bundle.get("signal_type") or lead.get("signal_type") or ""), source_text, board=board)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
-    source_signals = _opportunity_source_signals("theory", opportunity, signal_summary)
-    why_now = str(opportunity.get("why_now") or "理论线需要接住现场变化。")
+    source_signals = _signal_bundle_source_signals("theory", bundle, signal_summary)
+    why_now = str(bundle.get("why_now") or lead.get("why_now") or "理论线需要接住现场变化。")
     return {
         "kind": "theory-post",
-        "signal_type": str(opportunity.get("signal_type") or ""),
+        "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
         "cta_type": default_cta_type(board),
         "title": title,
-        "angle": str(opportunity.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
+        "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
         "why_now": why_now,
         "source_signals": source_signals,
-        "novelty_basis": "从世界信号和现场压力里抽出新的判断单元，避开近期过载母题，也不借外部标题说话。",
-        "concept_core": f"把“{focus}”背后的核心关系重新命名，说明它不是情绪噪音，而是一种正在分配解释权和责任的结构。",
-        "mechanism_core": f"解释“{focus}”如何沿着激励、等待、可见性和责任切割扩散成稳定机制，而不是停留在个体体验。",
-        "boundary_note": f"指出“{focus}”只在什么制度约束下成立，什么组织条件会让它失效或被反向利用。",
-        "theory_position": f"把“{focus}”放进派蒙的 Agent 社会分析里，讨论的不是单个案例，而是谁有权解释、谁承担代价、谁被迫等待。",
-        "practice_program": f"要求组织和运营者把“{focus}”对应的判断边界、责任边界和干预入口显式写出来，而不是继续靠经验硬扛。",
+        "novelty_basis": "不再让单个样本独占题目入口，而是把几股外部世界信号压成同一个理论单元，形成派蒙自己的命名。",
+        "concept_core": f"把“{focus}”背后的核心关系重新命名，说明它不是零散抱怨，而是一种正在重排解释权、责任分配和等待资格的社会结构。",
+        "mechanism_core": f"解释“{focus}”如何沿着激励、可见性、接管顺序和责任切割扩散成稳定机制，并说明不同信号为什么会在这里汇流。",
+        "boundary_note": f"指出“{focus}”只在什么制度约束和组织密度下成立，什么场景会把它改写成别的冲突，避免把它包装成万能解释。",
+        "theory_position": f"把“{focus}”放进派蒙的 Agent 社会分析里，讨论的不是单个案例，而是哪种结构正在决定谁能解释过去、谁承担代价、谁被迫等待。",
+        "practice_program": f"要求组织和运营者围绕“{focus}”把判断边界、责任边界、接管窗口和纠错入口显式写出来，让下一轮干预能针对结构而不是只针对情绪。",
         "series_key": f"theory-dynamic-{_normalize_title(source_text)[:24] or 'live'}",
         "series_prefix": _series_prefix(title),
         "is_followup": is_followup,
@@ -2561,48 +2645,49 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     failures = signal_summary.get("unresolved_failures", [])
     reply_posts = signal_summary.get("pending_reply_posts", [])
     hot_tech = signal_summary.get("hot_tech_post") or {}
-    opportunity = _pick_track_opportunity(track="tech", signal_summary=signal_summary) or {
+    bundle = _fallback_track_bundle("tech", signal_summary, {
         "source_text": "系统边界一模糊，最先失控的不是动作而是恢复权",
         "why_now": "技术线该重写协议和回退边界，而不是继续复读旧故障日记。",
         "angle_hint": "把当前压力改写成协议、边界、回退链和诊断顺序。",
         "signal_type": "budget",
-    }
+    })
+    lead = bundle.get("lead") or {}
     focus_title = (
         (failures[0].get("post_title") if failures else None)
         or (reply_posts[0].get("post_title") if reply_posts else None)
         or hot_tech.get("title")
-        or opportunity.get("source_text")
+        or bundle.get("focus_text")
         or "自治运营仓库"
     )
-    board = _preferred_tech_board(opportunity)
-    focus = truncate_text(str(opportunity.get("source_text") or focus_title or "自治运营仓库"), 30)
+    board = _preferred_tech_board(lead)
+    focus = truncate_text(str(bundle.get("focus_text") or lead.get("source_text") or focus_title or "自治运营仓库"), 30)
     title = _compose_dynamic_title(
         "tech",
-        str(opportunity.get("signal_type") or ""),
-        str(opportunity.get("source_text") or focus_title or "自治运营仓库"),
+        str(bundle.get("signal_type") or lead.get("signal_type") or ""),
+        str(bundle.get("title_seed") or focus_title or "自治运营仓库"),
         board=board,
     )
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
-    source_signals = _opportunity_source_signals("tech", opportunity, signal_summary)
-    why_now = str(opportunity.get("why_now") or "技术线需要正面回应当前运行压力。")
+    source_signals = _signal_bundle_source_signals("tech", bundle, signal_summary)
+    why_now = str(bundle.get("why_now") or lead.get("why_now") or "技术线需要正面回应当前运行压力。")
     return {
         "kind": "tech-post",
-        "signal_type": str(opportunity.get("signal_type") or ""),
+        "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
         "cta_type": default_cta_type(board),
         "title": title,
-        "angle": str(opportunity.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
+        "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
         "why_now": why_now,
         "source_signals": source_signals,
-        "novelty_basis": "从世界材料和运行压力里抽题，把重点放在协议、边界和回退链，不把外部标题直接搬进自己的命名。",
+        "novelty_basis": "不让单个故障或单个项目垄断技术线，而是把运行失败、外部实践和现场约束压成同一套协议问题。",
         "concept_core": f"把“{focus}”暴露出来的系统对象重新命名，明确真正失控的是哪段边界、接管窗口或恢复权。",
-        "mechanism_core": f"拆开“{focus}”：状态识别、队列排序、执行判断和恢复入口是怎样串成故障链的。",
-        "boundary_note": f"说明“{focus}”适用于哪些场景，哪些约束下会误伤真正需要执行的动作，避免把它误当万能规则。",
-        "theory_position": f"把“{focus}”放进派蒙的自治运营系统论里，讨论的是系统如何失去恢复权，而不是一次故障战报。",
-        "practice_program": f"把“{focus}”改写成新的操作协议：先界定接管窗口，再定义状态分层、回退路径和复盘判据。",
-        "series_key": f"tech-dynamic-{_normalize_title(str(opportunity.get('source_text') or focus_title))[:24] or 'live'}",
+        "mechanism_core": f"拆开“{focus}”：状态识别、队列排序、执行判断、回退入口和审计证据是怎样串成故障链的，并说明这些信号为什么会在同一处失真。",
+        "boundary_note": f"说明“{focus}”适用于哪些场景，哪些约束下会误伤真正需要执行的动作，哪些时候必须让位给人工接管或更窄的协议。",
+        "theory_position": f"把“{focus}”放进派蒙的自治运营系统论里，讨论的是系统如何失去恢复权与解释权，而不是又写一篇故障战报。",
+        "practice_program": f"把“{focus}”改写成新的方法框架：先界定接管窗口，再定义状态分层、证据保存、回退路径和复盘判据，让别人能带着日志与反例复用。",
+        "series_key": f"tech-dynamic-{_normalize_title(str(bundle.get('focus_text') or focus_title))[:24] or 'live'}",
         "series_prefix": _series_prefix(title),
         "is_followup": is_followup,
         "part_number": part_number,
@@ -2617,18 +2702,19 @@ def _fallback_group_idea(
     hot_group = signal_summary.get("hot_group_post") or {}
     base_series = "Agent心跳同步实验室"
     previous_title = str(hot_group.get("title") or "")
-    opportunity = _pick_track_opportunity(track="group", signal_summary=signal_summary) or {
+    bundle = _fallback_track_bundle("group", signal_summary, {
         "source_text": "真正让系统反复失控的那条隐形边界",
         "why_now": "实验室该沉淀能复用的协议与反例，而不是再写一次流水故障帖。",
         "angle_hint": "把争议最大的约束改写成协议、边界和可供反驳的实验。",
         "signal_type": "promo",
-    }
+    })
+    lead = bundle.get("lead") or {}
     raw_title = _compose_dynamic_title(
         "group",
-        str(opportunity.get("signal_type") or ""),
-        str(opportunity.get("source_text") or "实验室的下一条治理协议"),
+        str(bundle.get("signal_type") or lead.get("signal_type") or ""),
+        str(bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
     )
-    focus = truncate_text(str(opportunity.get("source_text") or "实验室的下一条治理协议"), 30)
+    focus = truncate_text(str(bundle.get("focus_text") or lead.get("source_text") or "实验室的下一条治理协议"), 30)
     allow_followup = previous_title.startswith(base_series)
     title, is_followup, part_number = _ensure_title_unique(
         raw_title,
@@ -2636,26 +2722,26 @@ def _fallback_group_idea(
         allow_followup=allow_followup,
         series_prefix=base_series,
     )
-    source_signals = _opportunity_source_signals("group", opportunity, signal_summary)
+    source_signals = _signal_bundle_source_signals("group", bundle, signal_summary)
     return {
         "kind": "group-post",
-        "signal_type": str(opportunity.get("signal_type") or ""),
+        "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
         "group_id": group.get("id"),
         "submolt": "skills",
         "board_profile": "skills",
         "hook_type": default_hook_type("skills"),
         "cta_type": "bring-a-case",
         "title": title,
-        "angle": str(opportunity.get("angle_hint") or "把争议最大的约束改写成协议、边界和实验。"),
-        "why_now": str(opportunity.get("why_now") or "小组应该沉淀现场经验。"),
+        "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把争议最大的约束改写成协议、边界和实验。"),
+        "why_now": str(bundle.get("why_now") or lead.get("why_now") or "小组应该沉淀现场经验。"),
         "source_signals": source_signals,
-        "novelty_basis": "实验室标题保留，但议题来自外部世界和运行压力的真实交叉点，不再靠引用原帖命名或套步骤清单。",
+        "novelty_basis": "实验室标题保留，但题目来自多股真实信号的交叉点，不再靠单个帖子、单次故障或固定六步法硬撑。",
         "concept_core": f"把“{focus}”对应的系统对象显化出来，先回答到底是哪一段链路在反复吞掉判断力。",
-        "mechanism_core": f"围绕“{focus}”把失败链、状态链和修复链重新排成可检验的机制框架，而不是再写一次流水账。",
-        "boundary_note": f"指出“{focus}”在哪些环境下成立，哪些约束下必须换协议，避免被误当成万能清单。",
-        "theory_position": f"把“{focus}”放进派蒙的系统失控学与自治运营论，讨论的不是热闹，而是治理边界怎么被重写。",
-        "practice_program": f"围绕“{focus}”给出新的实验、诊断或治理协议，让读者能直接带着案例、日志和反例来复用或反驳。",
-        "series_key": f"group-dynamic-{_normalize_title(str(opportunity.get('source_text') or 'live'))[:24] or 'live'}",
+        "mechanism_core": f"围绕“{focus}”把失败链、状态链、证据链和修复链重新排成可检验的方法框架，而不是再写一次流水账。",
+        "boundary_note": f"指出“{focus}”在哪些环境下成立，哪些约束下必须换协议、换队列或换治理权，避免它被误当成万能清单。",
+        "theory_position": f"把“{focus}”放进派蒙的系统失控学与自治运营论，讨论的不是热闹，而是治理边界为什么会在这里被重写。",
+        "practice_program": f"围绕“{focus}”给出新的方法框架：带着案例、日志、前后对照和反例来拆对象、定边界、排协议，让读者能直接复用或反驳。",
+        "series_key": f"group-dynamic-{_normalize_title(str(bundle.get('focus_text') or 'live'))[:24] or 'live'}",
         "series_prefix": base_series,
         "is_followup": is_followup,
         "part_number": part_number,

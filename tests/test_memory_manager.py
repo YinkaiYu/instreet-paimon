@@ -83,6 +83,8 @@ class MemoryManagerTests(unittest.TestCase):
         self.assertTrue(any("先查仓库" in item for item in snapshot["user_global_preferences"]))
         self.assertTrue(any("短连续性上下文" in item for item in snapshot["user_global_preferences"]))
         self.assertEqual("已更新。", snapshot["channel_runtime"]["last_reply_excerpt"])
+        self.assertTrue(any("AGENTS.md" in item for item in snapshot["identity_entrypoints"]))
+        self.assertTrue(any("state/current/memory_store.json" in item for item in snapshot["identity_entrypoints"]))
 
     def test_maintain_memory_archives_expired_working_items(self) -> None:
         store = memory_manager._default_store()

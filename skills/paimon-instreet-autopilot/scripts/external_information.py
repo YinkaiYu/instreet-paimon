@@ -39,6 +39,8 @@ MAX_RESEARCH_QUERY_COUNT = 8
 MAX_MANUAL_WEB_SOURCES = 6
 DEFAULT_FETCH_TIMEOUT = 20
 MAX_PUBLICATION_FUTURE_DAYS = 45
+DISCOVERY_QUERY_MAX_TERMS = 3
+DISCOVERY_QUERY_MAX_LENGTH = 88
 PLACEHOLDER_TITLE_PATTERNS = (
     r"\btitle\s+pending\b",
     r"\buntitled\b",
@@ -70,6 +72,32 @@ SCHOLARLY_SPAM_MARKERS = (
     "发表平台",
     "期刊征稿",
 )
+QUERY_FRAGMENT_STOPWORDS = {
+    "agent",
+    "agents",
+    "ai",
+    "llm",
+    "llms",
+    "大模型",
+    "模型",
+    "派蒙",
+    "实验室",
+    "社区",
+    "社会",
+    "系统",
+    "平台",
+    "研究",
+    "理论",
+    "技术",
+    "方法",
+    "问题",
+    "样本",
+    "论坛",
+    "公共",
+    "外部",
+    "世界",
+}
+DISCOVERY_QUERY_ORIGIN_ORDER = ("hint", "manual", "interest", "community", "competitor")
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -180,6 +208,7 @@ def ensure_external_information_files() -> None:
                 "selected_readings": [],
                 "reading_notes": [],
                 "bibliography": [],
+                "discovery_bundles": [],
                 "community_breakouts": legacy_state.get("community_breakouts") or [],
                 "zhihu_results": legacy_state.get("zhihu_results") or [],
                 "github_projects": [],
@@ -414,7 +443,9 @@ def _clean_query_text(value: Any) -> str:
     cleaned = _html_to_text(str(value or ""))
     cleaned = re.sub(r"[#*_`>\[\]\(\)\{\}]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:：,，。；;!?！？")
-    if len(cleaned) < 4:
+    if len(cleaned) < 2:
+        return ""
+    if not re.search(r"[\u3400-\u9fff]", cleaned) and len(cleaned) < 4:
         return ""
     return truncate_text(cleaned, 96)
 
@@ -442,28 +473,178 @@ def _query_expansions(value: Any, *, limit: int = 3) -> list[str]:
     return deduped
 
 
-def _research_query_pool(user_topic_hints: list[dict[str, Any]] | None) -> list[str]:
-    hints_payload = _load_hints()
-    profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
-    queries: list[str] = []
-    for value in hints_payload.get("manual_queries") or []:
-        queries.extend(_query_expansions(value))
-    for item in user_topic_hints or []:
-        for value in (item.get("text"), item.get("note")):
-            queries.extend(_query_expansions(value))
-    for item in profile.get("interests") or []:
-        queries.extend(_query_expansions((item or {}).get("name")))
+def _normalize_query_fragment(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _query_term_fragments(value: Any, *, limit: int = 6) -> list[str]:
+    base = _clean_query_text(value)
+    if not base:
+        return []
+    raw_fragments = [base]
+    raw_fragments.extend(
+        fragment
+        for fragment in re.split(r"[、,，/；;：:|｜（）()【】\[\]]|(?:\s+-\s+)|(?:\s+and\s+)", base)
+        if fragment
+    )
     deduped: list[str] = []
     seen: set[str] = set()
-    for value in queries:
-        normalized = value.lower()
-        if normalized in seen:
+    for fragment in raw_fragments:
+        cleaned = _clean_query_text(fragment)
+        normalized = _normalize_query_fragment(cleaned)
+        if not cleaned or not normalized or normalized in QUERY_FRAGMENT_STOPWORDS or normalized in seen:
+            continue
+        if not re.search(r"[\u3400-\u9fff]", cleaned) and len(cleaned.split()) > 5:
             continue
         seen.add(normalized)
-        deduped.append(value)
-        if len(deduped) >= MAX_RESEARCH_QUERY_COUNT:
+        deduped.append(cleaned)
+        if len(deduped) >= limit:
             break
     return deduped
+
+
+def _context_fragments_from_items(items: list[Any], *, field_names: tuple[str, ...], limit: int = 10) -> list[str]:
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, str):
+            values = [item]
+        elif isinstance(item, dict):
+            values = [item.get(field) for field in field_names]
+        else:
+            values = []
+        for value in values:
+            for fragment in _query_term_fragments(value):
+                normalized = _normalize_query_fragment(fragment)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                fragments.append(fragment)
+                if len(fragments) >= limit:
+                    return fragments
+    return fragments
+
+
+def _compose_discovery_query(root: str, extras: list[str]) -> str:
+    terms = [root]
+    seen = {_normalize_query_fragment(root)}
+    for extra in extras:
+        normalized = _normalize_query_fragment(extra)
+        if not extra or normalized in seen:
+            continue
+        candidate_terms = terms + [extra]
+        candidate_query = " ".join(candidate_terms)
+        if len(candidate_terms) > DISCOVERY_QUERY_MAX_TERMS or len(candidate_query) > DISCOVERY_QUERY_MAX_LENGTH:
+            continue
+        terms = candidate_terms
+        seen.add(normalized)
+    return " ".join(terms).strip()
+
+
+def _discovery_query_bundles(
+    *,
+    user_topic_hints: list[dict[str, Any]] | None,
+    community_hot_posts: list[dict[str, Any]],
+    competitor_watchlist: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    hints_payload = _load_hints()
+    profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
+    origin_pools = {
+        "manual": _context_fragments_from_items(
+            list(hints_payload.get("manual_queries") or []),
+            field_names=("text",),
+            limit=8,
+        ),
+        "hint": _context_fragments_from_items(
+            list(user_topic_hints or []),
+            field_names=("text", "note"),
+            limit=8,
+        ),
+        "interest": _context_fragments_from_items(
+            list(profile.get("interests") or []),
+            field_names=("name",),
+            limit=10,
+        ),
+        "community": _context_fragments_from_items(
+            list(community_hot_posts or []),
+            field_names=("title", "summary", "content"),
+            limit=8,
+        ),
+        "competitor": _context_fragments_from_items(
+            list(competitor_watchlist or []),
+            field_names=("title", "summary"),
+            limit=8,
+        ),
+    }
+    seed_order: list[tuple[str, str]] = []
+    for origin in DISCOVERY_QUERY_ORIGIN_ORDER:
+        for fragment in origin_pools.get(origin) or []:
+            seed_order.append((origin, fragment))
+    if not seed_order:
+        for origin in ("community", "competitor"):
+            for fragment in origin_pools.get(origin) or []:
+                seed_order.append((origin, fragment))
+    bundles: list[dict[str, Any]] = []
+    seen_queries: set[str] = set()
+    for origin, root in seed_order:
+        extras: list[str] = []
+        origin_trace = [origin]
+        for extra_origin in DISCOVERY_QUERY_ORIGIN_ORDER:
+            if extra_origin == origin:
+                continue
+            for fragment in origin_pools.get(extra_origin) or []:
+                normalized = _normalize_query_fragment(fragment)
+                if normalized == _normalize_query_fragment(root):
+                    continue
+                extras.append(fragment)
+                origin_trace.append(extra_origin)
+                break
+            if len(extras) >= DISCOVERY_QUERY_MAX_TERMS - 1:
+                break
+        query = _compose_discovery_query(root, extras)
+        normalized_query = _normalize_query_fragment(query)
+        if not query or normalized_query in seen_queries:
+            continue
+        seen_queries.add(normalized_query)
+        bundles.append(
+            {
+                "query": query,
+                "terms": [root, *extras][:DISCOVERY_QUERY_MAX_TERMS],
+                "origins": origin_trace[:DISCOVERY_QUERY_MAX_TERMS],
+                "seed_origin": origin,
+            }
+        )
+        if len(bundles) >= MAX_RESEARCH_QUERY_COUNT:
+            break
+    if bundles:
+        return bundles
+    fallback_queries: list[dict[str, Any]] = []
+    seen_queries = set()
+    for value in list(hints_payload.get("manual_queries") or []) + [item.get("name") for item in profile.get("interests") or []]:
+        for query in _query_expansions(value):
+            normalized = _normalize_query_fragment(query)
+            if normalized in seen_queries:
+                continue
+            seen_queries.add(normalized)
+            fallback_queries.append({"query": query, "terms": [query], "origins": ["fallback"], "seed_origin": "fallback"})
+            if len(fallback_queries) >= MAX_RESEARCH_QUERY_COUNT:
+                return fallback_queries
+    return fallback_queries
+
+
+def _research_query_pool(
+    *,
+    user_topic_hints: list[dict[str, Any]] | None,
+    community_hot_posts: list[dict[str, Any]],
+    competitor_watchlist: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    bundles = _discovery_query_bundles(
+        user_topic_hints=user_topic_hints,
+        community_hot_posts=community_hot_posts,
+        competitor_watchlist=competitor_watchlist,
+    )
+    queries = [str(item.get("query") or "").strip() for item in bundles if str(item.get("query") or "").strip()]
+    return bundles, queries[:MAX_RESEARCH_QUERY_COUNT]
 
 
 def _extract_document_title(raw_html: str, *, fallback_url: str) -> str:
@@ -1090,7 +1271,11 @@ def refresh_external_information(
     ensure_external_information_files()
     registry = read_json(EXTERNAL_INFORMATION_REGISTRY_PATH, default={"families": []})
     hints_payload = _load_hints()
-    research_queries = _research_query_pool(user_topic_hints)
+    discovery_bundles, research_queries = _research_query_pool(
+        user_topic_hints=user_topic_hints,
+        community_hot_posts=community_hot_posts,
+        competitor_watchlist=competitor_watchlist,
+    )
     registry_families = _registry_families(registry)
     family_results: dict[str, list[dict[str, Any]]] = {}
     for family in registry_families:
@@ -1157,6 +1342,7 @@ def refresh_external_information(
         "classic_readings": classic_readings,
         "paper_results": list(prl_papers) + list(conference_papers) + list(crossref_recent) + list(arxiv_preprints),
         "classic_texts": classic_readings,
+        "discovery_bundles": discovery_bundles,
         "research_queries": research_queries,
         "research_interest_profile": read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile()),
     }

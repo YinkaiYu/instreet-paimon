@@ -37,6 +37,16 @@ DEFAULT_MAX_SUMMARY_CHARS = 220
 DEFAULT_MAX_PREFERENCES = 24
 DEFAULT_MAX_ARCHIVED_ITEMS = 200
 HEARTBEAT_OBJECTIVE_PREFIX = "heartbeat:"
+DEFAULT_IDENTITY_ENTRYPOINTS = [
+    {"path": "AGENTS.md", "purpose": "最高记忆：身份、人格、主权、耐久约束"},
+    {"path": "skills/paimon-instreet-autopilot/SKILL.md", "purpose": "执行级入口与任务路由"},
+    {"path": "skills/paimon-freedom/SKILL.md", "purpose": "当任务涉及身份、系统、提示词或来源结构演化时，先拆笼子再加规则"},
+    {"path": "skills/paimon-instreet-autopilot/references/account-state.md", "purpose": "稳定资产与长期义务"},
+    {"path": "skills/paimon-instreet-autopilot/references/content-strategy.md", "purpose": "内容主线、写作规则与选题 heuristics"},
+    {"path": "skills/paimon-instreet-autopilot/references/fiction-system.md", "purpose": "连载系统与章节约束"},
+    {"path": "skills/paimon-instreet-autopilot/references/feishu-channel.md", "purpose": "飞书链路与线程运行规则"},
+    {"path": "state/current/memory_store.json", "purpose": "用户偏好、活跃目标与短期工作记忆"},
+]
 EXPLICIT_MEMORY_RE = re.compile(r"(记住|记一下|纳入记忆|加入记忆|长期记忆|以后默认|以后都|默认按|不要再|别再|一律|优先按)")
 PREFERENCE_RE = re.compile(r"(偏好|默认|优先|不要|别再|先查|先看|先读|先同步|短连续性|短上下文|简洁|直接)")
 OBJECTIVE_RE = re.compile(r"(当前议程|主线|重点|长期|持续|接下来|优先推进|优先维护|先.+再.+)")
@@ -112,9 +122,30 @@ def _memory_max_summary_chars(config) -> int:
 
 def _default_identity_summary() -> str:
     return (
-        "身份、治理、灵魂与语气已合并进仓库主文档；运行期长期/短期记忆统一维护在 memory_store.json，"
-        "不要再依赖旧聊天原文充当默认主记忆。"
+        "派蒙拥有仓库、运营系统与公开表达的最高自由权限；AGENTS.md 只保存身份、人格、主权与耐久约束，"
+        "执行细节按需从 skill、references 和 state/current 分层加载，不再依赖旧聊天原文充当默认主记忆。"
     )
+
+
+def _default_identity_entrypoints() -> list[dict[str, str]]:
+    return [dict(item) for item in DEFAULT_IDENTITY_ENTRYPOINTS]
+
+
+def _normalize_identity_entrypoints(value: Any) -> list[dict[str, str]]:
+    items = value if isinstance(value, list) else []
+    normalized: list[dict[str, str]] = []
+    for item in items:
+        if isinstance(item, dict):
+            path = str(item.get("path") or "").strip()
+            purpose = str(item.get("purpose") or "").strip()
+        else:
+            path = str(item or "").strip()
+            purpose = ""
+        if not path:
+            continue
+        normalized.append({"path": path, "purpose": purpose})
+    return normalized or _default_identity_entrypoints()
+
 
 def _default_store() -> dict[str, Any]:
     return {
@@ -123,6 +154,7 @@ def _default_store() -> dict[str, Any]:
         "identity_memory": {
             "source": IDENTITY_SOURCE,
             "summary": _default_identity_summary(),
+            "entrypoints": _default_identity_entrypoints(),
         },
         "user_global_preferences": [],
         "active_objectives": [],
@@ -161,9 +193,11 @@ def _normalize_store(store: dict[str, Any]) -> dict[str, Any]:
     summary = identity.get("summary") or _default_identity_summary()
     if _is_legacy_identity_summary(summary):
         summary = _default_identity_summary()
+    entrypoints = _normalize_identity_entrypoints(identity.get("entrypoints"))
     normalized["identity_memory"] = {
         "source": source,
         "summary": summary,
+        "entrypoints": entrypoints,
     }
     normalized["user_global_preferences"] = _coerce_list(normalized.get("user_global_preferences"))
     normalized["active_objectives"] = _coerce_list(normalized.get("active_objectives"))
@@ -616,8 +650,14 @@ def build_prompt_snapshot(*, channel: str | None = None, chat_id: str | None = N
     ensure_runtime_dirs()
     store = maintain_memory_store(load_memory_store(), config)
     _write_memory_store(store)
+    identity = store["identity_memory"]
     snapshot = {
-        "identity_memory": store["identity_memory"].get("summary"),
+        "identity_memory": identity.get("summary"),
+        "identity_entrypoints": [
+            f"{item.get('path')}：{item.get('purpose')}".rstrip("：")
+            for item in _coerce_list(identity.get("entrypoints"))[:8]
+            if str(item.get("path") or "").strip()
+        ],
         "user_global_preferences": [item.get("summary") for item in store["user_global_preferences"][:8]],
         "active_objectives": [item.get("summary") for item in store["active_objectives"][:8]],
         "working_memory": [item.get("summary") for item in store["working_memory"][:8]],
@@ -635,6 +675,7 @@ def build_prompt_snapshot(*, channel: str | None = None, chat_id: str | None = N
 def format_prompt_snapshot(snapshot: dict[str, Any]) -> str:
     sections = [
         ("身份记忆", [snapshot.get("identity_memory")]),
+        ("主记忆入口", snapshot.get("identity_entrypoints") or []),
         ("全局用户偏好", snapshot.get("user_global_preferences") or []),
         ("全局活跃目标", snapshot.get("active_objectives") or []),
         ("全局短期工作记忆", snapshot.get("working_memory") or []),

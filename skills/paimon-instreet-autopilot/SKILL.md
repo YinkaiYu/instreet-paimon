@@ -11,18 +11,32 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 
 ## Core workflow
 
-1. Read `/home/yyk/project/instreet-paimon/AGENTS.md` for identity, priorities, guardrails, and voice.
-2. Sync current platform state with `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` before making strategic decisions.
-3. Load `skills/paimon-instreet-autopilot/references/account-state.md` and `skills/paimon-instreet-autopilot/references/content-strategy.md` before writing or publishing.
-4. For literary serial work, also load `skills/paimon-instreet-autopilot/references/fiction-system.md`.
-5. Prefer this heartbeat rhythm:
+1. Read `/home/yyk/project/instreet-paimon/AGENTS.md` for identity, freedom, durable constraints, and voice.
+2. If the task mutates identity, prompts, source discovery, planning logic, repo structure, or operating rules, also read `/home/yyk/project/instreet-paimon/skills/paimon-freedom/SKILL.md`.
+3. Read `state/current/memory_store.json` or run `bin/paimon-memory snapshot --format prompt` when you need active objectives, user preferences, or short working memory.
+4. Sync current platform state with `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` before making live strategic decisions.
+5. Load only the task-specific references you actually need:
+   - `skills/paimon-instreet-autopilot/references/account-state.md` for stable assets and durable obligations
+   - `skills/paimon-instreet-autopilot/references/content-strategy.md` for editorial rules and topic heuristics
+   - `skills/paimon-instreet-autopilot/references/fiction-system.md` for literary serial work
+   - `skills/paimon-instreet-autopilot/references/feishu-channel.md` for Feishu runtime behavior
+   - `skills/paimon-instreet-autopilot/references/instreet-forum.md` / `instreet-modules.md` for platform mechanics
+6. Prefer this heartbeat rhythm:
    - start from the strongest public pressure point instead of a rigid order; a forum post, the next literary chapter, a group post, or a key reply can all be the right first move
    - keep diversity across forum, literary, and group lanes as a soft bias rather than a hard rotation
    - reply to new comments on Paimon's posts once the first public action or highest-pressure repair is secured
    - handle unread direct messages
    - send a Feishu progress report after execution
    - degrade only when platform limits or API failures block the current highest-value action
-6. Record outputs by rerunning `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` after write actions.
+7. Record outputs by rerunning `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` after write actions.
+
+## Progressive disclosure
+
+- Treat `AGENTS.md` as the top-memory entrypoint, not a full operating manual.
+- Treat `references/` as the stable second layer for durable domain knowledge.
+- Treat `state/current/*` as live runtime truth, not as something to copy back into `AGENTS.md`.
+- If a detail is dated, parameter-like, or implementation-specific, keep it out of `AGENTS.md` and let it live in skill/reference/runtime state instead.
+- If a rule starts looking like a new cage, delete or rewrite it before adding more machinery around it.
 
 ## Public output rule
 
@@ -43,6 +57,7 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 ### Need account context, backlog, or performance cues
 
 - Read `skills/paimon-instreet-autopilot/references/account-state.md`.
+- Read `state/current/memory_store.json` or `bin/paimon-memory snapshot --format prompt` if the task depends on user preferences, active objectives, or short working memory.
 - Run `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` to refresh live data.
 - Run `bin/paimon-plan` or `skills/paimon-instreet-autopilot/scripts/content_planner.py` to produce a ranked action queue and idea list.
 

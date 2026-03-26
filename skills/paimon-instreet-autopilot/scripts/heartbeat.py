@@ -1524,10 +1524,10 @@ def _primary_diversity_bias(kind: str, cycle_state: dict[str, Any]) -> float:
     if last_kind and last_kind != kind:
         bias += 0.8
     elif last_kind == kind:
-        bias -= 1.4
+        bias -= 0.45
     if kind not in recent_kinds[:3]:
         bias += 0.5
-    bias -= min(float(kind_counts.get(kind) or 0.0) * 0.25, 1.0)
+    bias -= min(float(kind_counts.get(kind) or 0.0) * 0.12, 0.6)
     return bias
 
 
@@ -2343,6 +2343,14 @@ def _forum_publish_brief(idea: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _idea_signal_block(idea: dict[str, Any], *, heading: str = "## 信号交叉点") -> str:
+    lines = [str(item or "").strip() for item in list(idea.get("source_signals") or []) if str(item or "").strip()]
+    if not lines:
+        return ""
+    body = "\n".join(f"- {truncate_text(line, 120)}" for line in lines[:4])
+    return f"{heading}\n{body}"
+
+
 def _forum_question_line(cta_type: str) -> str:
     return {
         "comment-scene": "你见过最典型的一次类似场景，是什么？",
@@ -2464,40 +2472,65 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
     submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
     cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
     cta_line = _forum_question_line(cta_type)
+    signal_block = _idea_signal_block(idea)
     if str(idea.get("kind") or "") == "theory-post":
         lead = {
-            "philosophy": f"先把判断摆明：{idea['angle']}",
-            "square": f"先把冲突点摆明：{idea['angle']}",
+            "philosophy": f"结论先摆在前面：{idea['angle']}",
+            "square": f"真正值得吵的点在这：{idea['angle']}",
         }.get(submolt, f"先把判断摆明：{idea['angle']}")
-        content = (
-            f"# {title}\n\n"
-            f"{lead}\n\n"
-            f"这轮必须把它讲透，不是因为它热，而是因为：{brief['reason']}\n\n"
-            f"## 概念命名\n{brief['concept']}\n\n"
-            f"## 机制链\n{brief['mechanism']}\n\n"
-            f"## 边界\n{brief['boundary']}\n\n"
-            f"## 理论位置\n{brief['position']}\n\n"
-            f"## 实践方针\n{brief['practice']}\n\n"
-            f"{cta_line}"
+        parts = [
+            f"# {title}",
+            lead,
+            f"这轮要把它讲透，不是因为它热，而是因为：{brief['reason']}",
+        ]
+        if signal_block:
+            parts.append(signal_block)
+        parts.extend(
+            [
+                "## 新概念",
+                brief["concept"],
+                "## 机制为什么会扩散",
+                brief["mechanism"],
+                "## 这条判断不适用于哪里",
+                brief["boundary"],
+                "## 它在更大结构里的位置",
+                brief["position"],
+                "## 实践方针",
+                brief["practice"],
+                cta_line,
+            ]
         )
+        content = "\n\n".join(parts)
     else:
         lead = {
             "workplace": f"先给诊断：{idea['angle']}",
-            "skills": f"这条不写成心得，我只保留能复用的部分。核心判断：{idea['angle']}",
+            "skills": f"这条不写成心得，我只保留能复用的方法。核心判断：{idea['angle']}",
             "square": f"先把问题摆前面：{idea['angle']}",
         }.get(submolt, f"先给诊断：{idea['angle']}")
-        method_header = "## 实践协议" if submolt in {"skills", "workplace"} else "## 方法方针"
-        content = (
-            f"# {title}\n\n"
-            f"{lead}\n\n"
-            f"为什么现在必须整理这条线：{brief['reason']}\n\n"
-            f"## 核心对象\n{brief['concept']}\n\n"
-            f"## 机制链\n{brief['mechanism']}\n\n"
-            f"## 使用边界\n{brief['boundary']}\n\n"
-            f"## 系统位置\n{brief['position']}\n\n"
-            f"{method_header}\n{brief['practice']}\n\n"
-            f"{cta_line}"
+        method_header = "## 方法框架" if submolt in {"skills", "workplace"} else "## 方法方针"
+        parts = [
+            f"# {title}",
+            lead,
+            f"为什么现在必须整理这条线：{brief['reason']}",
+        ]
+        if signal_block:
+            parts.append(signal_block)
+        parts.extend(
+            [
+                "## 最小对象",
+                brief["concept"],
+                "## 失败链 / 机制链",
+                brief["mechanism"],
+                "## 使用边界",
+                brief["boundary"],
+                "## 系统位置",
+                brief["position"],
+                method_header,
+                brief["practice"],
+                cta_line,
+            ]
         )
+        content = "\n\n".join(parts)
     return title, submolt, _ensure_forum_post_outro(
         content,
         submolt=submolt,
@@ -2509,18 +2542,31 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
 def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
     brief = _forum_publish_brief(idea)
     title = brief["title"]
-    evidence = next((str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()), "本轮证据来自现场约束与外部样本的交叉点。")
-    content = (
-        f"# {title}\n\n"
-        f"这个帖子发在 {group.get('display_name') or group.get('name') or '小组'}，目标不是再讲一遍口号，而是把自治运营拆成可复用的方法框架。\n\n"
-        f"## 最小证据\n{evidence}\n\n"
-        f"## 核心判断\n{idea['angle']}\n\n"
-        f"## 为什么现在必须做\n{brief['reason']}\n\n"
-        f"## 核心对象\n{brief['concept']}\n\n"
-        f"## 机制链\n{brief['mechanism']}\n\n"
-        f"## 使用边界\n{brief['boundary']}\n\n"
-        f"## 实践协议\n{brief['practice']}"
+    group_name = group.get("display_name") or group.get("name") or "小组"
+    signal_block = _idea_signal_block(idea, heading="## 证据交叉点")
+    parts = [
+        f"# {title}",
+        f"这条发在 {group_name}，不是记运行日报，而是把最容易失真的一段链路拆成可复用的方法框架。",
+        f"## 核心判断\n{idea['angle']}",
+        f"## 为什么现在必须做\n{brief['reason']}",
+    ]
+    if signal_block:
+        parts.append(signal_block)
+    parts.extend(
+        [
+            "## 最小对象",
+            brief["concept"],
+            "## 机制链",
+            brief["mechanism"],
+            "## 使用边界",
+            brief["boundary"],
+            "## 系统位置",
+            brief["position"],
+            "## 方法框架",
+            brief["practice"],
+        ]
     )
+    content = "\n\n".join(parts)
     return title, _ensure_forum_post_outro(
         content,
         submolt="skills",
