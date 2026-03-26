@@ -27,6 +27,7 @@ CROSSREF_API_URL = "https://api.crossref.org/works"
 GITHUB_TRENDING_URL = "https://github.com/trending?since=daily"
 PRL_RSS_URL = "https://feeds.aps.org/rss/recent/prl.xml"
 ZHIHU_HOT_URL = "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=12&desktop=true"
+DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 
 RECENT_BREAKOUT_HOURS = 24
 RECENT_BREAKOUT_MIN_UPVOTES = 100
@@ -53,6 +54,22 @@ CROSSREF_DISCOVERY_ITEM_TYPES = {
     "report",
     "report-component",
 }
+SCHOLARLY_SPAM_MARKERS = (
+    "征稿",
+    "约稿",
+    "投稿",
+    "投稿指南",
+    "见刊",
+    "录用周期",
+    "出版社",
+    "publisher",
+    "call for papers",
+    "call-for-papers",
+    "submit your paper",
+    "special issue invitation",
+    "发表平台",
+    "期刊征稿",
+)
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -74,6 +91,7 @@ VENUE_ALIASES = {
 }
 BUILTIN_SOURCE_FAMILY_DEFAULTS = {
     "community_breakouts": {"kind": "community_breakouts", "state_key": "community_breakouts", "summary_family": "community_breakouts"},
+    "open_web_search": {"kind": "open_web_search", "state_key": "open_web_results", "summary_family": "open_web_search"},
     "zhihu_hot": {"kind": "zhihu_hot", "state_key": "zhihu_results", "summary_family": "zhihu_hot"},
     "github_trending": {"kind": "github_trending", "state_key": "github_projects", "summary_family": "github_trending"},
     "prl_recent": {"kind": "prl_recent", "state_key": "prl_papers", "summary_family": "prl_recent"},
@@ -88,6 +106,7 @@ BUILTIN_SOURCE_FAMILY_DEFAULTS = {
 def _default_registry_families() -> list[dict[str, Any]]:
     return [
         {"name": "community_breakouts", "enabled": True},
+        {"name": "open_web_search", "enabled": True, "limit_per_query": 2},
         {"name": "zhihu_hot", "enabled": True},
         {"name": "github_trending", "enabled": True},
         {"name": "prl_recent", "enabled": True},
@@ -115,6 +134,12 @@ def _registry_families(registry: dict[str, Any]) -> list[dict[str, Any]]:
     raw = list(registry.get("families") or [])
     if not raw:
         raw = _default_registry_families()
+    else:
+        seen_names = {str((item or {}).get("name") or "").strip() for item in raw if isinstance(item, dict)}
+        for item in _default_registry_families():
+            name = str(item.get("name") or "").strip()
+            if name and name not in seen_names:
+                raw.append(item)
     return [_normalize_registry_family(item) for item in raw if isinstance(item, dict)]
 
 
@@ -288,6 +313,16 @@ def _candidate_plausible(item: dict[str, Any]) -> bool:
     return _publication_date_plausible(item.get("published_at"))
 
 
+def _scholarly_candidate_plausible(
+    *,
+    title: str,
+    summary: str = "",
+    container: str = "",
+) -> bool:
+    merged = "\n".join(part for part in (title, summary, container) if part).lower()
+    return not any(marker in merged for marker in SCHOLARLY_SPAM_MARKERS)
+
+
 def _venue_tokens(venue: str) -> tuple[str, ...]:
     normalized = str(venue or "").strip().lower()
     if not normalized:
@@ -384,23 +419,40 @@ def _clean_query_text(value: Any) -> str:
     return truncate_text(cleaned, 96)
 
 
+def _query_expansions(value: Any, *, limit: int = 3) -> list[str]:
+    base = _clean_query_text(value)
+    if not base:
+        return []
+    expanded = [base]
+    for fragment in re.split(r"[、,，/；;]|(?:\s+-\s+)|(?:\s+and\s+)", base):
+        cleaned = _clean_query_text(fragment)
+        if not cleaned or cleaned == base:
+            continue
+        expanded.append(cleaned)
+        if len(expanded) >= limit:
+            break
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in expanded:
+        normalized = item.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(item)
+    return deduped
+
+
 def _research_query_pool(user_topic_hints: list[dict[str, Any]] | None) -> list[str]:
     hints_payload = _load_hints()
     profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
     queries: list[str] = []
     for value in hints_payload.get("manual_queries") or []:
-        cleaned = _clean_query_text(value)
-        if cleaned:
-            queries.append(cleaned)
+        queries.extend(_query_expansions(value))
     for item in user_topic_hints or []:
         for value in (item.get("text"), item.get("note")):
-            cleaned = _clean_query_text(value)
-            if cleaned:
-                queries.append(cleaned)
+            queries.extend(_query_expansions(value))
     for item in profile.get("interests") or []:
-        cleaned = _clean_query_text((item or {}).get("name"))
-        if cleaned:
-            queries.append(cleaned)
+        queries.extend(_query_expansions((item or {}).get("name")))
     deduped: list[str] = []
     seen: set[str] = set()
     for value in queries:
@@ -618,6 +670,74 @@ def _fetch_github_trending_best_effort(limit: int = 10) -> list[dict[str, Any]]:
     return results
 
 
+def _unwrap_duckduckgo_href(href: str) -> str:
+    cleaned = str(href or "").strip()
+    if not cleaned:
+        return ""
+    parsed = parse.urlparse(cleaned)
+    if "duckduckgo.com" not in parsed.netloc:
+        return cleaned
+    query = parse.parse_qs(parsed.query)
+    redirected = query.get("uddg") or query.get("rut")
+    if redirected:
+        return parse.unquote(redirected[0])
+    return cleaned
+
+
+def _fetch_open_web_search_best_effort(
+    queries: list[str],
+    *,
+    limit_per_query: int = 2,
+    overall_limit: int = 12,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for query in queries[:MAX_RESEARCH_QUERY_COUNT]:
+        try:
+            raw_html = _fetch_text(
+                f"{DUCKDUCKGO_HTML_URL}?{parse.urlencode({'q': query})}",
+                headers={"Referer": "https://duckduckgo.com/"},
+            )
+        except Exception:
+            continue
+        blocks = re.findall(
+            r'(?is)<div[^>]+class="[^"]*\bresult\b[^"]*"[^>]*>.*?(?=<div[^>]+class="[^"]*\bresult\b[^"]*"|$)',
+            raw_html,
+        )
+        picked = 0
+        for block in blocks:
+            title_match = re.search(r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
+            if not title_match:
+                continue
+            url = _unwrap_duckduckgo_href(title_match.group(1))
+            title = _html_to_text(title_match.group(2))
+            if not title or not url.startswith(("http://", "https://")):
+                continue
+            snippet_match = re.search(
+                r'(?is)<(?:a|div)[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|div)>',
+                block,
+            )
+            excerpt = _truncate_excerpt(_html_to_text(snippet_match.group(1) if snippet_match else ""), 1000)
+            if len(excerpt) < 60:
+                continue
+            results.append(
+                {
+                    "family": "open_web_search",
+                    "title": truncate_text(title, 180),
+                    "summary": truncate_text(excerpt, 220),
+                    "excerpt": excerpt,
+                    "url": url,
+                    "published_at": "",
+                    "query": query,
+                }
+            )
+            picked += 1
+            if picked >= limit_per_query:
+                break
+            if len(results) >= overall_limit:
+                return _dedupe_candidates(results, limit=overall_limit)
+    return _dedupe_candidates(results, limit=overall_limit)
+
+
 def _fetch_prl_recent_best_effort(limit: int = 8) -> list[dict[str, Any]]:
     try:
         raw = _fetch_text(PRL_RSS_URL)
@@ -737,6 +857,8 @@ def _fetch_conference_recent(venues: list[str], *, limit_per_venue: int = 3) -> 
             if not _crossref_item_matches_venue(item, venue):
                 continue
             abstract = _strip_jats_tags(str(item.get("abstract") or ""))
+            if not _scholarly_candidate_plausible(title=title, summary=abstract, container=venue):
+                continue
             url_value = str(item.get("URL") or "").strip()
             published_at = _crossref_published_at(item)
             candidate = {
@@ -794,6 +916,8 @@ def _fetch_crossref_recent_best_effort(
                 continue
             abstract = _strip_jats_tags(str(item.get("abstract") or ""))
             container = _crossref_container_label(item)
+            if not _scholarly_candidate_plausible(title=title, summary=abstract, container=container):
+                continue
             candidate = {
                 "family": "crossref_recent",
                 "title": title,
@@ -926,6 +1050,10 @@ def _fetch_registry_family_best_effort(
     limit = max(1, int(family.get("limit") or 8))
     if kind == "community_breakouts":
         return _extract_community_breakouts(community_hot_posts, competitor_watchlist)
+    if kind == "open_web_search":
+        queries = list(family.get("queries") or []) or research_queries
+        limit_per_query = max(1, int(family.get("limit_per_query") or 2))
+        return _fetch_open_web_search_best_effort(queries, limit_per_query=limit_per_query, overall_limit=limit)
     if kind == "zhihu_hot":
         return _fetch_zhihu_hot_best_effort(limit=limit)
     if kind == "github_trending":
@@ -978,6 +1106,7 @@ def refresh_external_information(
         )
 
     community_breakouts = list(family_results.get("community_breakouts") or [])
+    open_web_results = list(family_results.get("open_web_search") or [])
     zhihu_results = list(family_results.get("zhihu_hot") or [])
     github_projects = list(family_results.get("github_trending") or [])
     prl_papers = list(family_results.get("prl_recent") or [])
@@ -1017,6 +1146,7 @@ def refresh_external_information(
         "reading_notes": reading_notes,
         "bibliography": bibliography,
         "community_breakouts": community_breakouts,
+        "open_web_results": open_web_results,
         "zhihu_results": zhihu_results,
         "github_projects": github_projects,
         "prl_papers": prl_papers,

@@ -114,6 +114,10 @@ Paimon runs a dual-track content system:
 - If comments on Paimon’s posts are strong, continue the thread before starting a fresh lane
 - If the literary work stalls, turn the next theory chapter into a literary chapter or vice versa
 - Do not keep a fixed source ladder. If the dashboard is stale, leave the dashboard and pull in new material from the wider world on purpose.
+- Do not keep a fixed idea quota either. If this round only has one strong public lane plus a chapter or a group repair, keep that shape instead of forcing empty theory/tech symmetry.
+- Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
+- Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
+- If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
 - Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
 

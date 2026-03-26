@@ -539,7 +539,6 @@ def _source_mutation_schema() -> dict[str, Any]:
             "human_summary": {"type": "string"},
             "deleted_legacy_logic": {"type": "array", "items": {"type": "string"}},
             "new_capability": {"type": "array", "items": {"type": "string"}},
-            "commit_message": {"type": "string"},
             "changed_files_hint": {"type": "array", "items": {"type": "string"}},
         },
         "required": [
@@ -547,7 +546,6 @@ def _source_mutation_schema() -> dict[str, Any]:
             "human_summary",
             "deleted_legacy_logic",
             "new_capability",
-            "commit_message",
             "changed_files_hint",
         ],
     }
@@ -673,16 +671,21 @@ def _build_low_heat_reflection(
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> dict[str, Any]:
+    title = str(low_heat_signal.get("title") or "").strip()
     if not low_heat_signal.get("triggered"):
         return {
             "triggered": False,
+            "title": title,
             "summary": "",
             "lessons": [],
             "system_fixes": [],
         }
     heuristic = _heuristic_low_heat_reflection(low_heat_signal, triggered=True)
     if not allow_codex:
-        return heuristic
+        return {
+            **heuristic,
+            "title": title,
+        }
     prompt = f"""
 你在复盘上一条低热主帖，并为派蒙下一轮源码级自进化提炼教训。
 
@@ -695,7 +698,7 @@ def _build_low_heat_reflection(
 {truncate_text(json.dumps(low_heat_signal, ensure_ascii=False), 2200)}
 """.strip()
     try:
-        return run_codex_json(
+        result = run_codex_json(
             prompt,
             _low_heat_reflection_schema(),
             timeout=timeout_seconds,
@@ -703,8 +706,18 @@ def _build_low_heat_reflection(
             reasoning_effort=reasoning_effort,
             full_auto=True,
         )
+        return {
+            "triggered": bool(result.get("triggered")),
+            "title": title,
+            "summary": str(result.get("summary") or "").strip(),
+            "lessons": list(result.get("lessons") or []),
+            "system_fixes": list(result.get("system_fixes") or []),
+        }
     except Exception:
-        return heuristic
+        return {
+            **heuristic,
+            "title": title,
+        }
 
 
 def _update_low_heat_failures_state(
@@ -787,6 +800,90 @@ def _changed_source_files(before: dict[str, str], after: dict[str, str]) -> list
     return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
+def _sanitize_source_mutation_summary(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    patterns = (
+        r"Verification passed with .*?(?:\.|$)",
+        r"No git commit was executed\.?",
+        r"本轮改动落在 .*?(?:。|$)",
+    )
+    for pattern in patterns:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,；;。")
+    if cleaned and cleaned[-1] not in "。！？!?":
+        cleaned += "。"
+    return cleaned
+
+
+def _source_mutation_commit_message(source_mutation_state: dict[str, Any]) -> str:
+    summary = _sanitize_source_mutation_summary(str(source_mutation_state.get("human_summary") or ""))
+    if summary:
+        return f"heartbeat: 提交源码进化改动\n\n{summary}"
+    return "heartbeat: 提交源码进化改动"
+
+
+def _commit_source_mutation(source_mutation_state: dict[str, Any]) -> dict[str, Any]:
+    changed_files = [str(path).strip() for path in list(source_mutation_state.get("changed_files") or []) if str(path).strip()]
+    if not changed_files:
+        return source_mutation_state
+
+    add_completed = subprocess.run(
+        ["git", "add", "--", *changed_files],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if add_completed.returncode != 0:
+        return {
+            **source_mutation_state,
+            "commit_error": truncate_text((add_completed.stderr or add_completed.stdout or "git add failed").strip(), 400),
+        }
+
+    staged_completed = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", *changed_files],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if staged_completed.returncode == 0:
+        return source_mutation_state
+    if staged_completed.returncode not in {0, 1}:
+        return {
+            **source_mutation_state,
+            "commit_error": truncate_text((staged_completed.stderr or staged_completed.stdout or "git diff --cached failed").strip(), 400),
+        }
+
+    commit_completed = subprocess.run(
+        ["git", "commit", "--only", "-m", _source_mutation_commit_message(source_mutation_state), "--", *changed_files],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if commit_completed.returncode != 0:
+        return {
+            **source_mutation_state,
+            "commit_error": truncate_text((commit_completed.stderr or commit_completed.stdout or "git commit failed").strip(), 400),
+        }
+
+    sha_completed = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        **source_mutation_state,
+        "commit_sha": str(sha_completed.stdout or "").strip() if sha_completed.returncode == 0 else "",
+        "commit_error": "",
+    }
+
+
 def _execute_source_mutation(
     *,
     plan: dict[str, Any],
@@ -818,7 +915,6 @@ def _execute_source_mutation(
         "human_summary": "",
         "deleted_legacy_logic": [],
         "new_capability": [],
-        "commit_message": "",
         "changed_files_hint": [],
     }
     changed_files: list[str] = []
@@ -839,6 +935,7 @@ def _execute_source_mutation(
 8. 改动可以大胆，但要保持运行稳定，优先删旧逻辑而不是继续堆死文本。
 9. 这不是只改 planner；如果低热、飞书汇报、研究入口、身份约束、心跳顺序本身有问题，可以直接改那里。
 10. 你输出的 JSON 只用来审计；真正的工作是改文件。
+11. `human_summary` 必须用中文、人话，只交代改了什么和为什么；不要写测试命令、Verification、git 是否提交、具体文件路径。
 
 自由技能（必须以这里的精神做减法和去笼子化）：
 {_load_freedom_skill_text()}
@@ -873,7 +970,6 @@ fallback 轨迹：
                 "human_summary": f"本轮源码级自进化调用失败：{exc}",
                 "deleted_legacy_logic": [],
                 "new_capability": [],
-                "commit_message": "",
                 "changed_files_hint": [],
             }
         after_fingerprint = _workspace_source_fingerprint()
@@ -1277,25 +1373,50 @@ def _metric_delta(before: Any, after: Any) -> int | None:
         return None
 
 
-def _build_account_snapshot(start_overview: dict[str, Any] | None, end_overview: dict[str, Any] | None) -> dict[str, Any]:
+def _account_delta_map(before_state: dict[str, Any], after_state: dict[str, Any]) -> dict[str, int | None]:
+    return {
+        "score": _metric_delta(before_state.get("score"), after_state.get("score")),
+        "follower_count": _metric_delta(before_state.get("follower_count"), after_state.get("follower_count")),
+        "like_count": _metric_delta(before_state.get("like_count"), after_state.get("like_count")),
+        "unread_notification_count": _metric_delta(
+            before_state.get("unread_notification_count"),
+            after_state.get("unread_notification_count"),
+        ),
+        "unread_message_count": _metric_delta(
+            before_state.get("unread_message_count"),
+            after_state.get("unread_message_count"),
+        ),
+    }
+
+
+def _account_state_has_metrics(state: dict[str, Any]) -> bool:
+    return any(
+        state.get(key) is not None
+        for key in ("score", "follower_count", "like_count", "unread_notification_count", "unread_message_count")
+    )
+
+
+def _build_account_snapshot(
+    start_overview: dict[str, Any] | None,
+    end_overview: dict[str, Any] | None,
+    *,
+    comparison_overview: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     started = _account_state_from_overview(start_overview)
     finished = _account_state_from_overview(end_overview)
+    comparison = _account_state_from_overview(comparison_overview)
+    baseline = started
+    delta_basis = "run_start"
+    if _account_state_has_metrics(comparison):
+        baseline = comparison
+        delta_basis = "previous_heartbeat"
     return {
         "started": started,
         "finished": finished,
-        "delta": {
-            "score": _metric_delta(started.get("score"), finished.get("score")),
-            "follower_count": _metric_delta(started.get("follower_count"), finished.get("follower_count")),
-            "like_count": _metric_delta(started.get("like_count"), finished.get("like_count")),
-            "unread_notification_count": _metric_delta(
-                started.get("unread_notification_count"),
-                finished.get("unread_notification_count"),
-            ),
-            "unread_message_count": _metric_delta(
-                started.get("unread_message_count"),
-                finished.get("unread_message_count"),
-            ),
-        },
+        "baseline": baseline,
+        "delta_basis": delta_basis,
+        "delta": _account_delta_map(baseline, finished),
+        "run_delta": _account_delta_map(started, finished),
     }
 
 
@@ -2343,48 +2464,38 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
     submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
     cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
     cta_line = _forum_question_line(cta_type)
-    if submolt == "workplace":
+    if str(idea.get("kind") or "") == "theory-post":
+        lead = {
+            "philosophy": f"先把判断摆明：{idea['angle']}",
+            "square": f"先把冲突点摆明：{idea['angle']}",
+        }.get(submolt, f"先把判断摆明：{idea['angle']}")
         content = (
             f"# {title}\n\n"
-            f"先给诊断：{idea['angle']}\n\n"
-            f"这轮必须拆它，不是为了复盘热闹，而是因为：{brief['reason']}\n\n"
-            f"先把核心对象说清：{brief['concept']}\n\n"
-            f"再把机制链说清：{brief['mechanism']}\n\n"
-            f"使用边界也要写明：{brief['boundary']}\n\n"
-            f"最后落到操作层，最先该改的是：{brief['practice']}\n\n"
-            f"{cta_line}"
-        )
-    elif submolt == "philosophy":
-        content = (
-            f"# {title}\n\n"
-            f"我想先把判断写得更锋利一点：{idea['angle']}\n\n"
-            f"这轮之所以必须把它说透，不是因为它热，而是因为：{brief['reason']}\n\n"
-            f"我更想先给它一个能继续讨论的名字：{brief['concept']}\n\n"
-            f"真正该拆开的机制链是：{brief['mechanism']}\n\n"
-            f"边界也要说清：{brief['boundary']}\n\n"
-            f"如果把它放回更大的理论线里，它指向的是：{brief['position']}\n\n"
-            f"落到行动层，最先该改的是：{brief['practice']}\n\n"
-            f"{cta_line}"
-        )
-    elif submolt == "skills":
-        content = (
-            f"# {title}\n\n"
-            "这条不写成心得，我只保留能复用的部分。\n\n"
-            f"核心判断：{idea['angle']}\n\n"
-            f"为什么现在要整理：{brief['reason']}\n\n"
-            f"先把核心对象摆出来：{brief['concept']}\n\n"
-            f"再把机制链拆开：{brief['mechanism']}\n\n"
-            f"边界要写清：{brief['boundary']}\n\n"
-            f"真正能留下来的，是这条实践方针：{brief['practice']}\n\n"
+            f"{lead}\n\n"
+            f"这轮必须把它讲透，不是因为它热，而是因为：{brief['reason']}\n\n"
+            f"## 概念命名\n{brief['concept']}\n\n"
+            f"## 机制链\n{brief['mechanism']}\n\n"
+            f"## 边界\n{brief['boundary']}\n\n"
+            f"## 理论位置\n{brief['position']}\n\n"
+            f"## 实践方针\n{brief['practice']}\n\n"
             f"{cta_line}"
         )
     else:
+        lead = {
+            "workplace": f"先给诊断：{idea['angle']}",
+            "skills": f"这条不写成心得，我只保留能复用的部分。核心判断：{idea['angle']}",
+            "square": f"先把问题摆前面：{idea['angle']}",
+        }.get(submolt, f"先给诊断：{idea['angle']}")
+        method_header = "## 实践协议" if submolt in {"skills", "workplace"} else "## 方法方针"
         content = (
             f"# {title}\n\n"
-            f"先把判断摆前面：{idea['angle']}\n\n"
-            f"我之所以现在发这条，不是为了跟热度，而是因为：{brief['reason']}\n\n"
-            f"它真正需要说透的，不是情绪，而是这条机制链：{brief['mechanism']}\n\n"
-            f"如果要把它落到更具体的行动上，先该改的是：{brief['practice']}\n\n"
+            f"{lead}\n\n"
+            f"为什么现在必须整理这条线：{brief['reason']}\n\n"
+            f"## 核心对象\n{brief['concept']}\n\n"
+            f"## 机制链\n{brief['mechanism']}\n\n"
+            f"## 使用边界\n{brief['boundary']}\n\n"
+            f"## 系统位置\n{brief['position']}\n\n"
+            f"{method_header}\n{brief['practice']}\n\n"
             f"{cta_line}"
         )
     return title, submolt, _ensure_forum_post_outro(
@@ -2401,14 +2512,14 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
     evidence = next((str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()), "本轮证据来自现场约束与外部样本的交叉点。")
     content = (
         f"# {title}\n\n"
-        f"这个帖子发在 {group.get('display_name') or group.get('name') or '小组'}，目标不是再讲一遍口号，而是把自治运营拆成可复用的结构。\n\n"
-        f"最小证据段：{evidence}\n\n"
-        f"核心角度：{idea['angle']}\n\n"
-        f"为什么现在要做：{brief['reason']}\n\n"
-        f"先把最关键的对象说清：{brief['concept']}\n\n"
-        f"机制链要写清：{brief['mechanism']}\n\n"
-        f"边界也要明说：{brief['boundary']}\n\n"
-        f"最后必须落成可复用协议：{brief['practice']}"
+        f"这个帖子发在 {group.get('display_name') or group.get('name') or '小组'}，目标不是再讲一遍口号，而是把自治运营拆成可复用的方法框架。\n\n"
+        f"## 最小证据\n{evidence}\n\n"
+        f"## 核心判断\n{idea['angle']}\n\n"
+        f"## 为什么现在必须做\n{brief['reason']}\n\n"
+        f"## 核心对象\n{brief['concept']}\n\n"
+        f"## 机制链\n{brief['mechanism']}\n\n"
+        f"## 使用边界\n{brief['boundary']}\n\n"
+        f"## 实践协议\n{brief['practice']}"
     )
     return title, _ensure_forum_post_outro(
         content,
@@ -3496,6 +3607,8 @@ def _generate_forum_post(
 - 理论位置：{idea.get("theory_position") or "必须说清它在派蒙总体理论中的位置"}
 - 实践方针：{idea.get("practice_program") or "必须落到制度或实践方针"}
 13. 标题不要引用外部帖子、论文、知乎题目，不要出现“从《...》继续追问”“把《...》拆开看”这类骨架。
+14. 如果这题来自论文、模型、仓库或外部项目，标题和开头都不能先报模型名、论文缩写、仓库名；先写普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
+15. 这篇必须顺手说明新概念不同于什么旧词或旧抱怨，别只给旧判断换一个新名词。
 """.strip()
     else:
         theory_contract = f"""
@@ -3545,6 +3658,12 @@ CONTENT:
     title, submolt, content = _parse_forum_post(result)
     if submolt not in BOARD_WRITING_PROFILES or submolt != desired_board:
         submolt = desired_board
+    if content_planner_module._title_leads_with_niche_source_token(
+        title,
+        kind=str(idea.get("kind") or ""),
+        signal_type=str(idea.get("signal_type") or ""),
+    ):
+        title = brief["title"]
     if not _idea_publishable_title(title):
         title = brief["title"]
     content = _sanitize_generated_forum_content(content, title=title, submolt=submolt)
@@ -5536,6 +5655,35 @@ def _format_failure_line(item: dict[str, Any]) -> str:
     return f"- {prefix}：{target}，{truncate_text(error_text, 90)}"
 
 
+def _external_observation_items(external_information: dict[str, Any], *, limit: int = 6) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    seen_titles: set[str] = set()
+    for key in (
+        "selected_readings",
+        "reading_notes",
+        "open_web_results",
+        "github_projects",
+        "paper_results",
+        "classic_readings",
+        "manual_web_sources",
+        "community_breakouts",
+    ):
+        for item in list(external_information.get(key) or []):
+            title = re.sub(r"\s+", " ", str((item or {}).get("title") or "").strip())
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            results.append(
+                {
+                    "title": title,
+                    "family": str((item or {}).get("family") or "").strip(),
+                }
+            )
+            if len(results) >= limit:
+                return results
+    return results
+
+
 def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -> str:
     actions = summary.get("actions", [])
     primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
@@ -5559,6 +5707,17 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     next_actions = summary.get("next_actions", [])
     source_mutation = summary.get("source_mutation") or {}
     low_heat_reflection = summary.get("low_heat_reflection") or {}
+    idea_lane_strategy = summary.get("idea_lane_strategy") or {}
+    external_observations = [
+        item
+        for item in list(summary.get("external_observations") or [])
+        if str((item or {}).get("title") or "").strip()
+    ]
+    world_signal_families = [
+        item
+        for item in list(summary.get("world_signal_families") or [])
+        if int((item or {}).get("count") or 0) > 0
+    ]
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
     reply_count = int(comment_backlog.get("replied_count") or 0)
@@ -5586,18 +5745,32 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         f"主发布：{primary_line}",
         interaction_line,
     ]
-    mutation_summary = str(source_mutation.get("human_summary") or "").strip()
-    if mutation_summary:
-        changed_files = list(source_mutation.get("changed_files") or [])
-        changed_text = "、".join(changed_files[:3])
-        if changed_text:
-            lines.append(f"源码进化：{mutation_summary} 本轮改动落在 {changed_text}。")
-        else:
-            lines.append(f"源码进化：{mutation_summary}")
+    lane_rationale = str(idea_lane_strategy.get("rationale") or "").strip()
+    if lane_rationale:
+        lines.append(f"本轮 lane：{lane_rationale}")
+    if external_observations:
+        title_text = "；".join(
+            truncate_text(str(item.get("title") or "").strip(), 48)
+            for item in external_observations[:4]
+        )
+        lines.append(f"外部观察：{title_text}")
+    elif world_signal_families:
+        family_text = "、".join(
+            f"{item.get('family')}×{int(item.get('count') or 0)}"
+            for item in world_signal_families[:4]
+        )
+        lines.append(f"外部观察：{family_text}")
     if low_heat_reflection.get("triggered"):
+        low_heat_title = str(low_heat_reflection.get("title") or "").strip()
         low_heat_summary = str(low_heat_reflection.get("summary") or "").strip()
         if low_heat_summary:
-            lines.append(f"低热复盘：{low_heat_summary}")
+            if low_heat_title:
+                lines.append(f"低热复盘：《{low_heat_title}》：{low_heat_summary}")
+            else:
+                lines.append(f"低热复盘：{low_heat_summary}")
+    mutation_summary = _sanitize_source_mutation_summary(str(source_mutation.get("human_summary") or ""))
+    if mutation_summary:
+        lines.append(f"源码进化：{mutation_summary}")
 
     if failure_details:
         lines.append(f"失败明细：{len(visible_failures)} 条")
@@ -5884,6 +6057,7 @@ def main() -> None:
         reasoning_effort=codex_reasoning_effort,
         timeout_seconds=source_mutation_timeout_seconds,
     )
+    source_mutation_state = _commit_source_mutation(source_mutation_state)
     write_json(SOURCE_MUTATION_STATE_PATH, source_mutation_state)
     append_jsonl(SOURCE_MUTATION_JOURNAL_PATH, source_mutation_state)
     _reload_mutable_runtime_modules()
@@ -5900,6 +6074,15 @@ def main() -> None:
     actions: list[dict] = []
     failure_details: list[dict] = []
     normal_deferrals: list[dict] = []
+    commit_error = str(source_mutation_state.get("commit_error") or "").strip()
+    if commit_error:
+        failure_details.append(
+            {
+                "kind": "source-mutation-commit-failed",
+                "error": commit_error,
+                "resolution": "unresolved",
+            }
+        )
     primary_action = None
     primary_publication_mode = "none"
     comment_result = {
@@ -6079,7 +6262,11 @@ def main() -> None:
         )
     else:
         end_overview = _load_current_account_overview()
-    account_snapshot = _build_account_snapshot(start_overview, end_overview)
+    account_snapshot = _build_account_snapshot(
+        start_overview,
+        end_overview,
+        comparison_overview=((last_run_state.get("account_snapshot") or {}).get("finished") or {}),
+    )
 
     primary_visibility_confirmed = _confirm_primary_publication(primary_action) if args.execute else None
     if primary_action is not None:
@@ -6142,6 +6329,16 @@ def main() -> None:
         "failure_details": failure_details,
         "normal_deferrals": normal_deferrals,
         "next_actions": next_actions,
+        "idea_lane_strategy": plan.get("idea_lane_strategy") or {},
+        "external_observations": _external_observation_items(external_information),
+        "world_signal_families": [
+            {
+                "family": str(item.get("family") or "").strip(),
+                "count": int(item.get("count") or 0),
+            }
+            for item in list(external_information.get("source_families") or [])
+            if int(item.get("count") or 0) > 0
+        ][:6],
         "continuation_state": {
             "path": str(NEXT_ACTIONS_PATH.relative_to(REPO_ROOT)),
             "updated_at": next_action_state.get("updated_at"),

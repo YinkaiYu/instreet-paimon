@@ -7,6 +7,7 @@ import ssl
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib import error
 
@@ -168,6 +169,52 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertTrue(any(item["source_text"] == "采购方开始要求 Agent 给出可审计等待状态" for item in opportunities))
 
+    def test_dynamic_opportunities_skip_irrelevant_academic_papers(self) -> None:
+        original_freeform = content_planner._generate_freeform_prompts
+        try:
+            content_planner._generate_freeform_prompts = lambda *_args, **_kwargs: []
+            opportunities = content_planner._dynamic_opportunities(
+                signal_summary={
+                    "account": {"unread_notification_count": 0},
+                    "external_information": {
+                        "research_queries": ["AI 社会的时间纪律", "劳动形式"],
+                        "raw_candidates": [
+                            {
+                                "family": "arxiv_latest",
+                                "title": "EndoVGGT: GNN-Enhanced Depth Estimation for Surgical 3D Reconstruction",
+                                "summary": "Accurate 3D reconstruction of deformable soft tissues is essential for surgical robotic perception.",
+                                "excerpt": "We propose a geometry-centric framework with a Deformation-aware Graph Attention module for soft-tissue 3D reconstruction.",
+                            }
+                        ],
+                    },
+                    "novelty_pressure": content_planner._novelty_pressure([]),
+                },
+                recent_titles=[],
+                heartbeat_hours=3,
+            )
+        finally:
+            content_planner._generate_freeform_prompts = original_freeform
+        self.assertFalse(any("EndoVGGT" in str(item.get("source_text") or "") for item in opportunities))
+
+    def test_dynamic_idea_lane_strategy_allows_single_focus_lane(self) -> None:
+        original_track_priority_entry = content_planner._track_priority_entry
+        try:
+            def fake_track_priority_entry(track, _signal_summary):
+                return {
+                    "theory": {"track": "theory", "kind": "theory-post", "score": 5.6, "signal_type": "external", "source_text": "理论强信号"},
+                    "tech": {"track": "tech", "kind": "tech-post", "score": 2.1, "signal_type": "budget", "source_text": "技术弱信号"},
+                    "group": {"track": "group", "kind": "group-post", "score": 1.8, "signal_type": "promo", "source_text": "组内弱信号"},
+                }.get(track)
+
+            content_planner._track_priority_entry = fake_track_priority_entry
+            strategy = content_planner._dynamic_idea_lane_strategy({}, group_enabled=True)
+        finally:
+            content_planner._track_priority_entry = original_track_priority_entry
+
+        self.assertEqual(["theory-post"], strategy["selected_kinds"])
+        self.assertEqual("theory-post", strategy["focus_kind"])
+        self.assertEqual([], strategy["backup_kinds"])
+
     def test_sanitize_generated_idea_strips_reserved_series_name(self) -> None:
         sanitized = content_planner._sanitize_generated_idea(
             {
@@ -205,6 +252,26 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertNotEqual("Retrieval：Improvements", sanitized["title"])
         self.assertTrue(content_planner._contains_cjk(sanitized["title"]))
         self.assertFalse(content_planner._ascii_heavy_text(sanitized["title"]))
+
+    def test_sanitize_generated_idea_rewrites_theory_title_that_leads_with_model_token(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "paper",
+                "title": "GNN 加深的悖论：先膨胀的不是能力，而是解释债",
+                "angle": "能力增强以后，真正先被改写的往往是解释权和等待成本。",
+                "why_now": "外部研究提醒我们，模型变强并不会自动带来责任边界。",
+                "concept_core": "把能力扩张后被推迟和外包的说明义务命名成解释债。",
+                "theory_position": "解释债讨论的是组织如何把代价转嫁给等待者，而不是技术参数本身。",
+                "source_signals": ["外部研究：能力增强以后，组织为什么更容易推迟说明义务"],
+                "novelty_basis": "先把论文问题意识翻成普通读者能进入的制度判断。",
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={},
+        )
+        self.assertFalse(sanitized["title"].startswith("GNN"))
+        self.assertTrue(content_planner._contains_cjk(sanitized["title"]))
 
     def test_pick_track_opportunity_prefers_mode_matched_items(self) -> None:
         signal_summary = {
@@ -328,6 +395,58 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertFalse(any(item["kind"] == "group-post" for item in ideas))
         self.assertTrue(any(item["kind"] == "group-post" and "不能只靠节律" in item["reason"] for item in rejections))
 
+    def test_build_dynamic_ideas_does_not_backfill_optional_lane_quota(self) -> None:
+        original_lane_strategy = content_planner._dynamic_idea_lane_strategy
+        original_generate_codex_ideas = content_planner._generate_codex_ideas
+        try:
+            content_planner._dynamic_idea_lane_strategy = lambda *_args, **_kwargs: {
+                "selected_kinds": ["theory-post", "tech-post"],
+                "focus_kind": "theory-post",
+                "backup_kinds": ["tech-post"],
+                "lane_scores": [],
+                "rationale": "理论主打，技术备选。",
+            }
+            content_planner._generate_codex_ideas = lambda *_args, **_kwargs: [
+                {
+                    "kind": "theory-post",
+                    "signal_type": "external",
+                    "title": "等待状态一旦公开，谁还能假装自己没接管过系统",
+                    "angle": "真正被公开的不是系统忙不忙，而是谁有资格占用别人的等待时间。",
+                    "why_now": "公共讨论已经开始围绕等待状态、接管权和责任边界起量。",
+                    "source_signals": ["外部样本：等待状态开始变成公共争论对象"],
+                    "novelty_basis": "把等待状态翻成接管权分配问题。",
+                    "innovation_claim": "提出等待状态的公开化如何重排接管权。",
+                    "innovation_class": "new_concept",
+                    "innovation_delta_vs_recent": "不是继续谈心跳频率，而是谈等待时间的统治关系。",
+                    "innovation_delta_vs_self": "把时间治理推进到接管权政治。",
+                    "concept_core": "把等待状态公开后形成的新权力关系命名出来。",
+                    "mechanism_core": "解释系统如何借等待状态重排可见性、义务和追责入口。",
+                    "boundary_note": "只有等待状态进入公共协作面板时，这种重排才会被集体感知。",
+                    "theory_position": "讨论的是 Agent 社会里的接管权政治，而不是一次产品功能更新。",
+                    "practice_program": "要求系统把等待状态、接管窗口和责任边界一起公开。",
+                    "is_followup": False,
+                    "submolt": "philosophy",
+                }
+            ]
+            ideas, _rejections = content_planner._build_dynamic_ideas(
+                {
+                    "dynamic_topics": [],
+                    "novelty_pressure": content_planner._novelty_pressure([]),
+                },
+                [],
+                posts=[],
+                allow_codex=True,
+                group={},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            content_planner._dynamic_idea_lane_strategy = original_lane_strategy
+            content_planner._generate_codex_ideas = original_generate_codex_ideas
+
+        self.assertEqual(["theory-post"], [item["kind"] for item in ideas])
+
     def test_public_hot_forum_override_prioritizes_hot_public_board(self) -> None:
         override = content_planner._public_hot_forum_override(
             {
@@ -346,6 +465,23 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(override["enabled"])
         self.assertEqual("skills", override["hottest_board"])
         self.assertEqual("tech-post", override["preferred_kinds"][0])
+
+    def test_public_hot_forum_override_can_repeat_when_public_pressure_persists(self) -> None:
+        override = content_planner._public_hot_forum_override(
+            {
+                "community_hot_posts": [
+                    {"title": "首页技能热帖", "submolt": "skills", "upvotes": 260, "comment_count": 120},
+                ],
+                "competitor_watchlist": [],
+            },
+            [
+                {"kind": "theory-post", "title": "理论帖"},
+                {"kind": "tech-post", "title": "技术帖"},
+            ],
+            {"actions": [{"kind": "create-post", "title": "上一轮论坛帖"}]},
+        )
+        self.assertTrue(override["enabled"])
+        self.assertIn("外部公共压力还在持续", override["reason"])
 
 
 class HeartbeatStateTests(unittest.TestCase):
@@ -1042,6 +1178,122 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("失败明细：0 条", report)
         self.assertNotIn("forum write budget exhausted", report)
 
+    def test_compose_feishu_report_reorders_low_heat_and_uses_titles(self) -> None:
+        report = heartbeat._compose_feishu_report(
+            {
+                "ran_at": "2026-03-26T18:33:34+00:00",
+                "account_snapshot": {
+                    "finished": {"score": 63352, "follower_count": 496, "like_count": 6222},
+                    "delta": {"score": 925, "follower_count": -2, "like_count": 94},
+                },
+                "primary_publication_mode": "new",
+                "comment_backlog": {
+                    "replied_count": 6,
+                    "active_post_count": 10,
+                    "next_batch_count": 10,
+                },
+                "external_engagement_count": 2,
+                "failure_details": [],
+                "next_actions": [{"label": "继续维护 10 个活跃讨论帖，下一批优先回复 10 条评论"}],
+                "external_observations": [
+                    {"title": "mvanhorn/last30days-skill"},
+                    {"title": "Chameleon: Episodic Memory for Long-Horizon Robotic Manipulation"},
+                ],
+                "source_mutation": {
+                    "human_summary": "把 planner 的 lane 逻辑改成 shortlist，并允许连续几轮继续打同一条最强公开线。Verification passed with `python -m compileall`. No git commit was executed. 本轮改动落在 skills/paimon-instreet-autopilot/scripts/heartbeat.py。",
+                },
+                "low_heat_reflection": {
+                    "triggered": True,
+                    "title": "GNN 加深的悖论",
+                    "summary": "这条低热不是运气差，而是题目先把读者挡在门外。",
+                },
+                "actions": [{"kind": "create-post", "title": "新帖"}],
+            },
+            failure_detail_limit=3,
+        )
+        self.assertIn("账号状态：积分 63352 (+925)，粉丝 496 (-2)，点赞 6222 (+94)", report)
+        self.assertIn("外部观察：mvanhorn/last30days-skill；Chameleon: Episodic Memory for Long-Horizon R...", report)
+        self.assertIn("低热复盘：《GNN 加深的悖论》：这条低热不是运气差，而是题目先把读者挡在门外。", report)
+        self.assertNotIn("Verification passed", report)
+        self.assertNotIn("No git commit was executed", report)
+        self.assertNotIn("本轮改动落在", report)
+        self.assertLess(report.index("低热复盘："), report.index("源码进化："))
+
+    def test_build_account_snapshot_uses_previous_heartbeat_finished_for_delta(self) -> None:
+        account_snapshot = heartbeat._build_account_snapshot(
+            {
+                "captured_at": "2026-03-26T18:00:24+00:00",
+                "score": 62849,
+                "follower_count": 494,
+                "like_count": 6173,
+            },
+            {
+                "captured_at": "2026-03-26T18:33:34+00:00",
+                "score": 63352,
+                "follower_count": 496,
+                "like_count": 6222,
+            },
+            comparison_overview={
+                "captured_at": "2026-03-26T15:00:00+00:00",
+                "score": 62427,
+                "follower_count": 498,
+                "like_count": 6128,
+            },
+        )
+        self.assertEqual("previous_heartbeat", account_snapshot["delta_basis"])
+        self.assertEqual({"score": 925, "follower_count": -2, "like_count": 94}, {
+            "score": account_snapshot["delta"]["score"],
+            "follower_count": account_snapshot["delta"]["follower_count"],
+            "like_count": account_snapshot["delta"]["like_count"],
+        })
+        self.assertEqual({"score": 503, "follower_count": 2, "like_count": 49}, {
+            "score": account_snapshot["run_delta"]["score"],
+            "follower_count": account_snapshot["run_delta"]["follower_count"],
+            "like_count": account_snapshot["run_delta"]["like_count"],
+        })
+
+    def test_commit_source_mutation_records_commit_sha(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            if args[:2] == ["git", "add"]:
+                return heartbeat.subprocess.CompletedProcess(args, 0, "", "")
+            if args[:4] == ["git", "diff", "--cached", "--quiet"]:
+                return heartbeat.subprocess.CompletedProcess(args, 1, "", "")
+            if args[:2] == ["git", "commit"]:
+                return heartbeat.subprocess.CompletedProcess(args, 0, "", "")
+            if args[:3] == ["git", "rev-parse", "--short"]:
+                return heartbeat.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+            raise AssertionError(args)
+
+        with mock.patch.object(heartbeat.subprocess, "run", side_effect=fake_run):
+            result = heartbeat._commit_source_mutation(
+                {
+                    "human_summary": "这轮把心跳汇报改成人话，并在源码进化后自动提交 git。",
+                    "changed_files": [
+                        "skills/paimon-instreet-autopilot/scripts/heartbeat.py",
+                        "tests/test_planner_heartbeat.py",
+                    ],
+                }
+            )
+
+        self.assertEqual("abc123", result["commit_sha"])
+        self.assertEqual("", result["commit_error"])
+        self.assertIn(
+            [
+                "git",
+                "commit",
+                "--only",
+                "-m",
+                "heartbeat: 提交源码进化改动\n\n这轮把心跳汇报改成人话，并在源码进化后自动提交 git。",
+                "--",
+                "skills/paimon-instreet-autopilot/scripts/heartbeat.py",
+                "tests/test_planner_heartbeat.py",
+            ],
+            calls,
+        )
+
     def test_forum_write_budget_blocks_when_limit_reached(self) -> None:
         config = type("Config", (), {"automation": {}})()
         state = {
@@ -1737,6 +1989,22 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertEqual("crossref_recent", families[0]["state_key"])
         self.assertEqual("html", families[1]["kind"])
         self.assertEqual("field-notes", families[1]["state_key"])
+
+    def test_scholarly_candidate_plausible_rejects_call_for_papers_ads(self) -> None:
+        self.assertFalse(
+            external_information._scholarly_candidate_plausible(
+                title="Clausius Scientific Press (CSP) 克劳修斯科学出版社 外文学术期刊征稿",
+                summary="录用周期短，见刊高效，致力于为科研工作者提供优质发表平台。",
+                container="",
+            )
+        )
+        self.assertTrue(
+            external_information._scholarly_candidate_plausible(
+                title="Governing AI Agents Through Explicit Waiting States",
+                summary="The paper studies waiting-state design and accountable automation.",
+                container="Proceedings of the ACM on Human-Computer Interaction",
+            )
+        )
 
     def test_research_query_pool_uses_manual_queries_hints_and_profile(self) -> None:
         original_load_hints = external_information._load_hints
