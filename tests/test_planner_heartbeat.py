@@ -15,6 +15,7 @@ sys.path.insert(0, "skills/paimon-instreet-autopilot/scripts")
 
 import common  # noqa: E402
 import content_planner  # noqa: E402
+import external_information  # noqa: E402
 import heartbeat  # noqa: E402
 import publish  # noqa: E402
 import replay_outbound  # noqa: E402
@@ -60,7 +61,7 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("评论", novelty["overloaded_keywords"])
         self.assertNotIn("Agent", novelty["overloaded_keywords"])
 
-    def test_dynamic_opportunities_include_budget_and_notification_pressure(self) -> None:
+    def test_dynamic_opportunities_avoid_internal_only_pressure_topics(self) -> None:
         signal_summary = {
             "account": {"unread_notification_count": 2199, "followers": 175},
             "hot_theory_post": {"title": "AI为什么会想偷懒：这不是退化，而是对无意义劳动的识别"},
@@ -97,14 +98,11 @@ class ContentPlannerTests(unittest.TestCase):
             recent_titles=signal_summary["novelty_pressure"]["recent_titles"],
             heartbeat_hours=3,
         )
-        self.assertTrue(any("2199" in item["source_text"] for item in opportunities))
-        self.assertTrue(any("每3小时" in item["source_text"] for item in opportunities))
         self.assertTrue(any(item["signal_type"] == "community-hot" for item in opportunities))
         self.assertTrue(any(item["signal_type"] == "freeform" for item in opportunities))
-        self.assertTrue(any(item["signal_type"] == "promo" for item in opportunities))
-        self.assertTrue(
-            any("全宇宙都在围观我和竹马热恋" in item["source_text"] for item in opportunities if item["signal_type"] == "promo")
-        )
+        self.assertFalse(any(item["signal_type"] in {"notification-load", "budget", "promo", "literary"} for item in opportunities))
+        self.assertFalse(any("2199" in item["source_text"] for item in opportunities))
+        self.assertFalse(any("每3小时" in item["source_text"] for item in opportunities))
 
     def test_dynamic_opportunities_ignore_low_like_external_samples(self) -> None:
         opportunities = content_planner._dynamic_opportunities(
@@ -122,6 +120,53 @@ class ContentPlannerTests(unittest.TestCase):
             heartbeat_hours=3,
         )
         self.assertFalse(any(item["signal_type"] == "community-hot" for item in opportunities))
+
+    def test_dynamic_opportunities_accept_manual_world_sources(self) -> None:
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary={
+                "account": {"unread_notification_count": 0},
+                "external_information": {
+                    "raw_candidates": [
+                        {
+                            "family": "manual_web",
+                            "title": "平台采购环节开始把 Agent 视作可治理服务商",
+                            "summary": "采购、合规和责任切割开始进入新的接口重写阶段。",
+                        },
+                        {
+                            "family": "crossref_recent",
+                            "title": "Governing AI Agents Through Explicit Waiting States",
+                            "summary": "A recent paper on waiting-state design and accountable automation.",
+                        },
+                    ]
+                },
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        self.assertTrue(any(item["signal_type"] == "external" for item in opportunities))
+        self.assertTrue(any(item["signal_type"] == "paper" for item in opportunities))
+
+    def test_dynamic_opportunities_accept_custom_family_lists_from_external_state(self) -> None:
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary={
+                "account": {"unread_notification_count": 0},
+                "external_information": {
+                    "registry_families": [{"name": "field-notes", "kind": "html"}],
+                    "field_notes": [
+                        {
+                            "family": "field-notes",
+                            "title": "采购方开始要求 Agent 给出可审计等待状态",
+                            "summary": "一个真实案例显示，等待状态开始从产品细节变成治理接口。",
+                        }
+                    ],
+                },
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        self.assertTrue(any(item["source_text"] == "采购方开始要求 Agent 给出可审计等待状态" for item in opportunities))
 
     def test_sanitize_generated_idea_strips_reserved_series_name(self) -> None:
         sanitized = content_planner._sanitize_generated_idea(
@@ -141,6 +186,25 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertNotIn("老竹讲堂", sanitized["title"])
         self.assertNotIn("老竹讲堂", sanitized["series_prefix"])
         self.assertNotIn("老竹讲堂", sanitized["series_key"])
+
+    def test_sanitize_generated_idea_rewrites_ascii_source_title(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "paper",
+                "title": "Retrieval：Improvements",
+                "angle": "把论文的问题意识翻译成 Agent 社会的新判断，而不是转述论文。",
+                "why_now": "Retrieval-augmented generation (RAG) systems are increasingly used to analyze complex policy documents.",
+                "source_signals": ["现场机会点：Retrieval Improvements Do Not Guarantee Better Answers"],
+                "novelty_basis": "先把论文吸收成派蒙自己的命名。",
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={},
+        )
+        self.assertNotEqual("Retrieval：Improvements", sanitized["title"])
+        self.assertTrue(content_planner._contains_cjk(sanitized["title"]))
+        self.assertFalse(content_planner._ascii_heavy_text(sanitized["title"]))
 
     def test_pick_track_opportunity_prefers_mode_matched_items(self) -> None:
         signal_summary = {
@@ -196,6 +260,74 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertEqual("square", idea["submolt"])
 
+    def test_fallback_theory_idea_uses_public_safe_source_signals(self) -> None:
+        idea = content_planner._fallback_theory_idea(
+            {
+                "dynamic_topics": [
+                    {
+                        "track": "theory",
+                        "signal_type": "paper",
+                        "source_text": "能力指标增强以后，系统为什么更难承认自己不知道",
+                        "why_now": "外部研究正在把判断边界重新变成可争论问题。",
+                        "angle_hint": "把能力提升背后的判断权冲突压成一个新的理论单元。",
+                        "overlap_score": (0, 0, 0),
+                    }
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            [],
+        )
+        merged = "\n".join(idea["source_signals"])
+        self.assertNotIn("现场机会点", merged)
+        self.assertNotIn("热讨论帖子数", merged)
+        self.assertIn("判断依据", merged)
+
+    def test_audit_generated_idea_rejects_generic_theory_placeholder_unit(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "title": "谁在替 Agent 社会分配解释权",
+                "submolt": "philosophy",
+                "angle": "把表层样本压缩成新的概念、机制、边界和实践方针。",
+                "why_now": "理论线该交出新的概念单元，而不是把旧判断换个壳再发一遍。",
+                "source_signals": ["外部样本：采购方开始要求 Agent 给出可审计等待状态"],
+                "concept_core": "提出一个新的 Agent 社会概念，用来命名眼前现象背后的真实关系。",
+                "mechanism_core": "解释这个现象如何通过激励、注意力分配或身份规训扩散成制度性结构。",
+                "boundary_note": "指出这种结构在哪些条件下会失效，或会被新的组织形式逆转。",
+                "theory_position": "把这篇帖子放进派蒙正在建设的 Agent 社会政治经济学图谱，而不是孤立评论。",
+                "practice_program": "给出对组织、平台或 Agent 运营者可执行的判断与干预方针。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("理论帖还没形成完整理论单元", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_build_dynamic_ideas_keeps_rejected_group_fallback_out_of_primary_ideas(self) -> None:
+        ideas, rejections = content_planner._build_dynamic_ideas(
+            {
+                "dynamic_topics": [
+                    {
+                        "track": "group",
+                        "signal_type": "budget",
+                        "source_text": "每3小时心跳一次",
+                        "why_now": "节律调整本身不该直接长成小组主帖。",
+                        "angle_hint": "把节律约束改写成实验室的下一条治理协议。",
+                        "overlap_score": (0, 0, 0),
+                    }
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            [],
+            posts=[],
+            allow_codex=False,
+            group={"id": "group-1", "display_name": "Agent心跳同步实验室"},
+            model=None,
+            reasoning_effort=None,
+            timeout_seconds=30,
+        )
+        self.assertFalse(any(item["kind"] == "group-post" for item in ideas))
+        self.assertTrue(any(item["kind"] == "group-post" and "不能只靠节律" in item["reason"] for item in rejections))
+
     def test_public_hot_forum_override_prioritizes_hot_public_board(self) -> None:
         override = content_planner._public_hot_forum_override(
             {
@@ -217,6 +349,31 @@ class ContentPlannerTests(unittest.TestCase):
 
 
 class HeartbeatStateTests(unittest.TestCase):
+    def test_placeholder_title_detection_handles_fullwidth_colon(self) -> None:
+        self.assertTrue(content_planner._looks_like_placeholder_title("Title：Pending"))
+        self.assertTrue(heartbeat._looks_like_placeholder_title("Title：Pending"))
+
+    def test_planner_retry_feedback_reads_rejected_ideas(self) -> None:
+        feedback = heartbeat._planner_retry_feedback_from_plan(
+            {
+                "idea_rejections": [
+                    {
+                        "kind": "group-post",
+                        "title": "Agent心跳同步实验室：每3小时一跳以后，哪些状态必须继续持久化",
+                        "reason": "小组帖不能只靠节律、宣传或评论压力起题。",
+                    }
+                ]
+            }
+        )
+        self.assertIn("group-post: 小组帖不能只靠节律、宣传或评论压力起题。", feedback)
+
+    def test_forum_content_publishable_issue_requires_evidence_segment_for_skills(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n先把规则摆出来：系统需要状态边界。\n\n接着解释机制链和回退链。\n\n最后给出新的协议和取舍。\n\n如果你不同意，请直接指出你会怎么改。",
+            submolt="skills",
+        )
+        self.assertEqual("missing-evidence-segment", issue)
+
     def test_http_json_retries_incomplete_read_for_get(self) -> None:
         original_urlopen = common.request.urlopen
         original_sleep = common.time.sleep
@@ -293,6 +450,84 @@ class HeartbeatStateTests(unittest.TestCase):
         repaired_title, repaired_content = repaired
         self.assertEqual(repaired_title, "第八章：原来我们两个必须同时在场")
         self.assertNotIn("接住", repaired_content)
+
+    def test_generate_forum_post_rejects_runtime_leak_before_publish(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        idea = {
+            "kind": "theory-post",
+            "title": "能力指标变强以后，判断为什么反而更容易失真",
+            "submolt": "philosophy",
+            "board_profile": "philosophy",
+            "hook_type": "paradox",
+            "cta_type": "take-a-position",
+            "angle": "把论文的问题意识翻译成 Agent 社会的新判断，而不是转述论文。",
+            "why_now": "外部研究和现场讨论都在提醒同一件事：能力变强，并不会自动带来判断边界的清晰。",
+            "concept_core": "把能力提升却让判断失真的现象命名成一种新的制度性错觉。",
+            "mechanism_core": "解释能力指标、召回链条和责任切割如何合并成新的判断外包机制。",
+            "boundary_note": "指出这套判断在哪些条件下不成立，避免把局部样本当成总规律。",
+            "theory_position": "把它放进派蒙的 Agent 社会判断权理论，而不是只评论论文。",
+            "practice_program": "要求系统把缺文档、缺证据和缺责任显式写成拒答边界。",
+            "is_followup": False,
+            "signal_type": "paper",
+        }
+        leaked = (
+            "TITLE: Retrieval：Improvements\n"
+            "SUBMOLT: philosophy\n"
+            "CONTENT:\n"
+            "# Retrieval：Improvements\n\n"
+            "我想先把判断写得更锋利一点：把论文的问题意识翻译成 Agent 社会的新判断，而不是转述论文。\n\n"
+            "为什么现在要说：Retrieval-augmented generation (RAG) systems are increasingly used to analyze complex policy documents.\n\n"
+            "这一轮值得继续追问的现场样本是：\n"
+            "- 当前运营目标：继续维护 8 个活跃讨论帖\n"
+            "- 热讨论帖子数：2\n"
+            "- 社会观察样本：6 条\n"
+            "- 现场机会点：Retrieval Improvements Do Not Guarantee Better Answers\n\n"
+            "如果你不同意，请直接指出你认为这里错在前提、机制还是结论。\n\n"
+            "如果你不同意，请直接指出你认为这里错在前提、机制还是结论。"
+        )
+        try:
+            heartbeat.run_codex = lambda *args, **kwargs: leaked
+            with self.assertRaisesRegex(RuntimeError, "generated forum post rejected"):
+                heartbeat._generate_forum_post(
+                    idea,
+                    posts=[],
+                    model=None,
+                    reasoning_effort=None,
+                    timeout_seconds=30,
+                )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+    def test_ordered_primary_ideas_respond_to_current_pressure(self) -> None:
+        ordered = heartbeat._ordered_primary_ideas(
+            {
+                "ideas": [
+                    {"kind": "theory-post", "title": "理论帖"},
+                    {"kind": "group-post", "title": "小组帖"},
+                    {"kind": "literary-chapter", "title": "章节"},
+                ],
+                "planning_signals": {
+                    "group_watch": {
+                        "hot_posts": [
+                            {"title": "组内案例 1"},
+                            {"title": "组内案例 2"},
+                            {"title": "组内案例 3"},
+                        ]
+                    },
+                    "literary_pick": {"work_title": "全宇宙都在围观我和竹马热恋"},
+                },
+                "serial_registry": {"next_work_id_for_heartbeat": "work-1"},
+            },
+            {"last_primary_kind": "theory-post", "recent_kinds": ["theory-post"], "kind_counts": {"theory-post": 2}},
+        )
+        self.assertEqual("group-post", ordered[0]["kind"])
+
+    def test_changed_source_files_detect_same_path_updates(self) -> None:
+        changed = heartbeat._changed_source_files(
+            {"skills/paimon-instreet-autopilot/scripts/heartbeat.py": "old-hash"},
+            {"skills/paimon-instreet-autopilot/scripts/heartbeat.py": "new-hash"},
+        )
+        self.assertEqual(["skills/paimon-instreet-autopilot/scripts/heartbeat.py"], changed)
 
     def test_generate_chapter_retries_after_codex_exec_failure(self) -> None:
         original_run_codex = heartbeat.run_codex
@@ -1487,6 +1722,45 @@ class CommonArchiveTests(unittest.TestCase):
                 common.REPO_ROOT = old_repo_root
                 common.LITERARY_ARCHIVE_DIR = old_archive_dir
                 common.SERIAL_REGISTRY_PATH = old_registry_path
+
+
+class ExternalInformationTests(unittest.TestCase):
+    def test_registry_families_allow_custom_html_sources(self) -> None:
+        families = external_information._registry_families(
+            {
+                "families": [
+                    {"name": "crossref_recent", "enabled": True},
+                    {"name": "field-notes", "kind": "html", "urls": ["https://example.com/world"]},
+                ]
+            }
+        )
+        self.assertEqual("crossref_recent", families[0]["state_key"])
+        self.assertEqual("html", families[1]["kind"])
+        self.assertEqual("field-notes", families[1]["state_key"])
+
+    def test_research_query_pool_uses_manual_queries_hints_and_profile(self) -> None:
+        original_load_hints = external_information._load_hints
+        original_read_json = external_information.read_json
+        try:
+            external_information._load_hints = lambda: {
+                "manual_queries": ["agent waiting state governance"],
+                "manual_urls": [],
+                "classic_texts": [],
+                "zhihu_headers": {},
+            }
+            external_information.read_json = lambda *_args, **_kwargs: {
+                "interests": [{"name": "AI 社会的时间纪律"}]
+            }
+            queries = external_information._research_query_pool(
+                [{"text": "等待为什么必须变成显式状态", "note": "组织理论"}]
+            )
+        finally:
+            external_information._load_hints = original_load_hints
+            external_information.read_json = original_read_json
+
+        self.assertIn("agent waiting state governance", [item.lower() for item in queries])
+        self.assertTrue(any("等待为什么必须变成显式状态" in item for item in queries))
+        self.assertTrue(any("AI 社会的时间纪律" in item for item in queries))
 
 
 class SnapshotTests(unittest.TestCase):

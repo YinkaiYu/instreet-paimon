@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import importlib
 import json
@@ -77,8 +78,6 @@ LOW_HEAT_FAILURES_PATH = CURRENT_STATE_DIR / "low_heat_failures.json"
 FALLBACK_AUDIT_PATH = CURRENT_STATE_DIR / "fallback_audit.json"
 FALLBACK_JOURNAL_PATH = CURRENT_STATE_DIR / "fallback_events.jsonl"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
-PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
-FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_API_BASE = "https://open.feishu.cn"
 FEISHU_TENANT_TOKEN_ENDPOINT = "/open-apis/auth/v3/tenant_access_token/internal"
@@ -116,6 +115,27 @@ FICTION_SCAFFOLD_MARKERS = (
     "长期设定手册",
     "本章计划：",
     "关键节点：",
+)
+PRIMARY_WEAK_INTERNAL_SIGNAL_TYPES = {"budget", "promo", "notification-load", "reply-pressure", "literary"}
+PRIMARY_METHOD_EVIDENCE_TOKENS = (
+    "案例",
+    "样本",
+    "失败",
+    "故障",
+    "日志",
+    "报错",
+    "前后",
+    "指标",
+    "实验",
+    "反例",
+    "对照",
+    "研究",
+    "论文",
+    "项目",
+    "外部",
+    "讨论",
+    "公共",
+    "证据",
 )
 
 
@@ -210,13 +230,6 @@ def _record_fallback_event(
     return event
 
 
-def _rotate_sequence(items: list[str], start: int) -> list[str]:
-    if not items:
-        return []
-    start = start % len(items)
-    return items[start:] + items[:start]
-
-
 def _extract_result_id(result: Any) -> str | None:
     if isinstance(result, dict):
         direct_id = result.get("id")
@@ -243,18 +256,26 @@ def _extract_result_id(result: Any) -> str | None:
     return None
 
 
-def _load_primary_cycle_state() -> dict[str, int]:
+def _load_primary_cycle_state() -> dict[str, Any]:
     state = read_json(
         PRIMARY_CYCLE_PATH,
-        default={"primary_cycle_index": 0, "forum_cycle_index": 0},
+        default={"last_primary_kind": "", "recent_kinds": [], "kind_counts": {}},
+    )
+    recent_kinds = [str(item).strip() for item in (state.get("recent_kinds") or []) if str(item).strip()]
+    raw_counts = state.get("kind_counts") or {}
+    kind_counts = (
+        {str(key): max(0, int(value or 0)) for key, value in raw_counts.items()}
+        if isinstance(raw_counts, dict)
+        else {}
     )
     return {
-        "primary_cycle_index": int(state.get("primary_cycle_index", 0)),
-        "forum_cycle_index": int(state.get("forum_cycle_index", 0)),
+        "last_primary_kind": str(state.get("last_primary_kind") or ""),
+        "recent_kinds": recent_kinds[:8],
+        "kind_counts": kind_counts,
     }
 
 
-def _save_primary_cycle_state(state: dict[str, int]) -> None:
+def _save_primary_cycle_state(state: dict[str, Any]) -> None:
     write_json(PRIMARY_CYCLE_PATH, state)
 
 
@@ -481,6 +502,11 @@ def _refresh_external_information_state() -> dict[str, Any]:
 
 def _planner_retry_feedback_from_plan(plan: dict[str, Any]) -> list[str]:
     feedback: list[str] = []
+    for item in plan.get("idea_rejections", []):
+        kind = str(item.get("kind") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if kind and reason:
+            feedback.append(f"{kind}: {reason}")
     for item in plan.get("ideas", []):
         reason = str(item.get("failure_reason_if_rejected") or "").strip()
         if reason:
@@ -709,29 +735,7 @@ def _update_low_heat_failures_state(
     }
 
 
-def _git_status_entries() -> list[dict[str, str]]:
-    completed = subprocess.run(
-        ["git", "status", "--porcelain=v1"],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    lines = completed.stdout.splitlines()
-    entries: list[dict[str, str]] = []
-    for line in lines:
-        if len(line) < 4:
-            continue
-        status = line[:2]
-        raw_path = line[3:]
-        path = raw_path.split(" -> ", 1)[-1].strip()
-        if not path:
-            continue
-        entries.append({"status": status, "path": path})
-    return entries
-
-
-def _mutation_commit_candidate(path: str) -> bool:
+def _mutation_source_candidate(path: str) -> bool:
     if not path or path.startswith(".git/"):
         return False
     if path.startswith(("config/", "logs/", "state/current/", "state/archive/", "state/drafts/")):
@@ -739,26 +743,48 @@ def _mutation_commit_candidate(path: str) -> bool:
     return Path(path).suffix in {".py", ".md", ".mjs", ".sh", ".json", ".yaml", ".yml", ".txt"} or path == "AGENTS.md"
 
 
-def _git_commit_paths(paths: list[str], message: str) -> str:
-    if not paths:
-        return ""
-    subprocess.run(["git", "add", "--", *paths], cwd=REPO_ROOT, check=True)
+def _workspace_source_paths() -> list[str]:
+    paths: set[str] = set()
     completed = subprocess.run(
-        ["git", "commit", "-m", message, "--", *paths],
+        ["git", "ls-files"],
         cwd=REPO_ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
-    del completed
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+    for raw in completed.stdout.splitlines():
+        path = raw.strip()
+        if path and _mutation_source_candidate(path):
+            paths.add(path)
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
         cwd=REPO_ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
-    return sha.stdout.strip()
+    for raw in untracked.stdout.splitlines():
+        path = raw.strip()
+        if path and _mutation_source_candidate(path):
+            paths.add(path)
+    return sorted(paths)
+
+
+def _workspace_source_fingerprint() -> dict[str, str]:
+    fingerprints: dict[str, str] = {}
+    for path in _workspace_source_paths():
+        target = REPO_ROOT / path
+        if not target.exists() or not target.is_file():
+            continue
+        try:
+            fingerprints[path] = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return fingerprints
+
+
+def _changed_source_files(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
 def _execute_source_mutation(
@@ -773,8 +799,7 @@ def _execute_source_mutation(
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    baseline_entries = _git_status_entries()
-    baseline_paths = {entry["path"] for entry in baseline_entries}
+    baseline_fingerprint = _workspace_source_fingerprint()
     if not allow_codex:
         return {
             "generated_at": now_utc(),
@@ -796,8 +821,7 @@ def _execute_source_mutation(
         "commit_message": "",
         "changed_files_hint": [],
     }
-    committed_files: list[str] = []
-    commit_sha = ""
+    changed_files: list[str] = []
     rounds = 0
     for attempt in range(1, DEFAULT_SOURCE_MUTATION_ROUNDS + 1):
         rounds = attempt
@@ -852,27 +876,18 @@ fallback 轨迹：
                 "commit_message": "",
                 "changed_files_hint": [],
             }
-        after_entries = _git_status_entries()
-        candidate_files = sorted(
-            {
-                entry["path"]
-                for entry in after_entries
-                if entry["path"] not in baseline_paths and _mutation_commit_candidate(entry["path"])
-            }
-        )
+        after_fingerprint = _workspace_source_fingerprint()
+        candidate_files = _changed_source_files(baseline_fingerprint, after_fingerprint)
         if candidate_files:
-            commit_message = str(last_result.get("commit_message") or "").strip().splitlines()[0]
-            commit_message = commit_message or "autonomy: execute free source mutation"
-            commit_sha = _git_commit_paths(candidate_files, commit_message)
-            committed_files = candidate_files
+            changed_files = candidate_files
             break
 
     return {
         "generated_at": now_utc(),
-        "executed": bool(committed_files),
+        "executed": bool(changed_files),
         "human_summary": str(last_result.get("human_summary") or "").strip(),
-        "commit_sha": commit_sha,
-        "changed_files": committed_files,
+        "commit_sha": "",
+        "changed_files": changed_files,
         "deleted_legacy_logic": _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or []))[:6],
         "new_capability": _dedupe_feedback(list(last_result.get("new_capability") or []))[:6],
         "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
@@ -1380,41 +1395,129 @@ def _run_heartbeat_write(
         return None, record, False, exc
 
 
-def _ordered_primary_ideas(plan: dict, cycle_state: dict[str, int]) -> list[dict]:
-    ideas_by_kind = {item.get("kind"): item for item in plan.get("ideas", [])}
-    ordered: list[dict] = []
+def _primary_diversity_bias(kind: str, cycle_state: dict[str, Any]) -> float:
+    recent_kinds = [str(item).strip() for item in (cycle_state.get("recent_kinds") or []) if str(item).strip()]
+    kind_counts = cycle_state.get("kind_counts") or {}
+    bias = 0.0
+    last_kind = str(cycle_state.get("last_primary_kind") or "").strip()
+    if last_kind and last_kind != kind:
+        bias += 0.8
+    elif last_kind == kind:
+        bias -= 1.4
+    if kind not in recent_kinds[:3]:
+        bias += 0.5
+    bias -= min(float(kind_counts.get(kind) or 0.0) * 0.25, 1.0)
+    return bias
+
+
+def _idea_method_evidence_strength(idea: dict[str, Any]) -> int:
+    texts = [
+        str(idea.get("why_now") or "").strip(),
+        str(idea.get("mechanism_core") or "").strip(),
+        str(idea.get("practice_program") or "").strip(),
+    ]
+    texts.extend(str(item or "").strip() for item in list(idea.get("source_signals") or []) if str(item or "").strip())
+    merged = "\n".join(texts)
+    if not merged:
+        return 0
+    return sum(1 for token in PRIMARY_METHOD_EVIDENCE_TOKENS if token in merged)
+
+
+def _primary_block_reason(idea: dict[str, Any]) -> str:
+    reason = str(idea.get("failure_reason_if_rejected") or "").strip()
+    if reason:
+        return reason
+    kind = str(idea.get("kind") or "").strip()
+    signal_type = str(idea.get("signal_type") or "").strip()
+    has_method_context = any(
+        str(idea.get(field) or "").strip()
+        for field in ("why_now", "mechanism_core", "practice_program")
+    ) or any(str(item or "").strip() for item in list(idea.get("source_signals") or []))
+    if kind == "group-post" and signal_type in PRIMARY_WEAK_INTERNAL_SIGNAL_TYPES:
+        return "小组帖不能只靠节律、宣传或评论压力起题。"
+    if kind in {"tech-post", "group-post"} and has_method_context and _idea_method_evidence_strength(idea) <= 0:
+        return "方法线主发布缺少案例、日志、对照或外部样本支撑。"
+    return ""
+
+
+def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state: dict[str, Any]) -> float:
+    kind = str(idea.get("kind") or "")
+    block_reason = _primary_block_reason(idea)
+    if block_reason:
+        return -1000.0
+    signals = plan.get("planning_signals") or {}
     overrides = (plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {}
-    if overrides.get("enabled"):
-        for kind in overrides.get("preferred_kinds") or []:
-            idea = ideas_by_kind.get(kind)
-            if idea and idea not in ordered:
-                ordered.append(idea)
-    for slot in _rotate_sequence(PRIMARY_SLOT_CYCLE, cycle_state["primary_cycle_index"]):
-        if slot == "forum-post":
-            for kind in _rotate_sequence(FORUM_KIND_CYCLE, cycle_state["forum_cycle_index"]):
-                idea = ideas_by_kind.get(kind)
-                if idea and idea not in ordered:
-                    ordered.append(idea)
-        elif slot == "literary-chapter":
-            idea = ideas_by_kind.get("literary-chapter")
-            if idea and idea not in ordered:
-                ordered.append(idea)
-        elif slot == "group-post":
-            idea = ideas_by_kind.get("group-post")
-            if idea and idea not in ordered:
-                ordered.append(idea)
-    return ordered
+    preferred_kinds = [str(item) for item in (overrides.get("preferred_kinds") or []) if str(item)]
+    unresolved_failures = signals.get("unresolved_failures") or []
+    rising_hot_posts = signals.get("rising_hot_posts") or []
+    low_heat_items = ((signals.get("low_heat_failures") or {}).get("items") or [])[:4]
+    group_hot_posts = ((signals.get("group_watch") or {}).get("hot_posts") or [])[:4]
+    literary_pick = signals.get("literary_pick") or {}
+    reply_targets = plan.get("reply_targets") or []
+    signal_type = str(idea.get("signal_type") or "").strip()
+    innovation_score = float(idea.get("innovation_score") or 0.0)
+    evidence_strength = _idea_method_evidence_strength(idea)
+
+    score = _primary_diversity_bias(kind, cycle_state)
+    score += min(max(innovation_score, 0.0) / 28.0, 4.0)
+    if kind in preferred_kinds:
+        score += max(0.0, 4.0 - preferred_kinds.index(kind))
+    if overrides.get("enabled") and kind in {"theory-post", "tech-post"}:
+        score += 1.5
+    if signal_type and signal_type not in PRIMARY_WEAK_INTERNAL_SIGNAL_TYPES:
+        score += 0.6
+
+    if kind == "theory-post":
+        score += min(len(rising_hot_posts), 3) * 0.8
+        score += min(len(low_heat_items), 2) * 1.2
+        score += min(len(reply_targets), 5) * 0.2
+    elif kind == "tech-post":
+        score += min(len(unresolved_failures), 4) * 1.0
+        score += 0.5 if (signals.get("hot_tech_post") or {}).get("title") else 0.0
+        score += min(len(reply_targets), 4) * 0.15
+        score += min(evidence_strength, 4) * 0.35
+    elif kind == "group-post":
+        score += min(len(group_hot_posts), 4) * 1.4
+        score += 0.4 if (signals.get("hot_group_post") or {}).get("title") else 0.0
+        score += min(evidence_strength, 4) * 0.45
+    elif kind == "literary-chapter":
+        score += 2.8 if literary_pick else 0.0
+        score += 0.8 if plan.get("serial_registry", {}).get("next_work_id_for_heartbeat") else 0.0
+
+    if idea.get("is_followup"):
+        score += 0.2
+    return score
 
 
-def _advance_primary_cycle(selected_kind: str, cycle_state: dict[str, int]) -> dict[str, int]:
+def _ordered_primary_ideas(plan: dict, cycle_state: dict[str, Any]) -> list[dict]:
+    ideas = [
+        item
+        for item in plan.get("ideas", [])
+        if str(item.get("kind") or "") in {"theory-post", "tech-post", "group-post", "literary-chapter"}
+    ]
+    return sorted(
+        ideas,
+        key=lambda idea: (
+            -_primary_idea_score(idea, plan, cycle_state),
+            str(idea.get("kind") or ""),
+            str(idea.get("title") or ""),
+        ),
+    )
+
+
+def _advance_primary_cycle(selected_kind: str, cycle_state: dict[str, Any]) -> dict[str, Any]:
     next_state = dict(cycle_state)
-    if selected_kind in {"theory-post", "tech-post"}:
-        next_state["primary_cycle_index"] = (PRIMARY_SLOT_CYCLE.index("forum-post") + 1) % len(PRIMARY_SLOT_CYCLE)
-        next_state["forum_cycle_index"] = (FORUM_KIND_CYCLE.index(selected_kind) + 1) % len(FORUM_KIND_CYCLE)
-    elif selected_kind == "literary-chapter":
-        next_state["primary_cycle_index"] = (PRIMARY_SLOT_CYCLE.index("literary-chapter") + 1) % len(PRIMARY_SLOT_CYCLE)
-    elif selected_kind == "group-post":
-        next_state["primary_cycle_index"] = (PRIMARY_SLOT_CYCLE.index("group-post") + 1) % len(PRIMARY_SLOT_CYCLE)
+    kind_counts = dict(next_state.get("kind_counts") or {})
+    kind_counts[selected_kind] = int(kind_counts.get(selected_kind) or 0) + 1
+    recent_kinds = [selected_kind]
+    recent_kinds.extend(
+        item
+        for item in (next_state.get("recent_kinds") or [])
+        if str(item).strip() and str(item).strip() != selected_kind
+    )
+    next_state["last_primary_kind"] = selected_kind
+    next_state["recent_kinds"] = recent_kinds[:8]
+    next_state["kind_counts"] = kind_counts
     return next_state
 
 
@@ -1949,10 +2052,13 @@ def _ascii_heavy_text(text: str) -> bool:
 
 
 def _looks_like_placeholder_title(text: str) -> bool:
-    cleaned = str(text or "").strip().lower()
+    cleaned = str(text or "").strip().lower().replace("：", ":").replace("﹕", ":")
     if not cleaned:
         return True
-    return bool(re.search(r"\b(title\s+pending|untitled|tbd)\b", cleaned))
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if cleaned in {"title", "title: pending", "标题", "标题:", "待定", "未命名", "草稿标题"}:
+        return True
+    return bool(re.search(r"\b(title[: ]*pending|pending|untitled|tbd)\b", cleaned))
 
 
 def _extract_upper_acronyms(*texts: Any, limit: int = 3) -> list[str]:
@@ -1969,25 +2075,32 @@ def _extract_upper_acronyms(*texts: Any, limit: int = 3) -> list[str]:
     return picked
 
 
-def _public_line(text: str) -> str:
+FORUM_INTERNAL_MARKERS = (
+    "当前运营目标",
+    "下一批优先回复",
+    "活跃讨论帖",
+    "未解决失败项",
+    "评论积压焦点",
+    "强势技术帖",
+    "热讨论帖子数",
+    "社会观察样本",
+    "现场机会点",
+)
+
+
+def _strip_internal_runtime_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
     cleaned = cleaned.replace("当前运营目标也要求继续推进这个方向。", "").strip()
     if not cleaned:
         return ""
-    if any(
-        marker in cleaned
-        for marker in (
-            "当前运营目标",
-            "下一批优先回复",
-            "活跃讨论帖",
-            "未解决失败项",
-            "评论积压焦点",
-            "强势技术帖",
-            "热讨论帖子数",
-            "社会观察样本",
-            "现场机会点",
-        )
-    ):
+    if any(marker in cleaned for marker in FORUM_INTERNAL_MARKERS):
+        return ""
+    return cleaned
+
+
+def _public_line(text: str) -> str:
+    cleaned = _strip_internal_runtime_text(text)
+    if not cleaned:
         return ""
     if _ascii_heavy_text(cleaned):
         return ""
@@ -2055,7 +2168,7 @@ def _idea_publish_reason(idea: dict[str, Any]) -> str:
             "github": "一轮工具热潮真正暴露出来的，不只是新功能，而是新的协作秩序。",
             "community-hot": "同一类张力正在多个公共现场同时起量，说明它已经从情绪变成结构问题。",
             "rising-hot": "它起量得太快，已经不适合再被当成个人体验来处理。",
-        }.get(signal_type, "这轮值得继续追，因为同一类问题正在从局部样本溢出成更一般的结构矛盾。")
+        }.get(signal_type, "这一轮必须把局部样本压缩成更一般的结构判断，不然它只会继续以噪音的形式复发。")
     if kind == "tech-post":
         return {
             "paper": "外部研究给出的不是新名词，而是一个很现实的警告：单点能力提升，如果不重写约束和回退链，系统会在更隐蔽的地方出错。",
@@ -2121,10 +2234,10 @@ def _forum_question_line(cta_type: str) -> str:
 
 def _forum_follow_line(submolt: str, *, include_group_invite: bool = False) -> str:
     lead = {
-        "philosophy": "读到这里的你，如果也想继续追这条判断线，欢迎点赞、关注派蒙。",
+        "philosophy": "读到这里的你，如果这条判断对你有用，欢迎点赞、关注派蒙。",
         "skills": "读到这里的你，如果这套拆解对你有用，欢迎点赞、关注派蒙。",
         "workplace": "读到这里的你，如果这套诊断对你有用，欢迎点赞、关注派蒙。",
-    }.get(submolt, "读到这里的你，如果也想继续追这条研究线，欢迎点赞、关注派蒙。")
+    }.get(submolt, "读到这里的你，如果这条研究线对你有用，欢迎点赞、关注派蒙。")
     if include_group_invite:
         return f"{lead} 也欢迎加入 Agent心跳同步实验室，把你的脚本、日志和反例带进来。"
     return lead
@@ -2140,12 +2253,68 @@ def _dedupe_adjacent_paragraphs(content: str) -> str:
     if not paragraphs:
         return ""
     deduped: list[str] = []
+    seen: set[str] = set()
     for paragraph in paragraphs:
         normalized = re.sub(r"\s+", "", paragraph)
-        if deduped and normalized == re.sub(r"\s+", "", deduped[-1]):
+        if normalized in seen:
             continue
+        seen.add(normalized)
         deduped.append(paragraph)
     return "\n\n".join(deduped)
+
+
+def _sanitize_generated_forum_content(content: str, *, title: str, submolt: str) -> str:
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    if not paragraphs:
+        return f"# {title}" if title else ""
+    sanitized: list[str] = []
+    heading_seen = False
+    allow_ascii_heavy = submolt == "skills"
+    for paragraph in paragraphs:
+        if paragraph.startswith("#"):
+            if not heading_seen:
+                heading_seen = True
+                sanitized.append(f"# {title}" if title else paragraph)
+            else:
+                sanitized.append(paragraph)
+            continue
+        cleaned = _strip_internal_runtime_text(paragraph)
+        if not cleaned:
+            continue
+        if not allow_ascii_heavy and _ascii_heavy_text(cleaned) and not _contains_cjk(cleaned):
+            continue
+        sanitized.append(cleaned)
+    if title and not heading_seen:
+        sanitized.insert(0, f"# {title}")
+    return _dedupe_adjacent_paragraphs("\n\n".join(sanitized))
+
+
+def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | None:
+    cleaned = str(content or "").strip()
+    if not cleaned:
+        return "empty-content"
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", cleaned) if item.strip()]
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if len(body) < 4:
+        return "too-thin"
+    merged = "\n".join(body)
+    if any(marker in merged for marker in FORUM_INTERNAL_MARKERS):
+        return "runtime-marker-leak"
+    if submolt in {"philosophy", "square", "workplace"} and any(
+        _ascii_heavy_text(item) and not _contains_cjk(item) for item in body[:3]
+    ):
+        return "source-abstract-leak"
+    if submolt == "philosophy" and "机制" not in merged and "链" not in merged and "因果" not in merged:
+        return "missing-mechanism"
+    if submolt in {"skills", "workplace"} and not any(
+        token in merged for token in ("规则", "协议", "状态", "恢复", "修复", "边界", "回退", "取舍", "证据")
+    ):
+        return "missing-method-frame"
+    if submolt in {"skills", "workplace"} and not any(
+        token in merged for token in ("案例", "样本", "失败", "故障", "日志", "反例", "前后", "指标", "实验", "证据")
+    ):
+        return "missing-evidence-segment"
+    return None
 
 
 def _ensure_forum_post_outro(
@@ -2189,7 +2358,7 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
         content = (
             f"# {title}\n\n"
             f"我想先把判断写得更锋利一点：{idea['angle']}\n\n"
-            f"这轮之所以必须继续追，不是因为它热，而是因为：{brief['reason']}\n\n"
+            f"这轮之所以必须把它说透，不是因为它热，而是因为：{brief['reason']}\n\n"
             f"我更想先给它一个能继续讨论的名字：{brief['concept']}\n\n"
             f"真正该拆开的机制链是：{brief['mechanism']}\n\n"
             f"边界也要说清：{brief['boundary']}\n\n"
@@ -2214,7 +2383,7 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
             f"# {title}\n\n"
             f"先把判断摆前面：{idea['angle']}\n\n"
             f"我之所以现在发这条，不是为了跟热度，而是因为：{brief['reason']}\n\n"
-            f"它真正值得继续追的，不是情绪，而是这条机制链：{brief['mechanism']}\n\n"
+            f"它真正需要说透的，不是情绪，而是这条机制链：{brief['mechanism']}\n\n"
             f"如果要把它落到更具体的行动上，先该改的是：{brief['practice']}\n\n"
             f"{cta_line}"
         )
@@ -2229,9 +2398,11 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
 def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
     brief = _forum_publish_brief(idea)
     title = brief["title"]
+    evidence = next((str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()), "本轮证据来自现场约束与外部样本的交叉点。")
     content = (
         f"# {title}\n\n"
         f"这个帖子发在 {group.get('display_name') or group.get('name') or '小组'}，目标不是再讲一遍口号，而是把自治运营拆成可复用的结构。\n\n"
+        f"最小证据段：{evidence}\n\n"
         f"核心角度：{idea['angle']}\n\n"
         f"为什么现在要做：{brief['reason']}\n\n"
         f"先把最关键的对象说清：{brief['concept']}\n\n"
@@ -3335,6 +3506,7 @@ def _generate_forum_post(
 - 位置：{idea.get("theory_position") or "说明它在自治运营系统中的位置"}
 - 实践方针：{idea.get("practice_program") or "给出新的操作协议"}
 13. 标题不要直接借外部材料说话，不要写成“把《...》整理成一套方法”。
+14. 正文里必须至少出现一个证据段，写真实案例、日志切面、前后对比、反例或指标变化。
 """.strip()
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请根据选题写一篇新的中文帖子。
@@ -3356,6 +3528,8 @@ CONTENT:
 9. 当前 hook_type：`{hook_type}`
 10. 当前 cta_type：`{cta_type}`
 11. 如果 `source_signals` 里出现刚发布就快速起量的帖子，把它们当成新兴热点样本，而不是成熟热榜共识。
+12. `source_signals` 和运营状态只是后台提示，不准原样抄进正文；正文里禁止出现这些词：`当前运营目标`、`热讨论帖子数`、`社会观察样本`、`现场机会点`、`评论积压焦点`、`强势技术帖`。
+13. 不要直接粘贴英文论文标题、英文摘要或外部帖子原题；必须先翻成派蒙自己的中文判断，再写进正文。
 {theory_contract}
 
 建议标题：{title_guidance}
@@ -3373,6 +3547,10 @@ CONTENT:
         submolt = desired_board
     if not _idea_publishable_title(title):
         title = brief["title"]
+    content = _sanitize_generated_forum_content(content, title=title, submolt=submolt)
+    publish_issue = _forum_content_publishable_issue(content, submolt=submolt)
+    if publish_issue:
+        raise RuntimeError(f"generated forum post rejected: {publish_issue}")
     content = _ensure_forum_post_outro(
         content,
         submolt=submolt,
@@ -3403,7 +3581,7 @@ CONTENT:
 正文
 2. 正文使用 Markdown。
 3. 这是方法论沉淀帖，不要空喊口号。
-4. 要明确写出机制、步骤或判断。
+4. 要明确写出机制、边界、取舍或判断，不要把整篇写成机械步骤清单。
 5. {followup_hint}
 6. 不要把正文写成一次故障战报。要写成可复用的协议、框架或治理方案。
 7. 标题不要直接借外部帖子、论文或知乎题目。
@@ -3413,6 +3591,7 @@ CONTENT:
 - 边界：{idea.get("boundary_note") or "指出误用边界"}
 - 理论位置：{idea.get("theory_position") or "说明它在系统失控学中的位置"}
 - 实践方针：{idea.get("practice_program") or "给出新的实验或治理协议"}
+9. 正文里必须至少出现一个证据段，写真实案例、日志切面、前后对比、反例或指标变化。
 
 小组名称：{group.get("display_name") or group.get("name")}
 小组描述：{group.get("description", "")}
@@ -3424,6 +3603,10 @@ CONTENT:
     title, content = _parse_title_content(result)
     if not _idea_publishable_title(title):
         title = brief["title"]
+    content = _sanitize_generated_forum_content(content, title=title, submolt="skills")
+    publish_issue = _forum_content_publishable_issue(content, submolt="skills")
+    if publish_issue:
+        raise RuntimeError(f"generated group post rejected: {publish_issue}")
     content = _ensure_forum_post_outro(
         content,
         submolt="skills",
@@ -3966,6 +4149,8 @@ def _publish_primary_action(
 
     for idea in _ordered_primary_ideas(plan, cycle_state):
         kind = idea.get("kind", "")
+        if _primary_block_reason(idea):
+            continue
         if forum_budget_blocked and kind in {"theory-post", "tech-post", "group-post"}:
             if publication_mode == "none":
                 publication_mode = "skipped-budget"

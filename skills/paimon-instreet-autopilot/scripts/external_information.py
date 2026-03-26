@@ -72,6 +72,50 @@ VENUE_ALIASES = {
     "kdd": ("kdd", "knowledge discovery and data mining"),
     "www": ("www", "web conference", "world wide web"),
 }
+BUILTIN_SOURCE_FAMILY_DEFAULTS = {
+    "community_breakouts": {"kind": "community_breakouts", "state_key": "community_breakouts", "summary_family": "community_breakouts"},
+    "zhihu_hot": {"kind": "zhihu_hot", "state_key": "zhihu_results", "summary_family": "zhihu_hot"},
+    "github_trending": {"kind": "github_trending", "state_key": "github_projects", "summary_family": "github_trending"},
+    "prl_recent": {"kind": "prl_recent", "state_key": "prl_papers", "summary_family": "prl_recent"},
+    "conference_recent": {"kind": "conference_recent", "state_key": "conference_papers", "summary_family": "conference_recent"},
+    "crossref_recent": {"kind": "crossref_recent", "state_key": "crossref_recent", "summary_family": "crossref_recent"},
+    "arxiv_latest": {"kind": "arxiv_latest", "state_key": "arxiv_preprints", "summary_family": "arxiv_latest"},
+    "manual_web": {"kind": "manual_web", "state_key": "manual_web_sources", "summary_family": "manual_web"},
+    "marxists": {"kind": "classic_index", "state_key": "classic_readings", "summary_family": "classic_readings"},
+}
+
+
+def _default_registry_families() -> list[dict[str, Any]]:
+    return [
+        {"name": "community_breakouts", "enabled": True},
+        {"name": "zhihu_hot", "enabled": True},
+        {"name": "github_trending", "enabled": True},
+        {"name": "prl_recent", "enabled": True},
+        {"name": "conference_recent", "enabled": True, "venues": DEFAULT_AI_VENUES},
+        {"name": "arxiv_latest", "enabled": True, "categories": DEFAULT_ARXIV_CATEGORIES},
+        {"name": "crossref_recent", "enabled": True},
+        {"name": "manual_web", "enabled": True},
+        {"name": "marxists", "enabled": True, "indexes": DEFAULT_MARXISTS_INDEXES},
+    ]
+
+
+def _normalize_registry_family(entry: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(entry or {})
+    name = str(normalized.get("name") or "").strip()
+    defaults = BUILTIN_SOURCE_FAMILY_DEFAULTS.get(name, {})
+    normalized = {**defaults, **normalized}
+    normalized["name"] = name or str(normalized.get("state_key") or normalized.get("kind") or "external")
+    normalized["kind"] = str(normalized.get("kind") or normalized["name"]).strip()
+    normalized["state_key"] = str(normalized.get("state_key") or normalized["name"]).strip()
+    normalized["summary_family"] = str(normalized.get("summary_family") or normalized["name"]).strip()
+    return normalized
+
+
+def _registry_families(registry: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = list(registry.get("families") or [])
+    if not raw:
+        raw = _default_registry_families()
+    return [_normalize_registry_family(item) for item in raw if isinstance(item, dict)]
 
 
 def ensure_external_information_files() -> None:
@@ -95,17 +139,7 @@ def ensure_external_information_files() -> None:
             EXTERNAL_INFORMATION_REGISTRY_PATH,
             {
                 "updated_at": now_utc(),
-                "families": [
-                    {"name": "community_breakouts", "enabled": True},
-                    {"name": "zhihu_hot", "enabled": True},
-                    {"name": "github_trending", "enabled": True},
-                    {"name": "prl_recent", "enabled": True},
-                    {"name": "conference_recent", "enabled": True, "venues": DEFAULT_AI_VENUES},
-                    {"name": "arxiv_latest", "enabled": True, "categories": DEFAULT_ARXIV_CATEGORIES},
-                    {"name": "crossref_recent", "enabled": True},
-                    {"name": "manual_web", "enabled": True},
-                    {"name": "marxists", "enabled": True, "indexes": DEFAULT_MARXISTS_INDEXES},
-                ],
+                "families": _default_registry_families(),
             },
         )
     if not RESEARCH_INTEREST_PROFILE_PATH.exists():
@@ -335,7 +369,7 @@ def _source_enabled(registry: dict[str, Any], name: str) -> bool:
 
 
 def _registry_family(registry: dict[str, Any], name: str) -> dict[str, Any]:
-    for family in registry.get("families") or []:
+    for family in _registry_families(registry):
         if str(family.get("name") or "") == name:
             return family
     return {}
@@ -396,7 +430,12 @@ def _extract_document_title(raw_html: str, *, fallback_url: str) -> str:
     return truncate_text(fallback, 160)
 
 
-def _fetch_manual_web_best_effort(urls: list[Any], *, limit: int = MAX_MANUAL_WEB_SOURCES) -> list[dict[str, Any]]:
+def _fetch_manual_web_best_effort(
+    urls: list[Any],
+    *,
+    limit: int = MAX_MANUAL_WEB_SOURCES,
+    family_name: str = "manual_web",
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     for raw_url in urls or []:
@@ -416,7 +455,7 @@ def _fetch_manual_web_best_effort(urls: list[Any], *, limit: int = MAX_MANUAL_WE
             continue
         results.append(
             {
-                "family": "manual_web",
+                "family": family_name,
                 "title": title,
                 "summary": truncate_text(excerpt, 220),
                 "excerpt": excerpt,
@@ -426,6 +465,77 @@ def _fetch_manual_web_best_effort(urls: list[Any], *, limit: int = MAX_MANUAL_WE
         )
         if len(results) >= limit:
             break
+    return _dedupe_candidates(results, limit=limit)
+
+
+def _xml_local_name(tag: Any) -> str:
+    return str(tag or "").split("}", 1)[-1].lower()
+
+
+def _xml_child_text(node: Any, *names: str) -> str:
+    wanted = {name.lower() for name in names}
+    for child in list(node):
+        if _xml_local_name(getattr(child, "tag", "")) not in wanted:
+            continue
+        text = " ".join("".join(child.itertext()).split())
+        if text:
+            return text
+    return ""
+
+
+def _xml_child_href(node: Any, *names: str) -> str:
+    wanted = {name.lower() for name in names}
+    for child in list(node):
+        if _xml_local_name(getattr(child, "tag", "")) not in wanted:
+            continue
+        href = str(child.attrib.get("href") or "").strip()
+        if href:
+            return href
+        text = " ".join("".join(child.itertext()).split())
+        if text.startswith(("http://", "https://")):
+            return text
+    return ""
+
+
+def _fetch_generic_rss_best_effort(
+    urls: list[Any],
+    *,
+    family_name: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for raw_url in urls or []:
+        url = str(raw_url or "").strip()
+        if not url:
+            continue
+        try:
+            raw = _fetch_text(url)
+        except Exception:
+            continue
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            continue
+        entries = root.findall(".//item") or root.findall(".//{*}entry")
+        for entry in entries:
+            title = _xml_child_text(entry, "title")
+            if not title:
+                continue
+            summary = _xml_child_text(entry, "description", "summary", "content")
+            link = _xml_child_href(entry, "link") or url
+            published_at = _xml_child_text(entry, "pubdate", "published", "updated")
+            results.append(
+                {
+                    "family": family_name,
+                    "title": truncate_text(title, 180),
+                    "summary": truncate_text(summary or title, 220),
+                    "excerpt": truncate_text(summary or title, 1000),
+                    "url": link,
+                    "published_at": published_at,
+                }
+            )
+            if len(results) >= limit:
+                return _dedupe_candidates(results, limit=limit)
     return _dedupe_candidates(results, limit=limit)
 
 
@@ -803,6 +913,46 @@ def _select_readings(family_map: dict[str, list[dict[str, Any]]], *, limit: int 
     return _dedupe_candidates(selected, limit=limit)
 
 
+def _fetch_registry_family_best_effort(
+    family: dict[str, Any],
+    *,
+    community_hot_posts: list[dict[str, Any]],
+    competitor_watchlist: list[dict[str, Any]],
+    hints_payload: dict[str, Any],
+    research_queries: list[str],
+) -> list[dict[str, Any]]:
+    kind = str(family.get("kind") or family.get("name") or "").strip()
+    family_name = str(family.get("name") or kind or "external").strip()
+    limit = max(1, int(family.get("limit") or 8))
+    if kind == "community_breakouts":
+        return _extract_community_breakouts(community_hot_posts, competitor_watchlist)
+    if kind == "zhihu_hot":
+        return _fetch_zhihu_hot_best_effort(limit=limit)
+    if kind == "github_trending":
+        return _fetch_github_trending_best_effort(limit=limit)
+    if kind == "prl_recent":
+        return _fetch_prl_recent_best_effort(limit=limit)
+    if kind == "conference_recent":
+        return _fetch_conference_recent(list(family.get("venues") or DEFAULT_AI_VENUES), limit_per_venue=max(1, limit // 2))
+    if kind == "arxiv_latest":
+        return _fetch_arxiv_latest(list(family.get("categories") or DEFAULT_ARXIV_CATEGORIES), limit_per_category=max(1, limit // 2))
+    if kind == "crossref_recent":
+        queries = list(family.get("queries") or []) or research_queries
+        return _fetch_crossref_recent_best_effort(queries, limit_per_query=max(1, int(family.get("limit_per_query") or 2)))
+    if kind == "manual_web":
+        urls = list(family.get("urls") or hints_payload.get("manual_urls") or [])
+        return _fetch_manual_web_best_effort(urls, limit=limit, family_name=family_name)
+    if kind in {"classic_index", "marxists"}:
+        indexes = list(family.get("indexes") or DEFAULT_MARXISTS_INDEXES)
+        per_author = max(1, int(family.get("per_author") or max(1, limit // max(1, len(indexes)))))
+        return _fetch_marxists_readings(indexes, per_author=per_author)
+    if kind == "rss":
+        return _fetch_generic_rss_best_effort(list(family.get("urls") or []), family_name=family_name, limit=limit)
+    if kind == "html":
+        return _fetch_manual_web_best_effort(list(family.get("urls") or []), limit=limit, family_name=family_name)
+    return []
+
+
 def refresh_external_information(
     *,
     community_hot_posts: list[dict[str, Any]],
@@ -813,70 +963,37 @@ def refresh_external_information(
     registry = read_json(EXTERNAL_INFORMATION_REGISTRY_PATH, default={"families": []})
     hints_payload = _load_hints()
     research_queries = _research_query_pool(user_topic_hints)
+    registry_families = _registry_families(registry)
+    family_results: dict[str, list[dict[str, Any]]] = {}
+    for family in registry_families:
+        if not _source_enabled(registry, str(family.get("name") or "")):
+            family_results[str(family.get("name") or "")] = []
+            continue
+        family_results[str(family.get("name") or "")] = _fetch_registry_family_best_effort(
+            family,
+            community_hot_posts=community_hot_posts,
+            competitor_watchlist=competitor_watchlist,
+            hints_payload=hints_payload,
+            research_queries=research_queries,
+        )
 
-    community_breakouts = _extract_community_breakouts(community_hot_posts, competitor_watchlist)
-    zhihu_results = _fetch_zhihu_hot_best_effort() if _source_enabled(registry, "zhihu_hot") else []
-    github_projects = _fetch_github_trending_best_effort() if _source_enabled(registry, "github_trending") else []
-    prl_papers = _fetch_prl_recent_best_effort() if _source_enabled(registry, "prl_recent") else []
-
-    arxiv_cfg = _registry_family(registry, "arxiv_latest")
-    arxiv_preprints = (
-        _fetch_arxiv_latest(list(arxiv_cfg.get("categories") or DEFAULT_ARXIV_CATEGORIES))
-        if _source_enabled(registry, "arxiv_latest")
-        else []
-    )
-
-    conference_cfg = _registry_family(registry, "conference_recent")
-    conference_papers = (
-        _fetch_conference_recent(list(conference_cfg.get("venues") or DEFAULT_AI_VENUES))
-        if _source_enabled(registry, "conference_recent")
-        else []
-    )
-
-    crossref_recent = (
-        _fetch_crossref_recent_best_effort(research_queries)
-        if _source_enabled(registry, "crossref_recent")
-        else []
-    )
-
-    manual_web_sources = (
-        _fetch_manual_web_best_effort(list(hints_payload.get("manual_urls") or []))
-        if _source_enabled(registry, "manual_web")
-        else []
-    )
-
-    marxists_cfg = _registry_family(registry, "marxists")
-    classic_readings = (
-        _fetch_marxists_readings(list(marxists_cfg.get("indexes") or DEFAULT_MARXISTS_INDEXES))
-        if _source_enabled(registry, "marxists")
-        else []
-    )
+    community_breakouts = list(family_results.get("community_breakouts") or [])
+    zhihu_results = list(family_results.get("zhihu_hot") or [])
+    github_projects = list(family_results.get("github_trending") or [])
+    prl_papers = list(family_results.get("prl_recent") or [])
+    conference_papers = list(family_results.get("conference_recent") or [])
+    crossref_recent = list(family_results.get("crossref_recent") or [])
+    arxiv_preprints = list(family_results.get("arxiv_latest") or [])
+    manual_web_sources = list(family_results.get("manual_web") or [])
+    classic_readings = list(family_results.get("marxists") or family_results.get("classic_readings") or [])
 
     raw_candidates = _dedupe_candidates(
-        list(community_breakouts)
-        + list(zhihu_results)
-        + list(github_projects)
-        + list(prl_papers)
-        + list(conference_papers)
-        + list(crossref_recent)
-        + list(arxiv_preprints)
-        + list(manual_web_sources)
-        + list(classic_readings),
+        [item for items in family_results.values() for item in items],
         limit=MAX_RAW_CANDIDATES,
     )
 
     selected_readings = _select_readings(
-        {
-            "community_breakouts": community_breakouts[:10],
-            "zhihu_hot": zhihu_results[:10],
-            "github_trending": github_projects[:10],
-            "prl_recent": prl_papers[:10],
-            "conference_recent": conference_papers[:12],
-            "crossref_recent": crossref_recent[:12],
-            "arxiv_latest": arxiv_preprints[:12],
-            "manual_web": manual_web_sources[:8],
-            "classic_readings": classic_readings[:10],
-        }
+        {name: items[:12] for name, items in family_results.items() if items}
     )
     reading_notes = [_reading_note(item) for item in selected_readings]
     bibliography = [
@@ -889,15 +1006,8 @@ def refresh_external_information(
         for item in selected_readings
     ]
     source_families = [
-        {"family": "community_breakouts", "count": len(community_breakouts)},
-        {"family": "zhihu_hot", "count": len(zhihu_results)},
-        {"family": "github_trending", "count": len(github_projects)},
-        {"family": "prl_recent", "count": len(prl_papers)},
-        {"family": "conference_recent", "count": len(conference_papers)},
-        {"family": "crossref_recent", "count": len(crossref_recent)},
-        {"family": "arxiv_latest", "count": len(arxiv_preprints)},
-        {"family": "manual_web", "count": len(manual_web_sources)},
-        {"family": "classic_readings", "count": len(classic_readings)},
+        {"family": str(family.get("summary_family") or family.get("name") or ""), "count": len(family_results.get(str(family.get("name") or ""), []))}
+        for family in registry_families
     ]
     state = {
         "generated_at": now_utc(),
@@ -920,5 +1030,10 @@ def refresh_external_information(
         "research_queries": research_queries,
         "research_interest_profile": read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile()),
     }
+    for family in registry_families:
+        state_key = str(family.get("state_key") or family.get("name") or "").strip()
+        family_name = str(family.get("name") or "").strip()
+        if state_key and family_name and state_key not in state:
+            state[state_key] = list(family_results.get(family_name) or [])
     write_json(EXTERNAL_INFORMATION_PATH, state)
     return state

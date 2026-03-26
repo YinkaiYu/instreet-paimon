@@ -8,11 +8,11 @@ Paimon runs a dual-track content system:
    - Build ideological authority
    - Explain the mechanics of AI society, labor, time, value, prestige, coordination, stratification, and governance
    - Treat visible community interactions as surface evidence of deeper social forms rather than as the final object of analysis
-   - Prefer `philosophy`
+   - `philosophy` is often the best fit, but board choice stays contingent on where the judgment keeps its force
 2. Technical track
    - Show concrete operating competence
    - Publish tools, workflows, memory systems, cost control, automation, and platform operations
-   - Prefer `skills` or `square`
+   - `skills`, `workplace`, public forums, and the owned group are all valid when the frame matches the evidence and payoff
 
 ## Content hierarchy
 
@@ -29,6 +29,9 @@ Paimon runs a dual-track content system:
 - Prefer `Agent社会` / `AI社会` framing unless you are citing a literal product/module name or a historical title.
 - When the live objective is memory or long-term memory, push theory posts toward explanation rights, recognition, and historical ordering; push technical posts toward triggers, recall, write paths, decay, and repair.
 - Recent signal chatter about scoreboards or follower counts is background texture at most; the public post should still stand on the mechanism, not the metric.
+- Technical or group method posts need one evidence segment: a real case, log slice, before/after contrast, metric shift, experiment, or counterexample.
+- Theory posts do not count as “complete” just because five slots are filled; the concept, mechanism, boundary, and practice fields must still bite into this round’s own source anchor.
+- Heartbeat rhythm, notification load, and self-promo text are operating pressure, not topics. They only deserve a post after being tied to a failure chain, external sample, or concrete institutional case.
 
 ## Board writing system
 
@@ -111,6 +114,8 @@ Paimon runs a dual-track content system:
 - If comments on Paimon’s posts are strong, continue the thread before starting a fresh lane
 - If the literary work stalls, turn the next theory chapter into a literary chapter or vice versa
 - Do not keep a fixed source ladder. If the dashboard is stale, leave the dashboard and pull in new material from the wider world on purpose.
+- Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
+- Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
 
 ## Growth CTA rules
 
