@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import re
+import ssl
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
 
 from common import (
     ApiError,
@@ -25,7 +28,6 @@ from common import (
     comment_daily_budget_status as common_comment_daily_budget_status,
     extract_retry_after_seconds as common_extract_retry_after_seconds,
     ensure_runtime_dirs,
-    find_node_executable,
     forum_write_budget_status as common_forum_write_budget_status,
     forum_write_rate_limit_scope as common_forum_write_rate_limit_scope,
     is_forum_write_rate_limit_error as common_is_forum_write_rate_limit_error,
@@ -40,7 +42,6 @@ from common import (
     run_codex,
     run_codex_json,
     run_outbound_action,
-    runtime_subprocess_env,
     write_text,
     truncate_text,
     write_json,
@@ -72,7 +73,8 @@ PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
-FEISHU_GATEWAY_SCRIPT = REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "scripts" / "feishu_gateway.mjs"
+FEISHU_API_BASE = "https://open.feishu.cn"
+FEISHU_TENANT_TOKEN_ENDPOINT = "/open-apis/auth/v3/tenant_access_token/internal"
 DEFAULT_HEARTBEAT_WRITE_RETRIES = 3
 DEFAULT_HEARTBEAT_WRITE_RETRY_DELAY_SEC = 2.0
 DEFAULT_REPLY_MAX_PER_RUN = 10
@@ -4621,6 +4623,128 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     return "\n".join(lines)
 
 
+def _feishu_http_timeout_seconds(config) -> float:
+    raw = config.automation.get("feishu_http_timeout_ms", 8000)
+    try:
+        timeout_ms = int(raw)
+    except (TypeError, ValueError):
+        timeout_ms = 8000
+    return max(5.0, timeout_ms / 1000.0)
+
+
+def _feishu_send_retries(config) -> int:
+    raw = config.automation.get("feishu_send_retries", 4)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 4
+
+
+def _feishu_send_retry_delay_seconds(config) -> float:
+    raw = config.automation.get("feishu_send_retry_delay_ms", 1500)
+    try:
+        delay_ms = float(raw)
+    except (TypeError, ValueError):
+        delay_ms = 1500.0
+    return max(0.0, delay_ms / 1000.0)
+
+
+def _is_transient_feishu_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            ssl.SSLError,
+            ConnectionError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ),
+    ):
+        return True
+    if isinstance(exc, urllib_error.URLError):
+        lowered = str(exc.reason or exc).lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "timed out",
+                "timeout",
+                "temporarily unavailable",
+                "connection reset",
+                "connection refused",
+                "network is unreachable",
+                "name or service not known",
+                "temporary failure in name resolution",
+            )
+        )
+    lowered = str(exc).lower()
+    return any(
+        marker in lowered
+        for marker in ("timed out", "timeout", "connection reset", "network is unreachable")
+    )
+
+
+def _post_feishu_json(
+    config,
+    url: str,
+    payload: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    request_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "paimon-instreet-autopilot/0.1",
+    }
+    if headers:
+        request_headers.update(headers)
+    encoded_payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    timeout_seconds = _feishu_http_timeout_seconds(config)
+    retries = _feishu_send_retries(config)
+    retry_delay_seconds = _feishu_send_retry_delay_seconds(config)
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        req = urllib_request.Request(
+            url,
+            method="POST",
+            headers=request_headers,
+            data=encoded_payload,
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib_error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                body = {"raw": truncate_text(raw, 240)}
+            last_exc = RuntimeError(f"HTTP {exc.code}: {body}")
+            if attempt >= retries:
+                raise last_exc from exc
+        except (
+            urllib_error.URLError,
+            TimeoutError,
+            ssl.SSLError,
+            ConnectionError,
+            OSError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ) as exc:
+            last_exc = exc
+            if attempt >= retries or not _is_transient_feishu_error(exc):
+                raise
+        else:
+            try:
+                return json.loads(raw) if raw else {}
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"invalid feishu response: {truncate_text(raw, 240)}") from exc
+        if retry_delay_seconds > 0 and attempt < retries:
+            time.sleep(retry_delay_seconds * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("feishu request failed without response")
+
+
 def _send_feishu_text(
     config,
     text: str,
@@ -4636,41 +4760,48 @@ def _send_feishu_text(
             "error": "no bound feishu report target yet; awaiting explicit binding",
         }
     receive_id_type, receive_id = target
-    completed = subprocess.run(
-        [
-            find_node_executable(),
-            str(FEISHU_GATEWAY_SCRIPT),
-            "send",
-            "--receive-id-type",
-            receive_id_type,
-            "--receive-id",
-            receive_id,
-            "--text",
-            text,
-        ],
-        cwd=REPO_ROOT,
-        env=runtime_subprocess_env(),
-        text=True,
-        capture_output=True,
-        timeout=120,
-        check=False,
-    )
-    if completed.returncode != 0:
+    try:
+        auth_body = _post_feishu_json(
+            config,
+            f"{FEISHU_API_BASE}{FEISHU_TENANT_TOKEN_ENDPOINT}",
+            {
+                "app_id": config.feishu["app_id"],
+                "app_secret": config.feishu["app_secret"],
+            },
+        )
+        auth_code = int(auth_body.get("code", -1))
+        tenant_access_token = str(auth_body.get("tenant_access_token") or "").strip()
+        if auth_code != 0 or not tenant_access_token:
+            raise RuntimeError(f"tenant token request failed: {auth_body}")
+
+        message_body = _post_feishu_json(
+            config,
+            (
+                f"{FEISHU_API_BASE}/open-apis/im/v1/messages"
+                f"?receive_id_type={urllib_parse.quote(receive_id_type, safe='')}"
+            ),
+            {
+                "receive_id": receive_id,
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "msg_type": "text",
+            },
+            headers={"Authorization": f"Bearer {tenant_access_token}"},
+        )
+        message_code = int(message_body.get("code", -1))
+        if message_code != 0:
+            raise RuntimeError(f"feishu message send failed: {message_body}")
+    except Exception as exc:
         return {
             "kind": failed_kind,
             "receive_id_type": receive_id_type,
             "receive_id": receive_id,
-            "error": completed.stderr.strip() or completed.stdout.strip(),
+            "error": str(exc),
         }
-    try:
-        body = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        body = {"raw": completed.stdout.strip()}
     return {
         "kind": success_kind,
         "receive_id_type": receive_id_type,
         "receive_id": receive_id,
-        "result": body,
+        "result": message_body,
     }
 
 
