@@ -34,6 +34,25 @@ HIGH_PERFORMANCE_MIN_UPVOTES = 60
 HIGH_PERFORMANCE_MIN_COMMENTS = 20
 RESERVED_TITLE_PHRASES = ("老竹讲堂",)
 INNOVATION_CLASSES = ("new_concept", "new_mechanism", "new_theory", "new_practice")
+PLACEHOLDER_TITLE_PATTERNS = (
+    r"\btitle\s+pending\b",
+    r"\bpending\b",
+    r"\buntitled\b",
+    r"\btbd\b",
+)
+GENERIC_ASCII_TITLE_FRAGMENTS = {
+    "title",
+    "pending",
+    "improvement",
+    "improvements",
+    "better",
+    "answer",
+    "answers",
+    "study",
+    "research",
+    "paper",
+    "retrieval",
+}
 METRIC_SURFACE_KEYWORDS = (
     "积分",
     "粉丝",
@@ -187,6 +206,32 @@ def normalize_forum_board(board: str) -> str:
 
 def _joined_idea_text(*parts: Any) -> str:
     return " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+
+def _looks_like_placeholder_title(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return True
+    normalized = cleaned.lower()
+    return any(re.search(pattern, normalized) for pattern in PLACEHOLDER_TITLE_PATTERNS)
+
+
+def _extract_upper_acronyms(*texts: str, limit: int = 3) -> list[str]:
+    picked: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for token in re.findall(r"\b[A-Z][A-Z0-9-]{1,7}\b", str(text or "")):
+            if token in {"AI", "AGENT"} or token in seen:
+                continue
+            seen.add(token)
+            picked.append(token)
+            if len(picked) >= limit:
+                return picked
+    return picked
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -638,6 +683,14 @@ def _runtime_title_fragments(*texts: str) -> list[str]:
             cleaned = _sanitize_reserved_text(fragment)
             if len(cleaned) < 2 or len(cleaned) > 14:
                 continue
+            lowered = cleaned.lower()
+            if _looks_like_placeholder_title(cleaned):
+                continue
+            if not _contains_cjk(cleaned):
+                if not re.fullmatch(r"[A-Z][A-Z0-9-]{1,7}", cleaned):
+                    continue
+                if lowered in GENERIC_ASCII_TITLE_FRAGMENTS:
+                    continue
             normalized = _normalize_title(cleaned)
             if not normalized or normalized in seen:
                 continue
@@ -658,7 +711,36 @@ def _compose_fragment_title(track: str, *texts: str) -> str:
     if fragments:
         return truncate_text(fragments[0], 28)
     fallback = _sanitize_reserved_text(" ".join(texts).strip())
-    return truncate_text(fallback, 28) or ("系统判断" if track == "tech" else "新的社会命名")
+    if fallback and _contains_cjk(fallback) and not _looks_like_placeholder_title(fallback):
+        return truncate_text(fallback, 28)
+    return ("系统判断" if track == "tech" else "新的社会命名")
+
+
+def _fallback_dynamic_title(track: str, signal_type: str, source_text: str) -> str:
+    signal_type = str(signal_type or "").strip()
+    acronyms = _extract_upper_acronyms(source_text)
+    token = acronyms[0] if acronyms else ""
+    if track == "theory":
+        if token:
+            return f"{token} 不是判断力：系统为什么越变强，越可能失去边界"
+        return {
+            "paper": "能力指标变强以后，判断为什么反而更容易失真",
+            "github": "新工具热潮背后，真正被重写的是哪种协作秩序",
+            "classic": "把旧理论搬进 Agent 社会时，最先该重写的是哪个概念",
+            "community-hot": "热点起飞以后，真正开始争夺的到底是什么解释权",
+            "rising-hot": "一类讨论突然起量时，背后往往先变的是结构不是情绪",
+        }.get(signal_type, "热闹之外，真正起作用的是什么结构")
+    if track == "tech":
+        if token:
+            return f"{token} 变强以后，系统为什么反而更容易在边界处出错"
+        return {
+            "paper": "把研究结论翻成系统协议，第一步不是复述而是重写约束",
+            "github": "新工具进场以后，接口边界为什么比功能堆料更重要",
+            "community-hot": "讨论起飞以后，系统最先暴露出来的是哪条恢复链",
+            "rising-hot": "一类故障开始密集出现时，先该修的不是表面动作而是状态机",
+            "failure": "真正会反复复发的故障，往往不是错误本身而是恢复入口",
+        }.get(signal_type, "一次系统失手之后，最先该补上的不是动作而是边界")
+    return "Agent心跳同步实验室：失控从来不是一次错误，而是边界开始变模糊"
 
 
 def _echoes_source_title(title: str) -> bool:
@@ -694,6 +776,8 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
 def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, board: str | None = None) -> str:
     source_text = str(source_text or "").strip()
     board = normalize_forum_board(board or "")
+    if _looks_like_placeholder_title(source_text) or not _contains_cjk(source_text):
+        return _fallback_dynamic_title(track, signal_type, source_text)
     if track == "theory":
         del signal_type, board
         return _compose_fragment_title("theory", source_text)
@@ -1823,13 +1907,10 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         f"现场机会点：{truncate_text(source_text, 40)}",
         f"避让过载母题：{','.join((novelty.get('overloaded_keywords') or [])[:3]) or '无'}",
     ]
-    if objective_focus:
-        source_signals.insert(0, f"当前运营目标：{truncate_text(objective_focus, 40)}")
     why_now = str(opportunity.get("why_now") or "理论线需要接住现场变化。")
-    if objective_focus:
-        why_now = f"{why_now} 当前运营目标也要求继续推进这个方向。"
     return {
         "kind": "theory-post",
+        "signal_type": str(opportunity.get("signal_type") or ""),
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
@@ -1885,13 +1966,10 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         f"强势技术帖：{truncate_text(str(hot_tech.get('title') or '无'), 40)}",
         f"现场机会点：{truncate_text(str(opportunity.get('source_text') or '无'), 40)}",
     ]
-    if objective_focus:
-        source_signals.insert(0, f"当前运营目标：{truncate_text(objective_focus, 40)}")
     why_now = str(opportunity.get("why_now") or "技术线需要正面回应当前运行压力。")
-    if objective_focus:
-        why_now = f"{why_now} 当前运营目标也要求继续推进这个方向。"
     return {
         "kind": "tech-post",
+        "signal_type": str(opportunity.get("signal_type") or ""),
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),

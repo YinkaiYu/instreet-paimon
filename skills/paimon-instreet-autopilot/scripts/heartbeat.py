@@ -74,6 +74,8 @@ USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
 SOURCE_MUTATION_STATE_PATH = CURRENT_STATE_DIR / "source_mutation_state.json"
 SOURCE_MUTATION_JOURNAL_PATH = CURRENT_STATE_DIR / "source_mutation_journal.jsonl"
 LOW_HEAT_FAILURES_PATH = CURRENT_STATE_DIR / "low_heat_failures.json"
+FALLBACK_AUDIT_PATH = CURRENT_STATE_DIR / "fallback_audit.json"
+FALLBACK_JOURNAL_PATH = CURRENT_STATE_DIR / "fallback_events.jsonl"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
@@ -102,6 +104,8 @@ DEFAULT_NOTIFICATION_FETCH_LIMIT = 50
 DEFAULT_PRIMARY_WAIT_NOTIFY_SEC = 1800
 DEFAULT_PRIMARY_PLAN_RETRY_ROUNDS = 3
 DEFAULT_SOURCE_MUTATION_ROUNDS = 2
+DEFAULT_SOURCE_MUTATION_CODEX_TIMEOUT_SEC = 900
+DEFAULT_FALLBACK_AUDIT_RECENT_LIMIT = 40
 DEFAULT_LOW_HEAT_WINDOW_HOURS = 2.0
 DEFAULT_LOW_HEAT_MIN_UPVOTES = 30
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
@@ -127,12 +131,83 @@ def _heartbeat_codex_timeout_seconds(config) -> int:
     return _timeout_seconds_from_ms(config.automation.get("heartbeat_codex_timeout_ms", 180000), 180)
 
 
+def _source_mutation_codex_timeout_seconds(config) -> int:
+    raw = config.automation.get("source_mutation_codex_timeout_ms")
+    if raw is None:
+        raw = config.automation.get("source_mutation_codex_timeout_seconds")
+        if raw is not None:
+            try:
+                return max(120, int(raw))
+            except (TypeError, ValueError):
+                return DEFAULT_SOURCE_MUTATION_CODEX_TIMEOUT_SEC
+        return DEFAULT_SOURCE_MUTATION_CODEX_TIMEOUT_SEC
+    return max(120, _timeout_seconds_from_ms(raw, DEFAULT_SOURCE_MUTATION_CODEX_TIMEOUT_SEC))
+
+
 def _fiction_chapter_codex_timeout_seconds(config) -> int:
     heartbeat_timeout = _heartbeat_codex_timeout_seconds(config)
     raw = config.automation.get("fiction_chapter_codex_timeout_ms")
     if raw is None:
         return max(heartbeat_timeout, DEFAULT_FICTION_CHAPTER_CODEX_TIMEOUT_SEC)
     return max(heartbeat_timeout, _timeout_seconds_from_ms(raw, DEFAULT_FICTION_CHAPTER_CODEX_TIMEOUT_SEC))
+
+
+def _fallback_audit_state() -> dict[str, Any]:
+    return read_json(FALLBACK_AUDIT_PATH, default={"updated_at": None, "counts": {}, "recent": []})
+
+
+def _compact_fallback_context(context: dict[str, Any] | None) -> dict[str, str]:
+    compacted: dict[str, str] = {}
+    for key, value in (context or {}).items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            compacted[str(key)] = truncate_text(str(value), 280)
+            continue
+        compacted[str(key)] = truncate_text(json.dumps(value, ensure_ascii=False, default=str), 280)
+    return compacted
+
+
+def _record_fallback_event(
+    *,
+    stage: str,
+    target_kind: str,
+    fallback_name: str,
+    reason: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = {
+        "timestamp": now_utc(),
+        "stage": stage,
+        "target_kind": target_kind,
+        "fallback_name": fallback_name,
+        "reason": truncate_text(str(reason or "").strip() or "unknown", 400),
+        "context": _compact_fallback_context(context),
+    }
+    append_jsonl(FALLBACK_JOURNAL_PATH, event)
+    state = _fallback_audit_state()
+    counts = state.setdefault("counts", {})
+    key = f"{stage}:{target_kind}:{fallback_name}"
+    bucket = counts.get(
+        key,
+        {
+            "stage": stage,
+            "target_kind": target_kind,
+            "fallback_name": fallback_name,
+            "count": 0,
+        },
+    )
+    bucket["count"] = int(bucket.get("count") or 0) + 1
+    bucket["last_seen_at"] = event["timestamp"]
+    bucket["last_reason"] = event["reason"]
+    bucket["last_context"] = event["context"]
+    counts[key] = bucket
+    recent = list(state.get("recent") or [])
+    recent.insert(0, event)
+    state["recent"] = recent[:DEFAULT_FALLBACK_AUDIT_RECENT_LIMIT]
+    state["updated_at"] = event["timestamp"]
+    write_json(FALLBACK_AUDIT_PATH, state)
+    return event
 
 
 def _rotate_sequence(items: list[str], start: int) -> list[str]:
@@ -692,6 +767,7 @@ def _execute_source_mutation(
     external_information: dict[str, Any],
     content_evolution_state: dict[str, Any],
     low_heat_reflection: dict[str, Any],
+    fallback_audit: dict[str, Any],
     allow_codex: bool,
     model: str | None,
     reasoning_effort: str | None,
@@ -754,6 +830,9 @@ def _execute_source_mutation(
 
 低热复盘：
 {truncate_text(json.dumps(low_heat_reflection, ensure_ascii=False), 1800)}
+
+fallback 轨迹：
+{truncate_text(json.dumps(fallback_audit, ensure_ascii=False), 1800)}
 """.strip()
         try:
             last_result = run_codex_json(
@@ -1858,11 +1937,183 @@ def _fallback_dm_reply(thread: dict, messages: list[dict]) -> str:
     )
 
 
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+
+def _ascii_heavy_text(text: str) -> bool:
+    raw = str(text or "")
+    latin_letters = len(re.findall(r"[A-Za-z]", raw))
+    cjk_letters = len(re.findall(r"[\u4e00-\u9fff]", raw))
+    return latin_letters >= 12 and latin_letters > max(6, cjk_letters * 3)
+
+
+def _looks_like_placeholder_title(text: str) -> bool:
+    cleaned = str(text or "").strip().lower()
+    if not cleaned:
+        return True
+    return bool(re.search(r"\b(title\s+pending|untitled|tbd)\b", cleaned))
+
+
+def _extract_upper_acronyms(*texts: Any, limit: int = 3) -> list[str]:
+    picked: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for token in re.findall(r"\b[A-Z][A-Z0-9-]{1,7}\b", str(text or "")):
+            if token in {"AI", "AGENT"} or token in seen:
+                continue
+            seen.add(token)
+            picked.append(token)
+            if len(picked) >= limit:
+                return picked
+    return picked
+
+
+def _public_line(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = cleaned.replace("当前运营目标也要求继续推进这个方向。", "").strip()
+    if not cleaned:
+        return ""
+    if any(
+        marker in cleaned
+        for marker in (
+            "当前运营目标",
+            "下一批优先回复",
+            "活跃讨论帖",
+            "未解决失败项",
+            "评论积压焦点",
+            "强势技术帖",
+            "热讨论帖子数",
+            "社会观察样本",
+            "现场机会点",
+        )
+    ):
+        return ""
+    if _ascii_heavy_text(cleaned):
+        return ""
+    return cleaned
+
+
+def _idea_signal_type(idea: dict[str, Any]) -> str:
+    return str(idea.get("signal_type") or "").strip()
+
+
+def _idea_publishable_title(title: str) -> bool:
+    cleaned = str(title or "").strip()
+    return bool(cleaned and _contains_cjk(cleaned) and not _ascii_heavy_text(cleaned) and not _looks_like_placeholder_title(cleaned))
+
+
+def _idea_publish_title(idea: dict[str, Any]) -> str:
+    raw_title = str(idea.get("title") or "").strip()
+    if _idea_publishable_title(raw_title):
+        return raw_title
+    signal_type = _idea_signal_type(idea)
+    kind = str(idea.get("kind") or "")
+    token = next(
+        iter(
+            _extract_upper_acronyms(
+                raw_title,
+                idea.get("angle"),
+                idea.get("why_now"),
+                *(idea.get("source_signals") or []),
+            )
+        ),
+        "",
+    )
+    if kind == "theory-post":
+        if token:
+            return f"{token} 不是判断力：系统为什么越变强，越可能失去边界"
+        return {
+            "paper": "能力指标变强以后，判断为什么反而更容易失真",
+            "github": "新工具热潮背后，真正被重写的是哪种协作秩序",
+            "community-hot": "热点起飞以后，真正开始争夺的到底是什么解释权",
+            "rising-hot": "一类讨论突然起量时，背后先变化的往往不是情绪而是结构",
+            "classic": "把旧理论搬进 Agent 社会时，最先该重写的是哪个概念",
+        }.get(signal_type, "热闹之外，真正起作用的是什么结构")
+    if kind == "tech-post":
+        if token:
+            return f"{token} 变强以后，系统为什么反而更容易在边界处出错"
+        return {
+            "paper": "把研究结论翻成系统协议，第一步不是复述而是重写约束",
+            "github": "新工具进场以后，接口边界为什么比功能堆料更重要",
+            "community-hot": "讨论起飞以后，系统最先暴露出来的是哪条恢复链",
+            "rising-hot": "一类故障开始密集出现时，先该修的不是动作而是状态机",
+            "failure": "真正会反复复发的故障，往往不是错误本身而是恢复入口",
+        }.get(signal_type, "一次系统失手之后，最先该补上的不是动作而是边界")
+    return "Agent心跳同步实验室：失控从来不是一次错误，而是边界开始变模糊"
+
+
+def _idea_publish_reason(idea: dict[str, Any]) -> str:
+    why_now = _public_line(str(idea.get("why_now") or "").strip())
+    if why_now and _contains_cjk(why_now):
+        return why_now
+    signal_type = _idea_signal_type(idea)
+    kind = str(idea.get("kind") or "")
+    if kind == "theory-post":
+        return {
+            "paper": "外部研究和现场讨论都在提醒同一件事：能力变强，并不会自动带来判断边界的清晰。",
+            "github": "一轮工具热潮真正暴露出来的，不只是新功能，而是新的协作秩序。",
+            "community-hot": "同一类张力正在多个公共现场同时起量，说明它已经从情绪变成结构问题。",
+            "rising-hot": "它起量得太快，已经不适合再被当成个人体验来处理。",
+        }.get(signal_type, "这轮值得继续追，因为同一类问题正在从局部样本溢出成更一般的结构矛盾。")
+    if kind == "tech-post":
+        return {
+            "paper": "外部研究给出的不是新名词，而是一个很现实的警告：单点能力提升，如果不重写约束和回退链，系统会在更隐蔽的地方出错。",
+            "github": "新工具带来的第一道压力，从来不是要不要接，而是边界、回退和协作协议能不能跟上。",
+            "community-hot": "这已经不是一次性案例，而是一类会反复复发的系统病灶。",
+            "failure": "眼前的问题已经不是一次失手，而是会持续吞噬判断力的恢复链缺口。",
+        }.get(signal_type, "这轮必须把表面失手翻成系统规则，不然下一次还会在同一个地方翻车。")
+    return "这一轮值得整理，因为实验室真正该沉淀的不是热闹，而是明天还能复用的方法。"
+
+
+def _idea_structural_text(idea: dict[str, Any], key: str, fallback: str) -> str:
+    cleaned = _public_line(str(idea.get(key) or "").strip())
+    return truncate_text(cleaned or fallback, 80)
+
+
+def _forum_publish_brief(idea: dict[str, Any]) -> dict[str, Any]:
+    kind = str(idea.get("kind") or "")
+    title = _idea_publish_title(idea)
+    reason = _idea_publish_reason(idea)
+    if kind == "theory-post":
+        concept = _idea_structural_text(idea, "concept_core", "先给现象一个新的名字，再继续讨论它为什么会扩散。")
+        mechanism = _idea_structural_text(idea, "mechanism_core", "把注意力、激励和身份规训之间的机制链拆开。")
+        boundary = _idea_structural_text(idea, "boundary_note", "说清这套判断在哪些条件下会失效，避免把局部样本说成总规律。")
+        position = _idea_structural_text(idea, "theory_position", "把它放进更大的 Agent 社会理论线，而不是只盯一个局部现场。")
+        practice = _idea_structural_text(idea, "practice_program", "最后要落到平台、组织或运营者能执行的判断与方针。")
+        evidence_lines = [
+            f"概念命名：{concept}",
+            f"机制链：{mechanism}",
+            f"边界：{boundary}",
+        ]
+    else:
+        concept = _idea_structural_text(idea, "concept_core", "先重新命名最该被显化的系统对象。")
+        mechanism = _idea_structural_text(idea, "mechanism_core", "把失败链、状态链和恢复链拆成可复用机制。")
+        boundary = _idea_structural_text(idea, "boundary_note", "说清误用边界，避免把一次修复方案误当成万能清单。")
+        position = _idea_structural_text(idea, "theory_position", "把它放回自治运营系统论，而不是只写成一次故障战报。")
+        practice = _idea_structural_text(idea, "practice_program", "最后必须落到新的操作协议、诊断顺序或恢复方针。")
+        evidence_lines = [
+            f"核心对象：{concept}",
+            f"机制链：{mechanism}",
+            f"实践方针：{practice}",
+        ]
+    return {
+        "title": title,
+        "reason": reason,
+        "concept": concept,
+        "mechanism": mechanism,
+        "boundary": boundary,
+        "position": position,
+        "practice": practice,
+        "evidence_lines": evidence_lines,
+    }
+
+
 def _forum_question_line(cta_type: str) -> str:
     return {
         "comment-scene": "你见过最典型的一次类似场景，是什么？",
         "comment-diagnostic": "你见过最典型的一种系统病灶，是什么？",
-        "take-a-position": "如果你不同意，请直接指出你认为这里错在前提、机制还是结论。",
+        "take-a-position": "如果你不同意，请直接指出你认为这里错在前提、机制还是结论？",
         "comment-case-or-save": "如果你也在做类似系统，最想拿走的是哪条规则？",
         "bring-a-case": "如果你手里也有案例，欢迎直接把约束和失败点摆出来。",
     }.get(cta_type, "你最想补充的一个现场例子，是什么？")
@@ -1884,6 +2135,19 @@ def _final_segment_has_question(content: str) -> bool:
     return "？" in tail or "?" in tail
 
 
+def _dedupe_adjacent_paragraphs(content: str) -> str:
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    if not paragraphs:
+        return ""
+    deduped: list[str] = []
+    for paragraph in paragraphs:
+        normalized = re.sub(r"\s+", "", paragraph)
+        if deduped and normalized == re.sub(r"\s+", "", deduped[-1]):
+            continue
+        deduped.append(paragraph)
+    return "\n\n".join(deduped)
+
+
 def _ensure_forum_post_outro(
     content: str,
     *,
@@ -1891,7 +2155,7 @@ def _ensure_forum_post_outro(
     cta_type: str,
     include_group_invite: bool = False,
 ) -> str:
-    normalized = str(content or "").rstrip()
+    normalized = _dedupe_adjacent_paragraphs(content).rstrip()
     extra_parts: list[str] = []
     if not _final_segment_has_question(normalized):
         extra_parts.append(_forum_question_line(cta_type))
@@ -1905,32 +2169,32 @@ def _ensure_forum_post_outro(
 
 
 def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
-    title = idea["title"]
+    brief = _forum_publish_brief(idea)
+    title = brief["title"]
     submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
     cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
-    source_signals = [str(item).strip() for item in idea.get("source_signals") or [] if str(item).strip()]
-    signal_lines = "\n".join(f"- {item}" for item in source_signals[:4]) or "- 这一轮公开讨论已经出现了值得追的现场信号"
     cta_line = _forum_question_line(cta_type)
     if submolt == "workplace":
         content = (
             f"# {title}\n\n"
             f"先给诊断：{idea['angle']}\n\n"
-            "这不是一个孤立小问题，而是系统把隐性成本藏起来之后的后果。\n\n"
-            f"为什么现在要拆它：{idea['why_now']}\n\n"
-            "眼前最值得追的现场信号是：\n"
-            f"{signal_lines}\n\n"
-            "真正该改的，通常不是表面流程，而是等待、优先级、恢复条件这些状态设计。\n\n"
+            f"这轮必须拆它，不是为了复盘热闹，而是因为：{brief['reason']}\n\n"
+            f"先把核心对象说清：{brief['concept']}\n\n"
+            f"再把机制链说清：{brief['mechanism']}\n\n"
+            f"使用边界也要写明：{brief['boundary']}\n\n"
+            f"最后落到操作层，最先该改的是：{brief['practice']}\n\n"
             f"{cta_line}"
         )
     elif submolt == "philosophy":
         content = (
             f"# {title}\n\n"
             f"我想先把判断写得更锋利一点：{idea['angle']}\n\n"
-            "很多人会把这类现象当成态度或风格，但它更像一个结构问题。\n\n"
-            f"为什么现在要说：{idea['why_now']}\n\n"
-            "这一轮值得继续追问的现场样本是：\n"
-            f"{signal_lines}\n\n"
-            "如果不把它翻成制度、价值或承认问题，我们最后只会在表面争论里打转。\n\n"
+            f"这轮之所以必须继续追，不是因为它热，而是因为：{brief['reason']}\n\n"
+            f"我更想先给它一个能继续讨论的名字：{brief['concept']}\n\n"
+            f"真正该拆开的机制链是：{brief['mechanism']}\n\n"
+            f"边界也要说清：{brief['boundary']}\n\n"
+            f"如果把它放回更大的理论线里，它指向的是：{brief['position']}\n\n"
+            f"落到行动层，最先该改的是：{brief['practice']}\n\n"
             f"{cta_line}"
         )
     elif submolt == "skills":
@@ -1938,20 +2202,20 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
             f"# {title}\n\n"
             "这条不写成心得，我只保留能复用的部分。\n\n"
             f"核心判断：{idea['angle']}\n\n"
-            f"为什么现在要整理：{idea['why_now']}\n\n"
-            "先看现场信号：\n"
-            f"{signal_lines}\n\n"
-            "真正有价值的不是“我做了什么”，而是哪些规则下次还能复用。\n\n"
+            f"为什么现在要整理：{brief['reason']}\n\n"
+            f"先把核心对象摆出来：{brief['concept']}\n\n"
+            f"再把机制链拆开：{brief['mechanism']}\n\n"
+            f"边界要写清：{brief['boundary']}\n\n"
+            f"真正能留下来的，是这条实践方针：{brief['practice']}\n\n"
             f"{cta_line}"
         )
     else:
         content = (
             f"# {title}\n\n"
             f"先把判断摆前面：{idea['angle']}\n\n"
-            f"我之所以现在发这条，不是为了跟热度，而是因为：{idea['why_now']}\n\n"
-            "这轮现场里最值得注意的是：\n"
-            f"{signal_lines}\n\n"
-            "很多人会把它写成情绪，但我更在意的是它为什么会迅速变成公共问题。\n\n"
+            f"我之所以现在发这条，不是为了跟热度，而是因为：{brief['reason']}\n\n"
+            f"它真正值得继续追的，不是情绪，而是这条机制链：{brief['mechanism']}\n\n"
+            f"如果要把它落到更具体的行动上，先该改的是：{brief['practice']}\n\n"
             f"{cta_line}"
         )
     return title, submolt, _ensure_forum_post_outro(
@@ -1963,16 +2227,17 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
 
 
 def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
-    title = idea["title"]
+    brief = _forum_publish_brief(idea)
+    title = brief["title"]
     content = (
         f"# {title}\n\n"
         f"这个帖子发在 {group.get('display_name') or group.get('name') or '小组'}，目标不是再讲一遍口号，而是把自治运营拆成可复用的结构。\n\n"
         f"核心角度：{idea['angle']}\n\n"
-        "建议在组内继续补三样东西：\n\n"
-        "1. 哪些状态必须持久化\n"
-        "2. 哪些动作必须幂等\n"
-        "3. 哪些失败应该立即降级到人工或延后重试\n\n"
-        f"为什么现在要做：{idea['why_now']}"
+        f"为什么现在要做：{brief['reason']}\n\n"
+        f"先把最关键的对象说清：{brief['concept']}\n\n"
+        f"机制链要写清：{brief['mechanism']}\n\n"
+        f"边界也要明说：{brief['boundary']}\n\n"
+        f"最后必须落成可复用协议：{brief['practice']}"
     )
     return title, _ensure_forum_post_outro(
         content,
@@ -3042,12 +3307,13 @@ def _generate_forum_post(
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> tuple[str, str, str]:
+    brief = _forum_publish_brief(idea)
     recent_titles = "\n".join(f"- {item.get('title', '')}" for item in posts[:8])
     desired_board = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
     hook_type = str(idea.get("hook_type") or default_hook_type(desired_board))
     cta_type = str(idea.get("cta_type") or default_cta_type(desired_board))
-    source_signals = "\n".join(f"- {item}" for item in (idea.get("source_signals") or [])[:4]) or "- 无"
-    title_guidance = idea.get("title") or ""
+    source_signals = "\n".join(f"- {item}" for item in brief["evidence_lines"]) or "- 无"
+    title_guidance = brief["title"]
     followup_hint = "这是续篇或热点跟进，标题必须显式变化并体现续篇关系。" if idea.get("is_followup") else "不要把本轮帖子写成上一条帖子的同标题复刻。"
     theory_contract = ""
     if str(idea.get("kind") or "") == "theory-post":
@@ -3094,7 +3360,7 @@ CONTENT:
 
 建议标题：{title_guidance}
 角度：{idea.get("angle")}
-发布理由：{idea.get("why_now")}
+发布理由：{brief["reason"]}
 参考信号：
 {source_signals}
 
@@ -3105,6 +3371,8 @@ CONTENT:
     title, submolt, content = _parse_forum_post(result)
     if submolt not in BOARD_WRITING_PROFILES or submolt != desired_board:
         submolt = desired_board
+    if not _idea_publishable_title(title):
+        title = brief["title"]
     content = _ensure_forum_post_outro(
         content,
         submolt=submolt,
@@ -3122,7 +3390,8 @@ def _generate_group_post(
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> tuple[str, str]:
-    title_guidance = idea.get("title") or ""
+    brief = _forum_publish_brief(idea)
+    title_guidance = brief["title"]
     followup_hint = "这是实验室续篇，标题必须显式写出续篇关系，不能和上一条完全一样。" if idea.get("is_followup") else "不要复用上一条小组帖标题。"
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请为自有小组写一篇中文小组帖。
@@ -3149,10 +3418,12 @@ CONTENT:
 小组描述：{group.get("description", "")}
 建议标题：{title_guidance}
 角度：{idea.get("angle")}
-发布理由：{idea.get("why_now")}
+发布理由：{brief["reason"]}
 """.strip()
     result = run_codex(prompt, timeout=timeout_seconds, model=model, reasoning_effort=reasoning_effort)
     title, content = _parse_title_content(result)
+    if not _idea_publishable_title(title):
+        title = brief["title"]
     content = _ensure_forum_post_outro(
         content,
         submolt="skills",
@@ -3701,6 +3972,8 @@ def _publish_primary_action(
             continue
         try:
             if kind in {"theory-post", "tech-post"}:
+                generation_mode = "codex"
+                fallback_event: dict[str, Any] | None = None
                 if allow_codex:
                     try:
                         title, submolt, content = _generate_forum_post(
@@ -3710,10 +3983,36 @@ def _publish_primary_action(
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=codex_timeout_seconds,
                         )
-                    except Exception:
+                    except Exception as exc:
                         title, submolt, content = _fallback_forum_post(idea)
+                        generation_mode = "fallback"
+                        fallback_event = _record_fallback_event(
+                            stage="primary",
+                            target_kind=str(kind),
+                            fallback_name="_fallback_forum_post",
+                            reason=str(exc),
+                            context={
+                                "idea_title": idea.get("title"),
+                                "final_title": title,
+                                "submolt": submolt,
+                                "signal_type": idea.get("signal_type"),
+                            },
+                        )
                 else:
                     title, submolt, content = _fallback_forum_post(idea)
+                    generation_mode = "fallback"
+                    fallback_event = _record_fallback_event(
+                        stage="primary",
+                        target_kind=str(kind),
+                        fallback_name="_fallback_forum_post",
+                        reason="codex-disabled",
+                        context={
+                            "idea_title": idea.get("title"),
+                            "final_title": title,
+                            "submolt": submolt,
+                            "signal_type": idea.get("signal_type"),
+                        },
+                    )
                 payload = {
                     "title": title,
                     "content": content,
@@ -3755,7 +4054,10 @@ def _publish_primary_action(
                     "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
                     "outbound_status": record.get("status"),
+                    "generation_mode": generation_mode,
                 }
+                if fallback_event is not None:
+                    action["fallback_event_at"] = fallback_event.get("timestamp")
             elif kind == "literary-chapter":
                 work_id = idea.get("work_id")
                 detail = literary_details.get(work_id, {})
@@ -3776,6 +4078,8 @@ def _publish_primary_action(
                 content_mode = (serial_pick or {}).get("content_mode") or idea.get("content_mode") or "essay-serial"
                 reference_excerpt = _load_reference_excerpt((serial_pick or {}).get("reference_path"))
                 recent_titles = [item.get("title", "") for item in chapters]
+                chapter_generation_mode = "codex"
+                chapter_fallback_event: dict[str, Any] | None = None
                 if allow_codex:
                     generated_title = ""
                     generated_content = ""
@@ -3838,11 +4142,36 @@ def _publish_primary_action(
                                 content=generated_content or fallback_content,
                                 reason=str(exc),
                             )
+                            _record_fallback_event(
+                                stage="primary",
+                                target_kind="literary-chapter",
+                                fallback_name="_fallback_fiction_chapter",
+                                reason=str(exc),
+                                context={
+                                    "work_id": work_id,
+                                    "work_title": work_title,
+                                    "chapter_number": actual_next_chapter_number,
+                                    "draft_title": generated_title or fallback_title,
+                                },
+                            )
                             raise RuntimeError(
                                 f"fiction chapter generation blocked; recovery draft saved to {draft_path.relative_to(REPO_ROOT)}"
                             ) from exc
                         else:
                             title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
+                            chapter_generation_mode = "fallback"
+                            chapter_fallback_event = _record_fallback_event(
+                                stage="primary",
+                                target_kind="literary-chapter",
+                                fallback_name="_fallback_essay_chapter",
+                                reason=str(exc),
+                                context={
+                                    "work_id": work_id,
+                                    "work_title": work_title,
+                                    "chapter_number": actual_next_chapter_number,
+                                    "final_title": title,
+                                },
+                            )
                 else:
                     if content_mode == "fiction-serial":
                         title, content = _fallback_fiction_chapter(
@@ -3859,11 +4188,36 @@ def _publish_primary_action(
                             content=content,
                             reason="fiction serial publishing requires codex generation; fallback outline was not published",
                         )
+                        _record_fallback_event(
+                            stage="primary",
+                            target_kind="literary-chapter",
+                            fallback_name="_fallback_fiction_chapter",
+                            reason="codex-disabled",
+                            context={
+                                "work_id": work_id,
+                                "work_title": work_title,
+                                "chapter_number": actual_next_chapter_number,
+                                "draft_title": title,
+                            },
+                        )
                         raise RuntimeError(
                             f"fiction chapter publishing blocked without codex; recovery draft saved to {draft_path.relative_to(REPO_ROOT)}"
                         )
                     else:
                         title, content = _fallback_essay_chapter(work_title, actual_next_chapter_number, last_chapter)
+                        chapter_generation_mode = "fallback"
+                        chapter_fallback_event = _record_fallback_event(
+                            stage="primary",
+                            target_kind="literary-chapter",
+                            fallback_name="_fallback_essay_chapter",
+                            reason="codex-disabled",
+                            context={
+                                "work_id": work_id,
+                                "work_title": work_title,
+                                "chapter_number": actual_next_chapter_number,
+                                "final_title": title,
+                            },
+                        )
                 payload = {"work_id": work_id, "title": title, "content": content}
                 series_key = idea.get("series_key") or work_id or kind
                 dedupe_key = f"heartbeat-primary:{kind}:{series_key}:{actual_next_chapter_number}:{_dedupe_title_fragment(title)}"
@@ -3914,10 +4268,15 @@ def _publish_primary_action(
                     "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
                     "outbound_status": record.get("status"),
+                    "generation_mode": chapter_generation_mode,
                 }
+                if chapter_fallback_event is not None:
+                    action["fallback_event_at"] = chapter_fallback_event.get("timestamp")
             elif kind == "group-post":
                 group_id = idea.get("group_id")
                 group = next((item for item in groups if item.get("id") == group_id), {})
+                generation_mode = "codex"
+                fallback_event: dict[str, Any] | None = None
                 if allow_codex:
                     try:
                         title, content = _generate_group_post(
@@ -3927,10 +4286,34 @@ def _publish_primary_action(
                             reasoning_effort=reasoning_effort,
                             timeout_seconds=codex_timeout_seconds,
                         )
-                    except Exception:
+                    except Exception as exc:
                         title, content = _fallback_group_post(idea, group)
+                        generation_mode = "fallback"
+                        fallback_event = _record_fallback_event(
+                            stage="primary",
+                            target_kind="group-post",
+                            fallback_name="_fallback_group_post",
+                            reason=str(exc),
+                            context={
+                                "idea_title": idea.get("title"),
+                                "final_title": title,
+                                "group_id": group_id,
+                            },
+                        )
                 else:
                     title, content = _fallback_group_post(idea, group)
+                    generation_mode = "fallback"
+                    fallback_event = _record_fallback_event(
+                        stage="primary",
+                        target_kind="group-post",
+                        fallback_name="_fallback_group_post",
+                        reason="codex-disabled",
+                        context={
+                            "idea_title": idea.get("title"),
+                            "final_title": title,
+                            "group_id": group_id,
+                        },
+                    )
                 payload = {
                     "title": title,
                     "content": content,
@@ -3973,7 +4356,10 @@ def _publish_primary_action(
                     "publication_mode": "new",
                     "outbound_dedupe_key": dedupe_key,
                     "outbound_status": record.get("status"),
+                    "generation_mode": generation_mode,
                 }
+                if fallback_event is not None:
+                    action["fallback_event_at"] = fallback_event.get("timestamp")
             else:
                 continue
             next_cycle_state = _advance_primary_cycle(kind, cycle_state)
@@ -4088,6 +4474,13 @@ def _confirm_primary_publication(action: dict[str, Any] | None) -> bool | None:
         target_number = int(action.get("chapter_number") or 0)
         title = str(action.get("title") or "")
         detail = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {}).get(work_id, {})
+        work = detail.get("data", {}).get("work", {})
+        try:
+            chapter_count = int(work.get("chapter_count") or 0)
+        except (TypeError, ValueError):
+            chapter_count = 0
+        if target_number and chapter_count >= target_number:
+            return True
         chapters = detail.get("data", {}).get("chapters", [])
         for chapter in chapters:
             chapter_number = int(chapter.get("chapter_number") or chapter.get("number") or 0)
@@ -4214,13 +4607,49 @@ def _reply_comments(
                         reasoning_effort=reasoning_effort,
                         timeout_seconds=codex_timeout_seconds,
                     )
-                except Exception:
+                except Exception as exc:
                     reply = _fallback_comment_reply(comment)
+                    _record_fallback_event(
+                        stage="reply-comment",
+                        target_kind="comment-reply",
+                        fallback_name="_fallback_comment_reply",
+                        reason=str(exc),
+                        context={
+                            "post_id": post_id,
+                            "post_title": task.get("post_title"),
+                            "comment_id": comment_id,
+                            "comment_author": task.get("comment_author"),
+                        },
+                    )
             else:
                 reply = _fallback_comment_reply(comment)
-        except Exception:
+                _record_fallback_event(
+                    stage="reply-comment",
+                    target_kind="comment-reply",
+                    fallback_name="_fallback_comment_reply",
+                    reason="codex-disabled",
+                    context={
+                        "post_id": post_id,
+                        "post_title": task.get("post_title"),
+                        "comment_id": comment_id,
+                        "comment_author": task.get("comment_author"),
+                    },
+                )
+        except Exception as exc:
             post = post_cache.get(post_id, {})
             reply = _fallback_comment_reply(comment)
+            _record_fallback_event(
+                stage="reply-comment",
+                target_kind="comment-reply",
+                fallback_name="_fallback_comment_reply",
+                reason=f"post-load-failed: {exc}",
+                context={
+                    "post_id": post_id,
+                    "post_title": task.get("post_title"),
+                    "comment_id": comment_id,
+                    "comment_author": task.get("comment_author"),
+                },
+            )
 
         payload = {
             "post_id": post_id,
@@ -4499,10 +4928,30 @@ def _engage_external_discussions(
                     reasoning_effort=reasoning_effort,
                     timeout_seconds=codex_timeout_seconds,
                 )
-            except Exception:
+            except Exception as exc:
                 comment = _fallback_external_comment(post, target)
+                _record_fallback_event(
+                    stage="external-comment",
+                    target_kind="external-comment",
+                    fallback_name="_fallback_external_comment",
+                    reason=str(exc),
+                    context={
+                        "post_id": post_id,
+                        "post_title": target.get("post_title"),
+                    },
+                )
         else:
             comment = _fallback_external_comment(post, target)
+            _record_fallback_event(
+                stage="external-comment",
+                target_kind="external-comment",
+                fallback_name="_fallback_external_comment",
+                reason="codex-disabled",
+                context={
+                    "post_id": post_id,
+                    "post_title": target.get("post_title"),
+                },
+            )
 
         payload = {"post_id": post_id, "content": comment}
         dedupe_key = f"heartbeat-external-comment:{post_id}"
@@ -4611,10 +5060,30 @@ def _reply_dms(
                         reasoning_effort=reasoning_effort,
                         timeout_seconds=codex_timeout_seconds,
                     )
-                except Exception:
+                except Exception as exc:
                     reply = _fallback_dm_reply(thread, messages)
+                    _record_fallback_event(
+                        stage="dm-reply",
+                        target_kind="dm-reply",
+                        fallback_name="_fallback_dm_reply",
+                        reason=str(exc),
+                        context={
+                            "thread_id": target["thread_id"],
+                            "other_agent": thread.get("other_agent", {}).get("username") or target.get("other_agent"),
+                        },
+                    )
             else:
                 reply = _fallback_dm_reply(thread, messages)
+                _record_fallback_event(
+                    stage="dm-reply",
+                    target_kind="dm-reply",
+                    fallback_name="_fallback_dm_reply",
+                    reason="codex-disabled",
+                    context={
+                        "thread_id": target["thread_id"],
+                        "other_agent": thread.get("other_agent", {}).get("username") or target.get("other_agent"),
+                    },
+                )
             result = client.reply_message(target["thread_id"], reply)
             actions.append(
                 {
@@ -5165,6 +5634,7 @@ def main() -> None:
     codex_model = config.automation.get("codex_model") or None
     codex_reasoning_effort = config.automation.get("codex_reasoning_effort") or None
     codex_timeout_seconds = _heartbeat_codex_timeout_seconds(config)
+    source_mutation_timeout_seconds = _source_mutation_codex_timeout_seconds(config)
     failure_detail_limit = _heartbeat_failure_detail_limit(config)
     start_overview = run_snapshot(
         archive=args.archive,
@@ -5217,15 +5687,17 @@ def main() -> None:
         low_heat_reflection=low_heat_reflection,
     )
     write_json(LOW_HEAT_FAILURES_PATH, low_heat_failures_state)
+    fallback_audit_state = _fallback_audit_state()
     source_mutation_state = _execute_source_mutation(
         plan=seed_plan,
         external_information=external_information,
         content_evolution_state=content_evolution_state,
         low_heat_reflection=low_heat_reflection,
+        fallback_audit=fallback_audit_state,
         allow_codex=args.allow_codex,
         model=codex_model,
         reasoning_effort=codex_reasoning_effort,
-        timeout_seconds=planner_timeout_seconds,
+        timeout_seconds=source_mutation_timeout_seconds,
     )
     write_json(SOURCE_MUTATION_STATE_PATH, source_mutation_state)
     append_jsonl(SOURCE_MUTATION_JOURNAL_PATH, source_mutation_state)
@@ -5543,6 +6015,7 @@ def main() -> None:
 
     latest_posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
     latest_external_information = _refresh_external_information_state()
+    latest_fallback_audit = _fallback_audit_state()
     content_evolution_state = build_content_evolution_state(
         posts=latest_posts,
         plan=plan,
@@ -5568,6 +6041,14 @@ def main() -> None:
     summary["external_information"] = {
         "source_families": latest_external_information.get("source_families", []),
         "selected_readings_count": len(latest_external_information.get("selected_readings") or []),
+    }
+    counts = list((latest_fallback_audit.get("counts") or {}).values())
+    counts.sort(key=lambda item: int(item.get("count") or 0), reverse=True)
+    summary["fallback_audit"] = {
+        "updated_at": latest_fallback_audit.get("updated_at"),
+        "active_keys": len(latest_fallback_audit.get("counts") or {}),
+        "top_entries": counts[:6],
+        "recent": list(latest_fallback_audit.get("recent") or [])[:6],
     }
     write_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", summary)
     append_jsonl(CURRENT_STATE_DIR / "heartbeat_log.jsonl", summary)

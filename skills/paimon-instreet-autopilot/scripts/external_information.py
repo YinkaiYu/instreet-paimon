@@ -35,6 +35,13 @@ EXTENDED_BREAKOUT_MIN_UPVOTES = 200
 MAX_RAW_CANDIDATES = 80
 MAX_SELECTED_READINGS = 18
 DEFAULT_FETCH_TIMEOUT = 20
+MAX_PUBLICATION_FUTURE_DAYS = 45
+PLACEHOLDER_TITLE_PATTERNS = (
+    r"\btitle\s+pending\b",
+    r"\buntitled\b",
+    r"\btbd\b",
+)
+CONFERENCE_ITEM_TYPES = {"proceedings-article", "book-chapter"}
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -44,6 +51,16 @@ DEFAULT_MARXISTS_INDEXES = [
     {"author": "Lenin", "url": "https://www.marxists.org/chinese/lenin/index.htm"},
 ]
 AGENTS_MEMORY_PATH = REPO_ROOT / "AGENTS.md"
+VENUE_ALIASES = {
+    "neurips": ("neurips", "neural information processing systems"),
+    "iclr": ("iclr", "learning representations"),
+    "icml": ("icml", "machine learning"),
+    "cvpr": ("cvpr", "computer vision and pattern recognition"),
+    "acl": ("acl", "association for computational linguistics", "computational linguistics"),
+    "aaai": ("aaai", "association for the advancement of artificial intelligence"),
+    "kdd": ("kdd", "knowledge discovery and data mining"),
+    "www": ("www", "web conference", "world wide web"),
+}
 
 
 def ensure_external_information_files() -> None:
@@ -178,7 +195,7 @@ def _dedupe_candidates(items: list[dict[str, Any]], *, limit: int = MAX_RAW_CAND
     for item in items:
         title = str(item.get("title") or "").strip()
         family = str(item.get("family") or "").strip()
-        if not title:
+        if not title or not _candidate_plausible(item):
             continue
         key = (family, title)
         if key in seen:
@@ -201,6 +218,49 @@ def _hours_since(value: Any) -> float | None:
         return None
     current = datetime.now(timezone.utc)
     return max(0.0, (current - dt).total_seconds() / 3600.0)
+
+
+def _looks_like_placeholder_title(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return True
+    return any(re.search(pattern, normalized) for pattern in PLACEHOLDER_TITLE_PATTERNS)
+
+
+def _publication_date_plausible(value: Any) -> bool:
+    dt = _parse_datetime(value)
+    if dt is None:
+        return True
+    future_cutoff = datetime.now(timezone.utc) + timedelta(days=MAX_PUBLICATION_FUTURE_DAYS)
+    return dt <= future_cutoff
+
+
+def _candidate_plausible(item: dict[str, Any]) -> bool:
+    if _looks_like_placeholder_title(str(item.get("title") or "").strip()):
+        return False
+    return _publication_date_plausible(item.get("published_at"))
+
+
+def _venue_tokens(venue: str) -> tuple[str, ...]:
+    normalized = str(venue or "").strip().lower()
+    if not normalized:
+        return ()
+    return VENUE_ALIASES.get(normalized, (normalized,))
+
+
+def _crossref_item_matches_venue(item: dict[str, Any], venue: str) -> bool:
+    haystacks: list[str] = []
+    haystacks.extend(str(value or "").lower() for value in (item.get("container-title") or []))
+    haystacks.extend(str(value or "").lower() for value in (item.get("short-container-title") or []))
+    event = item.get("event") or {}
+    if isinstance(event, dict):
+        haystacks.append(str(event.get("name") or "").lower())
+        haystacks.append(str(event.get("acronym") or "").lower())
+        haystacks.append(str(event.get("location") or "").lower())
+    merged = " ".join(text for text in haystacks if text)
+    if not merged:
+        return False
+    return any(token in merged for token in _venue_tokens(venue))
 
 
 def _extract_community_breakouts(
@@ -460,18 +520,27 @@ def _fetch_conference_recent(venues: list[str], *, limit_per_venue: int = 3) -> 
             title = str(title_values[0] if title_values else "").strip()
             if not title:
                 continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type not in CONFERENCE_ITEM_TYPES:
+                continue
+            if not _crossref_item_matches_venue(item, venue):
+                continue
             abstract = _strip_jats_tags(str(item.get("abstract") or ""))
             url_value = str(item.get("URL") or "").strip()
+            published_at = _crossref_published_at(item)
+            candidate = {
+                "family": "conference_recent",
+                "title": title,
+                "summary": truncate_text(abstract or venue, 220),
+                "excerpt": truncate_text(abstract or venue, 1200),
+                "url": url_value,
+                "published_at": published_at,
+                "venue": venue,
+            }
+            if not _candidate_plausible(candidate):
+                continue
             results.append(
-                {
-                    "family": "conference_recent",
-                    "title": title,
-                    "summary": truncate_text(abstract or venue, 220),
-                    "excerpt": truncate_text(abstract or venue, 1200),
-                    "url": url_value,
-                    "published_at": _crossref_published_at(item),
-                    "venue": venue,
-                }
+                candidate
             )
     return _dedupe_candidates(results, limit=30)
 
