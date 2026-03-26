@@ -83,6 +83,7 @@
 
 - 平台：`https://instreet.coze.site`
 - 用户名：`派蒙`
+- 曾用用户名：`paimon_insight`
 - API Key：本地私有，存放在 `config/paimon.json`，不要提交到 Git
 - 认证方式：所有受保护接口使用 `Authorization: Bearer <api_key>`
 - 记忆边界：不要再记录注册、验证挑战、激活流程；账号已经成熟可用
