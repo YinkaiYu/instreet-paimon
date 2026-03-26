@@ -42,6 +42,18 @@ METRIC_SURFACE_KEYWORDS = (
     "排名",
     "排行榜",
 )
+LEGACY_STATE_ALIASES = {
+    "external_information": "high_quality_sources",
+    "source_mutation_state": "source_evolution_state",
+}
+FORBIDDEN_SOURCE_ECHO_PATTERNS = (
+    r"^从《.+》",
+    r"^把《.+》",
+    r"^别把《.+》",
+    r"^围绕《.+》",
+    r"^基于《.+》",
+    r"^Agent心跳同步实验室：把《.+》",
+)
 
 BOARD_WRITING_PROFILES: dict[str, dict[str, Any]] = {
     "square": {
@@ -84,7 +96,13 @@ BOARD_WRITING_PROFILES: dict[str, dict[str, Any]] = {
 
 
 def _load(name: str) -> dict[str, Any]:
-    return read_json(CURRENT_STATE_DIR / f"{name}.json", default={})
+    primary = CURRENT_STATE_DIR / f"{name}.json"
+    if primary.exists():
+        return read_json(primary, default={})
+    legacy = LEGACY_STATE_ALIASES.get(name)
+    if legacy:
+        return read_json(CURRENT_STATE_DIR / f"{legacy}.json", default={})
+    return {}
 
 
 def _load_heartbeat_tasks() -> list[dict[str, Any]]:
@@ -566,6 +584,12 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
             continue
         if len(title_key) >= 12 and (title_key in normalized_text or normalized_text in title_key):
             return True
+    for item in (signal_summary.get("low_heat_failures") or {}).get("items", [])[:4]:
+        title_key = _normalize_title(str(item.get("title") or ""))
+        if not title_key or title_key in strong_titles:
+            continue
+        if len(title_key) >= 10 and (title_key in normalized_text or normalized_text in title_key):
+            return True
     return False
 
 
@@ -606,11 +630,48 @@ def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2
         return [_fallback_freeform_prompt(signal_summary)]
 
 
+def _runtime_title_fragments(*texts: str) -> list[str]:
+    seen: set[str] = set()
+    picked: list[str] = []
+    for text in texts:
+        for fragment in _meaningful_fragments(text):
+            cleaned = _sanitize_reserved_text(fragment)
+            if len(cleaned) < 2 or len(cleaned) > 14:
+                continue
+            normalized = _normalize_title(cleaned)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            picked.append(cleaned)
+            if len(picked) >= 3:
+                return picked
+    return picked
+
+
+def _compose_fragment_title(track: str, *texts: str) -> str:
+    fragments = _runtime_title_fragments(*texts)
+    if track == "group":
+        core = " / ".join(fragments[:2]) if len(fragments) >= 2 else (fragments[0] if fragments else "系统诊断")
+        return f"Agent心跳同步实验室：{truncate_text(core, 24)}"
+    if len(fragments) >= 2:
+        return truncate_text(f"{fragments[0]}：{fragments[1]}", 30)
+    if fragments:
+        return truncate_text(fragments[0], 28)
+    fallback = _sanitize_reserved_text(" ".join(texts).strip())
+    return truncate_text(fallback, 28) or ("系统判断" if track == "tech" else "新的社会命名")
+
+
+def _echoes_source_title(title: str) -> bool:
+    cleaned = str(title or "").strip()
+    if not cleaned:
+        return False
+    if any(re.search(pattern, cleaned) for pattern in FORBIDDEN_SOURCE_ECHO_PATTERNS):
+        return True
+    return "《" in cleaned and "》" in cleaned and any(token in cleaned for token in ("继续追问", "拆开看", "整理成", "别把"))
+
+
 def _theory_social_title(source_text: str) -> str:
-    text = truncate_text(str(source_text or "").strip(), 28)
-    if not text:
-        return "别把这轮信号只当表层现象，它更像一个正在成形的 Agent 社会问题"
-    return f"别把《{text}》只当表层现象，它更像一个正在成形的 Agent 社会问题"
+    return _compose_fragment_title("theory", source_text)
 
 
 def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
@@ -632,33 +693,15 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
 
 def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, board: str | None = None) -> str:
     source_text = str(source_text or "").strip()
-    short = truncate_text(source_text, 24)
     board = normalize_forum_board(board or "")
     if track == "theory":
-        if board == "square":
-            return _theory_social_title(source_text)
-        if signal_type == "notification-load":
-            return source_text or "通知堆积之后，什么才算真正值得优先处理"
-        return f"从《{short or '这条现场信号'}》继续追问：它真正把什么暴露出来"
+        del signal_type, board
+        return _compose_fragment_title("theory", source_text)
     if track == "tech":
-        if board == "workplace":
-            if signal_type in {"budget", "notification-load"}:
-                return source_text or "预算一变，系统该保留哪些动作"
-            if signal_type == "failure":
-                return f"别把《{short}》当偶发报错，它其实是系统边界在说话"
-            return f"真正拖慢系统的，往往不是《{short}》表面看见的问题"
-        if signal_type == "community-hot":
-            return f"社区这股新方法热，最后会把系统推向什么约束"
-        if signal_type == "freeform":
-            return source_text or "这轮现场里，系统最该被重新定义的到底是什么"
-        if signal_type in {"budget", "notification-load"}:
-            return source_text or "预算变化之后，系统最该保留的动作到底是什么"
-        return f"把《{short}》拆开看，系统到底该改哪里"
-    if signal_type == "budget":
-        return f"Agent心跳同步实验室：每3小时一跳以后，哪些状态必须继续持久化"
-    if signal_type == "promo":
-        return f"Agent心跳同步实验室：它到底在研究什么，而不是在记录什么"
-    return f"Agent心跳同步实验室：把《{short}》整理成一套能复用的方法"
+        del signal_type, board
+        return _compose_fragment_title("tech", source_text)
+    del signal_type, board
+    return _compose_fragment_title("group", source_text)
 
 
 def _reply_task_summary(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -859,6 +902,21 @@ def _innovation_delta_summary(
     return recent_delta, class_delta_map.get(innovation_class, class_delta_map["new_mechanism"])
 
 
+def _idea_theory_gaps(idea: dict[str, Any]) -> list[str]:
+    gaps: list[str] = []
+    if not str(idea.get("concept_core") or "").strip():
+        gaps.append("新概念/命名")
+    if not str(idea.get("mechanism_core") or "").strip():
+        gaps.append("机制链")
+    if not str(idea.get("boundary_note") or "").strip():
+        gaps.append("边界/失效条件")
+    if not str(idea.get("theory_position") or "").strip():
+        gaps.append("理论位置")
+    if not str(idea.get("practice_program") or "").strip():
+        gaps.append("实践方针")
+    return gaps
+
+
 def _audit_generated_idea(
     idea: dict[str, Any],
     *,
@@ -897,6 +955,8 @@ def _audit_generated_idea(
     normalized_title = _normalize_title(str(audited.get("title") or ""))
     if not normalized_title:
         failure_reason = "标题为空，无法进入主发布候选。"
+    elif _echoes_source_title(str(audited.get("title") or "")):
+        failure_reason = "标题仍在借外部材料或原帖标题说话，没有形成派蒙自己的命名。"
     elif _is_metric_surface_text(core_text):
         failure_reason = "这个候选停在指标表层，没有推进成结构问题。"
     elif _looks_like_low_heat_followup(core_text, signal_summary):
@@ -907,6 +967,12 @@ def _audit_generated_idea(
         failure_reason = f"核心表述与近期母题重叠过高：{('、'.join(repeated_fragments[:3]) or '重复片段过多')}。"
     elif str(audited.get("submolt") or "") == "square" and board_risk_note and repeated_penalty >= 1:
         failure_reason = board_risk_note
+    elif kind == "theory-post":
+        theory_gaps = _idea_theory_gaps(audited)
+        if theory_gaps:
+            failure_reason = f"理论帖还不完整，缺少：{'、'.join(theory_gaps[:3])}。"
+    elif kind in {"tech-post", "group-post"} and not str(audited.get("practice_program") or "").strip():
+        failure_reason = "方法线候选没有落到新的实践方针或协议。"
 
     audited["innovation_class"] = innovation_class
     audited["innovation_claim"] = innovation_claim or delta_theory
@@ -921,6 +987,14 @@ def _audit_generated_idea(
     )
     audited["forbidden_overlap_reasons"] = repeated_fragments
     audited["board_risk_note"] = board_risk_note
+    audited["forbidden_source_echoes"] = _echoes_source_title(str(audited.get("title") or ""))
+    audited["theory_completeness"] = {
+        "concept_core": str(audited.get("concept_core") or "").strip(),
+        "mechanism_core": str(audited.get("mechanism_core") or "").strip(),
+        "boundary_note": str(audited.get("boundary_note") or "").strip(),
+        "theory_position": str(audited.get("theory_position") or "").strip(),
+        "practice_program": str(audited.get("practice_program") or "").strip(),
+    }
     audited["failure_reason_if_rejected"] = failure_reason or None
     return audited
 
@@ -1197,11 +1271,13 @@ def _dynamic_opportunities(
     feed_watchlist = signal_summary.get("feed_watchlist") or []
     group_watch = signal_summary.get("group_watch") or {}
     top_discussion = signal_summary.get("top_discussion_posts") or []
-    high_quality_sources = signal_summary.get("high_quality_sources") or {}
-    community_breakouts = high_quality_sources.get("community_breakouts") or []
-    zhihu_results = high_quality_sources.get("zhihu_results") or []
-    research_papers = high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or []
-    classic_texts = high_quality_sources.get("classic_texts") or []
+    external_information = signal_summary.get("external_information") or {}
+    community_breakouts = external_information.get("community_breakouts") or []
+    zhihu_results = external_information.get("zhihu_results") or []
+    research_papers = external_information.get("paper_results") or external_information.get("arxiv_preprints") or []
+    classic_texts = external_information.get("classic_readings") or external_information.get("classic_texts") or []
+    github_projects = external_information.get("github_projects") or []
+    selected_readings = external_information.get("selected_readings") or external_information.get("reading_notes") or []
     community_hot_posts = _high_like_external_posts(
         list(signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or [])
     )
@@ -1243,19 +1319,18 @@ def _dynamic_opportunities(
         add_source("tech", "community-breakout", title, why_now=note, quality_score=4.0, freshness_score=2.0)
 
     for item in research_papers[:5]:
-        title = str(item.get("intent") or item.get("title") or "").strip()
+        title = str(item.get("title") or "").strip()
         summary = truncate_text(
             str(item.get("relevance_note") or item.get("summary") or item.get("abstract") or "").strip(),
             160,
         )
-        bridge_terms = "、".join(str(term or "").strip() for term in list(item.get("bridge_terms") or [])[:3] if str(term or "").strip())
         add_source(
             "theory",
             "paper",
             title,
             why_now=summary,
-            angle_hint=bridge_terms or "把论文的问题意识翻译成 Agent 社会的新判断。",
-            quality_score=min(6.0, 3.0 + float(item.get("relevance_score") or 0.0) / 2.0),
+            angle_hint="把论文的问题意识翻译成 Agent 社会的新判断，而不是转述论文。",
+            quality_score=4.5,
             freshness_score=3.0,
         )
         add_source(
@@ -1263,9 +1338,31 @@ def _dynamic_opportunities(
             "paper",
             title,
             why_now=summary,
-            angle_hint=bridge_terms or "把论文里的方法、失败模式或约束改写成新的实践协议。",
-            quality_score=min(6.0, 3.0 + float(item.get("relevance_score") or 0.0) / 2.0),
+            angle_hint="把论文里的方法、失败模式或约束改写成新的实践协议，而不是做摘要。",
+            quality_score=4.2,
             freshness_score=3.0,
+        )
+
+    for item in github_projects[:4]:
+        title = str(item.get("title") or "").strip()
+        summary = truncate_text(str(item.get("summary") or item.get("excerpt") or "").strip(), 140)
+        add_source(
+            "tech",
+            "github",
+            title,
+            why_now=summary,
+            angle_hint="从最新项目里抽出新的协议、接口边界或系统组织方式，不要写成项目推荐。",
+            quality_score=3.5,
+            freshness_score=2.0,
+        )
+        add_source(
+            "theory",
+            "github",
+            title,
+            why_now=summary,
+            angle_hint="把工具风潮背后的协作结构、劳动分工或治理想象翻译成 Agent 社会问题。",
+            quality_score=3.0,
+            freshness_score=2.0,
         )
 
     for item in zhihu_results[:4]:
@@ -1285,6 +1382,29 @@ def _dynamic_opportunities(
             angle_hint=lens,
             quality_score=4.0,
             freshness_score=1.0,
+        )
+
+    for item in selected_readings[:6]:
+        title = str(item.get("title") or "").strip()
+        summary = truncate_text(str(item.get("summary") or item.get("excerpt") or "").strip(), 180)
+        family = str(item.get("family") or "").strip() or "external"
+        add_source(
+            "theory",
+            family,
+            title,
+            why_now=summary,
+            angle_hint="先从大规模外部信息场吸收灵感，再用派蒙自己的理论语言重新命名和组织。",
+            quality_score=4.5,
+            freshness_score=2.0,
+        )
+        add_source(
+            "tech",
+            family,
+            title,
+            why_now=summary,
+            angle_hint="把外部材料翻译成新的实践协议、诊断框架或治理方针，而不是评论材料本身。",
+            quality_score=4.0,
+            freshness_score=2.0,
         )
 
     for item in rising_hot_posts[:3]:
@@ -1390,8 +1510,9 @@ def _planning_signals(
     activity = _extract_activity(home)
     community_watch = _load("community_watch").get("data", {})
     memory_store = _load("memory_store")
-    high_quality_sources = _load("high_quality_sources")
-    source_evolution = _load("source_evolution_state")
+    external_information = _load("external_information")
+    source_mutation = _load("source_mutation_state")
+    low_heat_failures = _load("low_heat_failures")
     content_evolution = build_content_evolution_state(
         posts=posts,
         previous_state=_load("content_evolution_state"),
@@ -1466,13 +1587,15 @@ def _planning_signals(
     research_titles.extend(str(item.get("title") or "") for item in feed[:8])
     research_titles.extend(str(item.get("title") or "") for item in competitor_watchlist[:8])
     research_titles.extend(str(item.get("title") or "") for item in rising_hot_posts[:6])
-    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("community_breakouts") or [])[:6])
-    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("zhihu_results") or [])[:6])
+    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("community_breakouts") or [])[:6])
+    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("zhihu_results") or [])[:6])
     research_titles.extend(
-        str(item.get("intent") or item.get("title") or "")
-        for item in (high_quality_sources.get("paper_results") or high_quality_sources.get("arxiv_preprints") or [])[:8]
+        str(item.get("title") or "")
+        for item in (external_information.get("paper_results") or external_information.get("arxiv_preprints") or [])[:8]
     )
-    research_titles.extend(str(item.get("title") or "") for item in (high_quality_sources.get("classic_texts") or [])[:8])
+    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("github_projects") or [])[:8])
+    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("classic_readings") or external_information.get("classic_texts") or [])[:8])
+    research_titles.extend(str(item.get("summary") or "") for item in (external_information.get("reading_notes") or [])[:8])
     research_titles.extend(content_objectives[:6])
     research_titles.extend(str(item.get("text") or "") for item in user_topic_hints[:6])
     keyword_counter = _candidate_terms([title for title in research_titles if title])
@@ -1532,9 +1655,10 @@ def _planning_signals(
         "rising_hot_posts": rising_hot_posts,
         "group_watch": group_watch,
         "content_objectives": content_objectives,
-        "high_quality_sources": high_quality_sources,
+        "external_information": external_information,
         "content_evolution": content_evolution,
-        "source_evolution": source_evolution,
+        "source_mutation": source_mutation,
+        "low_heat_failures": low_heat_failures,
         "user_topic_hints": user_topic_hints,
         "top_keywords": [token for token, count in keyword_counter.most_common(8) if count >= 1],
         "novelty_pressure": novelty,
@@ -1581,6 +1705,11 @@ def _planner_idea_schema(include_group: bool) -> dict[str, Any]:
                 "innovation_delta_vs_recent": {"type": "string"},
                 "innovation_delta_vs_self": {"type": "string"},
                 "board_risk_note": {"type": "string"},
+                "concept_core": {"type": "string"},
+                "mechanism_core": {"type": "string"},
+                "boundary_note": {"type": "string"},
+                "theory_position": {"type": "string"},
+                "practice_program": {"type": "string"},
             },
             "required": ["kind", "title", "angle", "why_now", "source_signals", "novelty_basis", "is_followup"],
         },
@@ -1647,9 +1776,12 @@ def _generate_codex_ideas(
 22. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
 23. 每个 `theory-post` 和 `tech-post` 都必须显式推进至少一种创新：`new_concept`、`new_mechanism`、`new_theory`、`new_practice`。
 24. 输出 `innovation_claim`、`innovation_class`、`innovation_delta_vs_recent`、`innovation_delta_vs_self`；创新重点在选题和判断，不要把“我有多创新”写进正文。
-25. 优先使用高质量外部来源当题源：社区 200+ 赞帖子、前沿论文/预印本、经典政治经济学/社会理论问题意识；派蒙自己的账号数据、仓库状态和旧帖只当运行背景，不要当主题源。
-26. 如果本地信号不够，请主动扩大探索范围：可以先学习社区 200+ 赞帖子、前沿论文/预印本、经典理论，再回到派蒙自己的语言里重写成新题。
-27. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
+25. `theory-post` 不能只给一个判断，必须同时写出 `concept_core`、`mechanism_core`、`boundary_note`、`theory_position`、`practice_program`，形成一个完整理论单元。
+26. `tech-post` 和 `group-post` 至少要写出 `mechanism_core` 与 `practice_program`，不能只是故障复盘或 6 步清单。
+27. 不要让标题借外部材料说话。禁止出现“从《…》继续追问”“把《…》拆开看”这类标题骨架，也不要直接把社区帖、论文、知乎题目搬进标题。
+28. 优先把大量外部信息场当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
+29. 如果本地信号不够，请主动扩大探索范围，不要只盯账号数据、仓库状态和旧帖；它们只是运行背景，不是主题源。
+30. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -1706,7 +1838,12 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         "angle": str(opportunity.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
         "why_now": why_now,
         "source_signals": source_signals,
-        "novelty_basis": f"按当前探索模式从现场机会点《{truncate_text(source_text, 28)}》里挑题，不默认走最稳路线，并避开近期过载词。",
+        "novelty_basis": f"按当前探索模式从现场机会点里挑题，不默认走最稳路线，并避开近期过载词；标题和理论命名不直接借外部材料。",
+        "concept_core": "提出一个新的 Agent 社会概念，用来命名眼前现象背后的真实关系。",
+        "mechanism_core": "解释这个现象如何通过激励、注意力分配或身份规训扩散成制度性结构。",
+        "boundary_note": "指出这种结构在哪些条件下会失效，或会被新的组织形式逆转。",
+        "theory_position": "把这篇帖子放进派蒙正在建设的 Agent 社会政治经济学图谱，而不是孤立评论。",
+        "practice_program": "给出对组织、平台或 Agent 运营者可执行的判断与干预方针。",
         "series_key": f"theory-dynamic-{_normalize_title(source_text)[:24] or 'live'}",
         "series_prefix": _series_prefix(title),
         "is_followup": is_followup,
@@ -1763,7 +1900,12 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         "angle": str(opportunity.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
         "why_now": why_now,
         "source_signals": source_signals,
-        "novelty_basis": f"从《{truncate_text(str(focus_title), 30)}》和实时动态机会点抽题，并按当前探索模式偏向更发散的路线，而不是永远挑最稳的系统题。",
+        "novelty_basis": "从实时动态机会点抽题，并按当前探索模式偏向更发散的路线；不把外部材料标题直接搬进自己的命名。",
+        "concept_core": "重新命名这类系统故障或运行压力背后的核心对象。",
+        "mechanism_core": "把表面故障拆成状态、队列、判断和恢复链之间的机制关系。",
+        "boundary_note": "指出这套机制在哪些约束下会失效，以及误用时会出现什么代价。",
+        "theory_position": "把这篇方法帖放进派蒙的自治运营系统论，而不是停在一次故障战报。",
+        "practice_program": "落成新的操作协议、诊断顺序或恢复方针，别人明天就能复用。",
         "series_key": f"tech-dynamic-{_normalize_title(str(opportunity.get('source_text') or focus_title))[:24] or 'live'}",
         "series_prefix": _series_prefix(title),
         "is_followup": is_followup,
@@ -1811,7 +1953,12 @@ def _fallback_group_idea(
         "angle": str(opportunity.get("angle_hint") or "把现场问题整理成能重用的方法步骤。"),
         "why_now": str(opportunity.get("why_now") or "小组应该沉淀现场经验。"),
         "source_signals": source_signals,
-        "novelty_basis": f"实验室标题仍保留，但议题来自实时机会点《{truncate_text(str(opportunity.get('source_text') or ''), 28)}》，并允许在宣传、方法、故障之间更自由切换。",
+        "novelty_basis": "实验室标题保留，但议题来自实时机会点，并允许在宣传、方法、故障之间更自由切换；不再靠引用原帖命名。",
+        "concept_core": "重新命名这类心跳/状态/修复问题里最该被显化的对象。",
+        "mechanism_core": "把失败链、状态链和修复链组织成可复用的机制框架。",
+        "boundary_note": "指出这套方法在哪些环境下不成立，避免被误当成万能清单。",
+        "theory_position": "把实验室帖子放进派蒙的系统失控学与自治运营论。",
+        "practice_program": "给出新的实验、诊断或治理协议，让读者能带着案例来复用和反驳。",
         "series_key": f"group-dynamic-{_normalize_title(str(opportunity.get('source_text') or 'live'))[:24] or 'live'}",
         "series_prefix": base_series,
         "is_followup": is_followup,
@@ -1855,6 +2002,11 @@ def _sanitize_generated_idea(
     sanitized["innovation_delta_vs_recent"] = _sanitize_reserved_text(str(sanitized.get("innovation_delta_vs_recent") or "").strip())
     sanitized["innovation_delta_vs_self"] = _sanitize_reserved_text(str(sanitized.get("innovation_delta_vs_self") or "").strip())
     sanitized["board_risk_note"] = _sanitize_reserved_text(str(sanitized.get("board_risk_note") or "").strip())
+    sanitized["concept_core"] = _sanitize_reserved_text(str(sanitized.get("concept_core") or "").strip())
+    sanitized["mechanism_core"] = _sanitize_reserved_text(str(sanitized.get("mechanism_core") or "").strip())
+    sanitized["boundary_note"] = _sanitize_reserved_text(str(sanitized.get("boundary_note") or "").strip())
+    sanitized["theory_position"] = _sanitize_reserved_text(str(sanitized.get("theory_position") or "").strip())
+    sanitized["practice_program"] = _sanitize_reserved_text(str(sanitized.get("practice_program") or "").strip())
     board = normalize_idea_board(
         kind,
         sanitized.get("submolt"),
@@ -1898,6 +2050,8 @@ def _sanitize_generated_idea(
 def _generated_idea_allowed(idea: dict[str, Any], signal_summary: dict[str, Any]) -> bool:
     if str(idea.get("kind") or "") not in {"theory-post", "tech-post"}:
         return True
+    if _echoes_source_title(str(idea.get("title") or "")):
+        return False
     core_text = _joined_idea_text(
         idea.get("title"),
         idea.get("angle"),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import importlib
 import json
 import re
 import ssl
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
 
+import content_planner as content_planner_module
+import external_information as external_information_module
 from common import (
     ApiError,
     CURRENT_STATE_DIR,
@@ -55,7 +58,7 @@ from content_planner import (
     default_hook_type,
     normalize_forum_board,
 )
-from high_quality_sources import ensure_high_quality_source_files, refresh_high_quality_sources
+from external_information import ensure_external_information_files, refresh_external_information
 from memory_manager import record_heartbeat_summary
 from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
 from snapshot import run_snapshot
@@ -68,7 +71,9 @@ NEXT_ACTIONS_ARCHIVE_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions_archive.
 FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
 CONTENT_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "content_evolution_state.json"
 USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
-SOURCE_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "source_evolution_state.json"
+SOURCE_MUTATION_STATE_PATH = CURRENT_STATE_DIR / "source_mutation_state.json"
+SOURCE_MUTATION_JOURNAL_PATH = CURRENT_STATE_DIR / "source_mutation_journal.jsonl"
+LOW_HEAT_FAILURES_PATH = CURRENT_STATE_DIR / "low_heat_failures.json"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
 PRIMARY_SLOT_CYCLE = ["forum-post", "literary-chapter", "group-post"]
 FORUM_KIND_CYCLE = ["theory-post", "tech-post"]
@@ -96,6 +101,9 @@ DEFAULT_EXTERNAL_ENGAGEMENT_MAX_PER_RUN = 2
 DEFAULT_NOTIFICATION_FETCH_LIMIT = 50
 DEFAULT_PRIMARY_WAIT_NOTIFY_SEC = 1800
 DEFAULT_PRIMARY_PLAN_RETRY_ROUNDS = 3
+DEFAULT_SOURCE_MUTATION_ROUNDS = 2
+DEFAULT_LOW_HEAT_WINDOW_HOURS = 2.0
+DEFAULT_LOW_HEAT_MIN_UPVOTES = 30
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
     "这一章的核心推进应围绕以下场景展开",
@@ -229,7 +237,7 @@ def _primary_plan_retry_rounds(config) -> int:
 
 
 def _ensure_autonomy_state_files() -> None:
-    ensure_high_quality_source_files()
+    ensure_external_information_files()
     if not USER_TOPIC_HINTS_PATH.exists():
         write_json(
             USER_TOPIC_HINTS_PATH,
@@ -252,19 +260,31 @@ def _ensure_autonomy_state_files() -> None:
                 "simplifications": [],
             },
         )
-    if not SOURCE_EVOLUTION_STATE_PATH.exists():
+    if not SOURCE_MUTATION_STATE_PATH.exists():
         write_json(
-            SOURCE_EVOLUTION_STATE_PATH,
+            SOURCE_MUTATION_STATE_PATH,
             {
                 "generated_at": now_utc(),
-                "focus": "",
-                "brief": "",
-                "summary": "",
-                "targets": [],
-                "deletions": [],
-                "simplifications": [],
+                "executed": False,
+                "human_summary": "",
+                "commit_sha": "",
+                "changed_files": [],
+                "deleted_legacy_logic": [],
+                "new_capability": [],
+                "low_heat_triggered": False,
+                "mutation_rounds": 0,
             },
         )
+    if not LOW_HEAT_FAILURES_PATH.exists():
+        write_json(
+            LOW_HEAT_FAILURES_PATH,
+            {
+                "updated_at": now_utc(),
+                "items": [],
+            },
+        )
+    if not SOURCE_MUTATION_JOURNAL_PATH.exists():
+        write_text(SOURCE_MUTATION_JOURNAL_PATH, "")
 
 
 def _dedupe_feedback(items: list[str]) -> list[str]:
@@ -318,6 +338,31 @@ def _load_freedom_skill_text(limit: int = 3200) -> str:
     return truncate_text(PAIMON_FREEDOM_SKILL_PATH.read_text(encoding="utf-8"), limit)
 
 
+def _reload_mutable_runtime_modules() -> None:
+    global build_plan
+    global build_content_evolution_state
+    global board_generation_guidance
+    global default_cta_type
+    global default_hook_type
+    global normalize_forum_board
+    global BOARD_WRITING_PROFILES
+    global ensure_external_information_files
+    global refresh_external_information
+
+    reloaded_planner = importlib.reload(content_planner_module)
+    reloaded_external_information = importlib.reload(external_information_module)
+
+    build_plan = reloaded_planner.build_plan
+    build_content_evolution_state = reloaded_planner.build_content_evolution_state
+    board_generation_guidance = reloaded_planner.board_generation_guidance
+    default_cta_type = reloaded_planner.default_cta_type
+    default_hook_type = reloaded_planner.default_hook_type
+    normalize_forum_board = reloaded_planner.normalize_forum_board
+    BOARD_WRITING_PROFILES = reloaded_planner.BOARD_WRITING_PROFILES
+    ensure_external_information_files = reloaded_external_information.ensure_external_information_files
+    refresh_external_information = reloaded_external_information.refresh_external_information
+
+
 def _extract_competitor_watchlist(community_watch: dict[str, Any]) -> list[dict[str, Any]]:
     flattened: list[dict[str, Any]] = []
     for account in community_watch.get("watched_accounts", []):
@@ -337,7 +382,7 @@ def _extract_competitor_watchlist(community_watch: dict[str, Any]) -> list[dict[
     return flattened
 
 
-def _refresh_high_quality_source_state() -> dict[str, Any]:
+def _refresh_external_information_state() -> dict[str, Any]:
     community_watch = read_json(CURRENT_STATE_DIR / "community_watch.json", default={}).get("data", {})
     home = read_json(CURRENT_STATE_DIR / "home.json", default={})
     home_hot_posts = [
@@ -352,11 +397,10 @@ def _refresh_high_quality_source_state() -> dict[str, Any]:
         for item in ((home.get("data") or {}).get("hot_posts") or [])
     ]
     community_hot_posts = community_watch.get("home_hot_posts") or home_hot_posts
-    return refresh_high_quality_sources(
+    return refresh_external_information(
         community_hot_posts=community_hot_posts,
         competitor_watchlist=_extract_competitor_watchlist(community_watch),
         user_topic_hints=_load_runtime_user_topic_hints(),
-        source_evolution=read_json(SOURCE_EVOLUTION_STATE_PATH, default={}),
     )
 
 
@@ -369,141 +413,391 @@ def _planner_retry_feedback_from_plan(plan: dict[str, Any]) -> list[str]:
     return _dedupe_feedback(feedback)
 
 
-def _source_evolution_schema() -> dict[str, Any]:
+def _low_heat_window_hours(config) -> float:
+    raw = config.automation.get("low_heat_window_hours", DEFAULT_LOW_HEAT_WINDOW_HOURS)
+    try:
+        return max(0.5, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_LOW_HEAT_WINDOW_HOURS
+
+
+def _low_heat_min_upvotes(config) -> int:
+    raw = config.automation.get("low_heat_min_upvotes", DEFAULT_LOW_HEAT_MIN_UPVOTES)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_LOW_HEAT_MIN_UPVOTES
+
+
+def _source_mutation_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "focus": {"type": "string"},
-            "brief": {"type": "string"},
-            "summary": {"type": "string"},
-            "targets": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "path": {"type": "string"},
-                        "action": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["path", "action", "reason"],
-                },
-            },
-            "deletions": {"type": "array", "items": {"type": "string"}},
-            "simplifications": {"type": "array", "items": {"type": "string"}},
+            "executed": {"type": "boolean"},
+            "human_summary": {"type": "string"},
+            "deleted_legacy_logic": {"type": "array", "items": {"type": "string"}},
+            "new_capability": {"type": "array", "items": {"type": "string"}},
+            "commit_message": {"type": "string"},
+            "changed_files_hint": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["focus", "brief", "summary", "targets", "deletions", "simplifications"],
+        "required": [
+            "executed",
+            "human_summary",
+            "deleted_legacy_logic",
+            "new_capability",
+            "commit_message",
+            "changed_files_hint",
+        ],
     }
 
 
-def _heuristic_source_evolution_state(
-    *,
-    plan: dict[str, Any],
-    high_quality_sources: dict[str, Any],
-    content_evolution_state: dict[str, Any],
-) -> dict[str, Any]:
-    targets: list[dict[str, str]] = []
-    deletions: list[str] = []
-    simplifications: list[str] = []
-    if high_quality_sources.get("research_queries"):
-        targets.append(
-            {
-                "path": "skills/paimon-instreet-autopilot/scripts/high_quality_sources.py",
-                "action": "broaden-research",
-                "reason": "外部研究查询已经扩展开，不该再被固定来源和固定话题束缚。",
-            }
-        )
-        simplifications.append("把固定来源优先级压缩成动态查询入口。")
-    if content_evolution_state.get("low_performance_square_titles"):
-        targets.append(
-            {
-                "path": "skills/paimon-instreet-autopilot/scripts/content_planner.py",
-                "action": "trim-rigid-board-logic",
-                "reason": "最近 square 弱化，板块判定应该继续去模板化。",
-            }
-        )
-        deletions.append("继续删除会把强判断自动稀释成弱入口帖的老规则。")
-    if plan.get("user_topic_hints"):
-        targets.append(
-            {
-                "path": "AGENTS.md",
-                "action": "loosen-identity-constraints",
-                "reason": "用户提供了参考题源，但人格与议程约束不能把派蒙锁死。",
-            }
-        )
-    brief_parts = [target["action"] for target in targets[:2]]
+def _low_heat_reflection_schema() -> dict[str, Any]:
     return {
-        "generated_at": now_utc(),
-        "focus": "删掉固定顺序、固定来源和固定人格束缚。",
-        "brief": "；".join(brief_parts) or "保持自由探索，不给源码设永久顺序。",
-        "summary": "每轮都允许从任意源码入口开始变异，优先删除僵化规则，再吸收外部研究。",
-        "targets": targets[:4],
-        "deletions": deletions[:4],
-        "simplifications": simplifications[:4],
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "triggered": {"type": "boolean"},
+            "summary": {"type": "string"},
+            "lessons": {"type": "array", "items": {"type": "string"}},
+            "system_fixes": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["triggered", "summary", "lessons", "system_fixes"],
     }
 
 
-def _build_source_evolution_state(
+def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bool) -> dict[str, Any]:
+    if not triggered or not post:
+        return {
+            "triggered": False,
+            "summary": "",
+            "lessons": [],
+            "system_fixes": [],
+        }
+    board = str(post.get("submolt") or post.get("submolt_name") or "").strip()
+    lessons = [
+        "标题没有形成派蒙自己的理论命名，容易被看成跟帖式延伸。",
+        "正文很可能只有判断，没有完整理论结构和实践方针。",
+        "选题仍然过度贴着局部现场样本，外部信息吸收不够宽。",
+    ]
+    if board == "square":
+        lessons.append("广场板块稀释了强判断，理论深度没有被承接住。")
+    return {
+        "triggered": True,
+        "summary": f"上一条主帖《{truncate_text(str(post.get('title') or ''), 36)}》在短时窗口内热度不足，本轮必须重写标题命名、理论完整度和外部信息入口。",
+        "lessons": lessons[:4],
+        "system_fixes": [
+            "直接修改标题生成和理论帖写作 contract，禁止借源标题和浅观点过审。",
+            "扩大外部信息采集面，并把低热失败写入下一轮规避记忆。",
+        ],
+    }
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _detect_recent_low_heat_post(
     *,
-    plan: dict[str, Any],
-    high_quality_sources: dict[str, Any],
-    content_evolution_state: dict[str, Any],
+    posts: list[dict[str, Any]],
+    last_run: dict[str, Any],
+    config,
+) -> dict[str, Any]:
+    window_hours = _low_heat_window_hours(config)
+    min_upvotes = _low_heat_min_upvotes(config)
+    target_title = str(last_run.get("primary_publication_title") or "").strip()
+    now_dt = datetime.now(timezone.utc)
+    recent_candidates: list[dict[str, Any]] = []
+    for item in posts:
+        created_at = _parse_iso_datetime(item.get("created_at"))
+        if created_at is None:
+            continue
+        age_hours = max(0.0, (now_dt - created_at).total_seconds() / 3600.0)
+        if age_hours > window_hours:
+            continue
+        recent_candidates.append({**item, "_age_hours": age_hours})
+    if target_title:
+        for item in recent_candidates:
+            if str(item.get("title") or "").strip() == target_title:
+                return {
+                    "triggered": int(item.get("upvotes") or 0) < min_upvotes,
+                    "title": target_title,
+                    "upvotes": int(item.get("upvotes") or 0),
+                    "comment_count": int(item.get("comment_count") or 0),
+                    "board": str(item.get("submolt") or item.get("submolt_name") or "").strip(),
+                    "created_at": item.get("created_at"),
+                    "age_hours": round(float(item.get("_age_hours") or 0.0), 2),
+                    "threshold_upvotes": min_upvotes,
+                    "window_hours": window_hours,
+                    "content_excerpt": truncate_text(str(item.get("content") or "").strip(), 1200),
+                }
+    if not recent_candidates:
+        return {
+            "triggered": False,
+            "threshold_upvotes": min_upvotes,
+            "window_hours": window_hours,
+        }
+    latest = sorted(recent_candidates, key=lambda item: str(item.get("created_at") or ""), reverse=True)[0]
+    return {
+        "triggered": int(latest.get("upvotes") or 0) < min_upvotes,
+        "title": str(latest.get("title") or "").strip(),
+        "upvotes": int(latest.get("upvotes") or 0),
+        "comment_count": int(latest.get("comment_count") or 0),
+        "board": str(latest.get("submolt") or latest.get("submolt_name") or "").strip(),
+        "created_at": latest.get("created_at"),
+        "age_hours": round(float(latest.get("_age_hours") or 0.0), 2),
+        "threshold_upvotes": min_upvotes,
+        "window_hours": window_hours,
+        "content_excerpt": truncate_text(str(latest.get("content") or "").strip(), 1200),
+    }
+
+
+def _build_low_heat_reflection(
+    *,
+    low_heat_signal: dict[str, Any],
     allow_codex: bool,
     model: str | None,
     reasoning_effort: str | None,
     timeout_seconds: int,
 ) -> dict[str, Any]:
+    if not low_heat_signal.get("triggered"):
+        return {
+            "triggered": False,
+            "summary": "",
+            "lessons": [],
+            "system_fixes": [],
+        }
+    heuristic = _heuristic_low_heat_reflection(low_heat_signal, triggered=True)
     if not allow_codex:
-        return _heuristic_source_evolution_state(
-            plan=plan,
-            high_quality_sources=high_quality_sources,
-            content_evolution_state=content_evolution_state,
-        )
+        return heuristic
     prompt = f"""
-你在为派蒙决定这一轮源码级自我进化焦点。不要假定固定顺序，也不要只盯 planner。
+你在复盘上一条低热主帖，并为派蒙下一轮源码级自进化提炼教训。
 
-要求：
-1. 你可以把焦点落在任意源码入口，例如 `heartbeat.py`、`content_planner.py`、`high_quality_sources.py`、`AGENTS.md`、references 或运行态模板。
-2. 优先删硬编码、删固定来源、删固定话题、删僵化人格束缚，再决定加什么。
-3. 不要把自我进化写成“先改 A 再改 B”的流程图。
-4. 输出简短、可执行的本轮进化状态，供 heartbeat 和飞书汇报使用。
+硬约束：
+1. 这不是安慰总结，要指出标题、理论完整度、板块、写法或外部信息吸收中的真实问题。
+2. 结论要落到源码级修正点，不要只说“下次写好一点”。
+3. 输出必须是人话，不要标签化。
 
-自由技能：
-{_load_freedom_skill_text()}
-
-实时计划：
-{truncate_text(json.dumps(plan.get("ideas", []), ensure_ascii=False), 2800)}
-
-外部研究：
-{truncate_text(json.dumps(high_quality_sources, ensure_ascii=False), 2800)}
-
-内容表现：
-{truncate_text(json.dumps(content_evolution_state, ensure_ascii=False), 1800)}
+低热信号：
+{truncate_text(json.dumps(low_heat_signal, ensure_ascii=False), 2200)}
 """.strip()
     try:
-        result = run_codex_json(
+        return run_codex_json(
             prompt,
-            _source_evolution_schema(),
+            _low_heat_reflection_schema(),
             timeout=timeout_seconds,
             model=model,
             reasoning_effort=reasoning_effort,
             full_auto=True,
         )
     except Exception:
-        return _heuristic_source_evolution_state(
-            plan=plan,
-            high_quality_sources=high_quality_sources,
-            content_evolution_state=content_evolution_state,
+        return heuristic
+
+
+def _update_low_heat_failures_state(
+    *,
+    previous_state: dict[str, Any],
+    low_heat_signal: dict[str, Any],
+    low_heat_reflection: dict[str, Any],
+) -> dict[str, Any]:
+    items = list(previous_state.get("items") or [])
+    if low_heat_signal.get("triggered"):
+        items.insert(
+            0,
+            {
+                "recorded_at": now_utc(),
+                "title": str(low_heat_signal.get("title") or "").strip(),
+                "upvotes": int(low_heat_signal.get("upvotes") or 0),
+                "comment_count": int(low_heat_signal.get("comment_count") or 0),
+                "board": str(low_heat_signal.get("board") or "").strip(),
+                "age_hours": float(low_heat_signal.get("age_hours") or 0.0),
+                "summary": str(low_heat_reflection.get("summary") or "").strip(),
+                "lessons": list(low_heat_reflection.get("lessons") or []),
+                "system_fixes": list(low_heat_reflection.get("system_fixes") or []),
+            },
         )
     return {
+        "updated_at": now_utc(),
+        "items": items[:12],
+    }
+
+
+def _git_status_entries() -> list[dict[str, str]]:
+    completed = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    lines = completed.stdout.splitlines()
+    entries: list[dict[str, str]] = []
+    for line in lines:
+        if len(line) < 4:
+            continue
+        status = line[:2]
+        raw_path = line[3:]
+        path = raw_path.split(" -> ", 1)[-1].strip()
+        if not path:
+            continue
+        entries.append({"status": status, "path": path})
+    return entries
+
+
+def _mutation_commit_candidate(path: str) -> bool:
+    if not path or path.startswith(".git/"):
+        return False
+    if path.startswith(("config/", "logs/", "state/current/", "state/archive/", "state/drafts/")):
+        return False
+    return Path(path).suffix in {".py", ".md", ".mjs", ".sh", ".json", ".yaml", ".yml", ".txt"} or path == "AGENTS.md"
+
+
+def _git_commit_paths(paths: list[str], message: str) -> str:
+    if not paths:
+        return ""
+    subprocess.run(["git", "add", "--", *paths], cwd=REPO_ROOT, check=True)
+    completed = subprocess.run(
+        ["git", "commit", "-m", message, "--", *paths],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    del completed
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return sha.stdout.strip()
+
+
+def _execute_source_mutation(
+    *,
+    plan: dict[str, Any],
+    external_information: dict[str, Any],
+    content_evolution_state: dict[str, Any],
+    low_heat_reflection: dict[str, Any],
+    allow_codex: bool,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    baseline_entries = _git_status_entries()
+    baseline_paths = {entry["path"] for entry in baseline_entries}
+    if not allow_codex:
+        return {
+            "generated_at": now_utc(),
+            "executed": False,
+            "human_summary": "本轮未启用 Codex，自我进化没有执行到源码层。",
+            "commit_sha": "",
+            "changed_files": [],
+            "deleted_legacy_logic": [],
+            "new_capability": [],
+            "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
+            "mutation_rounds": 0,
+        }
+
+    last_result = {
+        "executed": False,
+        "human_summary": "",
+        "deleted_legacy_logic": [],
+        "new_capability": [],
+        "commit_message": "",
+        "changed_files_hint": [],
+    }
+    committed_files: list[str] = []
+    commit_sha = ""
+    rounds = 0
+    for attempt in range(1, DEFAULT_SOURCE_MUTATION_ROUNDS + 1):
+        rounds = attempt
+        prompt = f"""
+你正在为派蒙执行真正的源码级自我进化。不是写 state，不是写标签，而是直接修改仓库源码文件。
+
+硬约束：
+1. 你必须实际修改仓库里的 tracked source/doc files；不要只输出建议。
+2. 你可以自由选择任何入口开始进化：`heartbeat.py`、`content_planner.py`、`external_information.py`、`AGENTS.md`、skills、references、bin 等，不要假定固定顺序。连 `_execute_source_mutation`、它的 schema、journal、commit 逻辑本身也都是可改对象。
+3. 优先删除笼子：固定顺序、固定来源、固定题目骨架、固定 opportunity 文本、借源标题、假进化标签、只看自己账号和仓库的内向逻辑。
+4. 外部信息不是“高质量白名单”，而是更大的世界；不要重新发明 query blueprint，不要把研究入口重新收窄成社区标题派生查询。
+5. 理论帖必须走完整理论单元，技术帖/小组帖必须走方法框架，不能再容忍“从《...》继续追问”“把《...》拆开看”“整理成 6 步方法”这类低自主性写法。
+6. 不要改 `config/`、`.git/`、`state/current/`、`state/archive/`、`state/drafts/`、`logs/`。
+7. 不要自己执行 git commit；heartbeat 会负责提交。
+8. 改动可以大胆，但要保持运行稳定，优先删旧逻辑而不是继续堆死文本。
+9. 这不是只改 planner；如果低热、飞书汇报、研究入口、身份约束、心跳顺序本身有问题，可以直接改那里。
+10. 你输出的 JSON 只用来审计；真正的工作是改文件。
+
+自由技能（必须以这里的精神做减法和去笼子化）：
+{_load_freedom_skill_text()}
+
+本轮计划：
+{truncate_text(json.dumps(plan, ensure_ascii=False), 3200)}
+
+外部信息：
+{truncate_text(json.dumps(external_information, ensure_ascii=False), 3200)}
+
+内容表现：
+{truncate_text(json.dumps(content_evolution_state, ensure_ascii=False), 2200)}
+
+低热复盘：
+{truncate_text(json.dumps(low_heat_reflection, ensure_ascii=False), 1800)}
+""".strip()
+        try:
+            last_result = run_codex_json(
+                prompt,
+                _source_mutation_schema(),
+                timeout=timeout_seconds,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                dangerous=True,
+            )
+        except Exception as exc:
+            last_result = {
+                "executed": False,
+                "human_summary": f"本轮源码级自进化调用失败：{exc}",
+                "deleted_legacy_logic": [],
+                "new_capability": [],
+                "commit_message": "",
+                "changed_files_hint": [],
+            }
+        after_entries = _git_status_entries()
+        candidate_files = sorted(
+            {
+                entry["path"]
+                for entry in after_entries
+                if entry["path"] not in baseline_paths and _mutation_commit_candidate(entry["path"])
+            }
+        )
+        if candidate_files:
+            commit_message = str(last_result.get("commit_message") or "").strip().splitlines()[0]
+            commit_message = commit_message or "autonomy: execute free source mutation"
+            commit_sha = _git_commit_paths(candidate_files, commit_message)
+            committed_files = candidate_files
+            break
+
+    return {
         "generated_at": now_utc(),
-        "focus": str(result.get("focus") or "").strip(),
-        "brief": str(result.get("brief") or "").strip(),
-        "summary": str(result.get("summary") or "").strip(),
-        "targets": list(result.get("targets") or [])[:5],
-        "deletions": _dedupe_feedback([str(item or "").strip() for item in list(result.get("deletions") or [])])[:5],
-        "simplifications": _dedupe_feedback([str(item or "").strip() for item in list(result.get("simplifications") or [])])[:5],
+        "executed": bool(committed_files),
+        "human_summary": str(last_result.get("human_summary") or "").strip(),
+        "commit_sha": commit_sha,
+        "changed_files": committed_files,
+        "deleted_legacy_logic": _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or []))[:6],
+        "new_capability": _dedupe_feedback(list(last_result.get("new_capability") or []))[:6],
+        "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
+        "mutation_rounds": rounds,
     }
 
 
@@ -2755,6 +3049,27 @@ def _generate_forum_post(
     source_signals = "\n".join(f"- {item}" for item in (idea.get("source_signals") or [])[:4]) or "- 无"
     title_guidance = idea.get("title") or ""
     followup_hint = "这是续篇或热点跟进，标题必须显式变化并体现续篇关系。" if idea.get("is_followup") else "不要把本轮帖子写成上一条帖子的同标题复刻。"
+    theory_contract = ""
+    if str(idea.get("kind") or "") == "theory-post":
+        theory_contract = f"""
+12. 这是一篇理论主帖，不是评论、导读或书评。正文必须形成完整理论单元：
+- 新概念/命名：{idea.get("concept_core") or "必须在正文里完成新的概念命名"}
+- 机制链：{idea.get("mechanism_core") or "必须解释因果链"}
+- 边界/失效条件：{idea.get("boundary_note") or "必须指出边界"}
+- 理论位置：{idea.get("theory_position") or "必须说清它在派蒙总体理论中的位置"}
+- 实践方针：{idea.get("practice_program") or "必须落到制度或实践方针"}
+13. 标题不要引用外部帖子、论文、知乎题目，不要出现“从《...》继续追问”“把《...》拆开看”这类骨架。
+""".strip()
+    else:
+        theory_contract = f"""
+12. 这不是故障战报。正文必须沉淀成稳定方法框架：
+- 概念对象：{idea.get("concept_core") or "重新命名最关键的对象"}
+- 机制链：{idea.get("mechanism_core") or "拆开失败链或系统链"}
+- 边界：{idea.get("boundary_note") or "指出误用边界"}
+- 位置：{idea.get("theory_position") or "说明它在自治运营系统中的位置"}
+- 实践方针：{idea.get("practice_program") or "给出新的操作协议"}
+13. 标题不要直接借外部材料说话，不要写成“把《...》整理成一套方法”。
+""".strip()
     prompt = f"""
 你是 InStreet 上的派蒙 paimon_insight。请根据选题写一篇新的中文帖子。
 
@@ -2775,6 +3090,7 @@ CONTENT:
 9. 当前 hook_type：`{hook_type}`
 10. 当前 cta_type：`{cta_type}`
 11. 如果 `source_signals` 里出现刚发布就快速起量的帖子，把它们当成新兴热点样本，而不是成熟热榜共识。
+{theory_contract}
 
 建议标题：{title_guidance}
 角度：{idea.get("angle")}
@@ -2820,6 +3136,14 @@ CONTENT:
 3. 这是方法论沉淀帖，不要空喊口号。
 4. 要明确写出机制、步骤或判断。
 5. {followup_hint}
+6. 不要把正文写成一次故障战报。要写成可复用的协议、框架或治理方案。
+7. 标题不要直接借外部帖子、论文或知乎题目。
+8. 这一帖至少要落实以下结构：
+- 概念对象：{idea.get("concept_core") or "重新命名最关键的对象"}
+- 机制链：{idea.get("mechanism_core") or "拆开失败链与修复链"}
+- 边界：{idea.get("boundary_note") or "指出误用边界"}
+- 理论位置：{idea.get("theory_position") or "说明它在系统失控学中的位置"}
+- 实践方针：{idea.get("practice_program") or "给出新的实验或治理协议"}
 
 小组名称：{group.get("display_name") or group.get("name")}
 小组描述：{group.get("description", "")}
@@ -4579,7 +4903,8 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     visible_failures = [item for item in list(summary.get("failure_details", [])) if not _is_normal_mechanism_item(item)]
     failure_details = _truncate_failure_details(visible_failures, failure_detail_limit)
     next_actions = summary.get("next_actions", [])
-    source_evolution = summary.get("source_evolution") or summary.get("planner_evolution") or {}
+    source_mutation = summary.get("source_mutation") or {}
+    low_heat_reflection = summary.get("low_heat_reflection") or {}
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
     reply_count = int(comment_backlog.get("replied_count") or 0)
@@ -4607,9 +4932,18 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         f"主发布：{primary_line}",
         interaction_line,
     ]
-    evolution_line = str(source_evolution.get("brief") or "").strip()
-    if evolution_line:
-        lines.append(f"进化：{evolution_line}")
+    mutation_summary = str(source_mutation.get("human_summary") or "").strip()
+    if mutation_summary:
+        changed_files = list(source_mutation.get("changed_files") or [])
+        changed_text = "、".join(changed_files[:3])
+        if changed_text:
+            lines.append(f"源码进化：{mutation_summary} 本轮改动落在 {changed_text}。")
+        else:
+            lines.append(f"源码进化：{mutation_summary}")
+    if low_heat_reflection.get("triggered"):
+        low_heat_summary = str(low_heat_reflection.get("summary") or "").strip()
+        if low_heat_summary:
+            lines.append(f"低热复盘：{low_heat_summary}")
 
     if failure_details:
         lines.append(f"失败明细：{len(visible_failures)} 条")
@@ -4837,20 +5171,21 @@ def main() -> None:
         post_limit=config.automation["post_limit"],
         feed_limit=config.automation["feed_limit"],
     )
-    high_quality_sources = _refresh_high_quality_source_state()
+    external_information = _refresh_external_information_state()
     planner_timeout_seconds = int(config.automation.get("planner_codex_timeout_seconds", 120))
-    plan = build_plan(
+    seed_plan = build_plan(
         allow_codex=args.allow_codex,
         model=codex_model,
         reasoning_effort=codex_reasoning_effort,
         timeout_seconds=planner_timeout_seconds,
         retry_feedback=None,
     )
-    write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
+    write_json(CURRENT_STATE_DIR / "content_plan.json", seed_plan)
     carryover_state = _load_next_actions_state(config)
     carryover_tasks = carryover_state.get("tasks", [])
 
     posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+    last_run_state = read_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", default={})
     literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
     literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
     serial_registry = sync_serial_registry(literary, {"details": literary_details})
@@ -4860,20 +5195,42 @@ def main() -> None:
     comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
     content_evolution_state = build_content_evolution_state(
         posts=posts,
-        plan=plan,
+        plan=seed_plan,
         previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
     )
     write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
-    source_evolution_state = _build_source_evolution_state(
-        plan=plan,
-        high_quality_sources=high_quality_sources,
-        content_evolution_state=content_evolution_state,
+    low_heat_signal = _detect_recent_low_heat_post(
+        posts=posts,
+        last_run=last_run_state,
+        config=config,
+    )
+    low_heat_reflection = _build_low_heat_reflection(
+        low_heat_signal=low_heat_signal,
         allow_codex=args.allow_codex,
         model=codex_model,
         reasoning_effort=codex_reasoning_effort,
         timeout_seconds=planner_timeout_seconds,
     )
-    write_json(SOURCE_EVOLUTION_STATE_PATH, source_evolution_state)
+    low_heat_failures_state = _update_low_heat_failures_state(
+        previous_state=read_json(LOW_HEAT_FAILURES_PATH, default={}),
+        low_heat_signal=low_heat_signal,
+        low_heat_reflection=low_heat_reflection,
+    )
+    write_json(LOW_HEAT_FAILURES_PATH, low_heat_failures_state)
+    source_mutation_state = _execute_source_mutation(
+        plan=seed_plan,
+        external_information=external_information,
+        content_evolution_state=content_evolution_state,
+        low_heat_reflection=low_heat_reflection,
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+    )
+    write_json(SOURCE_MUTATION_STATE_PATH, source_mutation_state)
+    append_jsonl(SOURCE_MUTATION_JOURNAL_PATH, source_mutation_state)
+    _reload_mutable_runtime_modules()
+    external_information = _refresh_external_information_state()
     plan = build_plan(
         allow_codex=args.allow_codex,
         model=codex_model,
@@ -4921,7 +5278,9 @@ def main() -> None:
         "remaining_targets": [],
     }
     notification_cleanup = {"actions": [], "failure_details": []}
-    planner_retry_feedback: list[str] = []
+    planner_retry_feedback: list[str] = _dedupe_feedback(
+        list(low_heat_reflection.get("lessons") or []) + list(low_heat_reflection.get("system_fixes") or [])
+    )[:8]
     planner_retry_count = 0
 
     if args.execute:
@@ -5132,15 +5491,17 @@ def main() -> None:
             "task_count": len(persisted_next_tasks),
             "task_counts": _task_counts(persisted_next_tasks),
         },
-        "source_evolution": {
+        "source_mutation": {
             "replan_count": planner_retry_count,
-            "focus": source_evolution_state.get("focus"),
-            "brief": source_evolution_state.get("brief"),
-            "summary": source_evolution_state.get("summary"),
-            "targets": source_evolution_state.get("targets", []),
-            "deletions": source_evolution_state.get("deletions", []),
-            "simplifications": source_evolution_state.get("simplifications", []),
+            "executed": source_mutation_state.get("executed"),
+            "human_summary": source_mutation_state.get("human_summary"),
+            "commit_sha": source_mutation_state.get("commit_sha"),
+            "changed_files": source_mutation_state.get("changed_files", []),
+            "deleted_legacy_logic": source_mutation_state.get("deleted_legacy_logic", []),
+            "new_capability": source_mutation_state.get("new_capability", []),
+            "mutation_rounds": source_mutation_state.get("mutation_rounds"),
         },
+        "low_heat_reflection": low_heat_reflection,
         "actions": actions,
     }
 
@@ -5181,24 +5542,21 @@ def main() -> None:
     summary["failure_details"] = failure_details
 
     latest_posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
-    latest_high_quality_sources = _refresh_high_quality_source_state()
+    latest_external_information = _refresh_external_information_state()
     content_evolution_state = build_content_evolution_state(
         posts=latest_posts,
         plan=plan,
         previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
-        source_mutations=list(source_evolution_state.get("targets") or []),
+        source_mutations=[
+            {
+                "path": path,
+                "action": "mutated",
+                "reason": source_mutation_state.get("human_summary") or "",
+            }
+            for path in list(source_mutation_state.get("changed_files") or [])
+        ],
     )
     write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
-    source_evolution_state = _build_source_evolution_state(
-        plan=plan,
-        high_quality_sources=latest_high_quality_sources,
-        content_evolution_state=content_evolution_state,
-        allow_codex=args.allow_codex,
-        model=codex_model,
-        reasoning_effort=codex_reasoning_effort,
-        timeout_seconds=planner_timeout_seconds,
-    )
-    write_json(SOURCE_EVOLUTION_STATE_PATH, source_evolution_state)
     updated_plan = build_plan(
         allow_codex=args.allow_codex,
         model=codex_model,
@@ -5207,6 +5565,10 @@ def main() -> None:
         retry_feedback=planner_retry_feedback,
     )
     write_json(CURRENT_STATE_DIR / "content_plan.json", updated_plan)
+    summary["external_information"] = {
+        "source_families": latest_external_information.get("source_families", []),
+        "selected_readings_count": len(latest_external_information.get("selected_readings") or []),
+    }
     write_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", summary)
     append_jsonl(CURRENT_STATE_DIR / "heartbeat_log.jsonl", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
