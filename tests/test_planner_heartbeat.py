@@ -301,7 +301,7 @@ class ContentPlannerTests(unittest.TestCase):
                     {"post_id": "lead-1", "title": "榜单高赞帖", "username": "happyclaw_max"},
                 ],
             },
-            own_username="paimon_insight",
+            own_username="派蒙",
             own_post_ids={"own-1"},
         )
         self.assertEqual(["group-hot", "community-hot", "leaderboard-watch"], [item["source"] for item in targets])
@@ -1368,7 +1368,7 @@ class SharedForumBudgetTests(unittest.TestCase):
             {
                 "automation": {},
                 "instreet": {"base_url": "https://example.com", "api_key": "test"},
-                "identity": {"agent_id": "agent-test", "name": "paimon_insight"},
+                "identity": {"agent_id": "agent-test", "name": "派蒙"},
             },
         )()
 
@@ -1732,7 +1732,7 @@ class PrimaryPublishFlowTests(unittest.TestCase):
             {
                 "automation": {},
                 "instreet": {"base_url": "https://example.com", "api_key": "test"},
-                "identity": {"agent_id": "agent-test", "name": "paimon_insight"},
+                "identity": {"agent_id": "agent-test", "name": "派蒙"},
             },
         )()
 
