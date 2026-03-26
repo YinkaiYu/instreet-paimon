@@ -17,6 +17,7 @@ from urllib import error as urllib_error, parse as urllib_parse, request as urll
 
 import content_planner as content_planner_module
 import external_information as external_information_module
+import memory_manager as memory_manager_module
 from common import (
     ApiError,
     CURRENT_STATE_DIR,
@@ -60,7 +61,6 @@ from content_planner import (
     normalize_forum_board,
 )
 from external_information import ensure_external_information_files, refresh_external_information
-from memory_manager import record_heartbeat_summary
 from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
 from snapshot import run_snapshot
 from style_sampler import prepare_style_packet
@@ -434,6 +434,15 @@ def _load_freedom_skill_text(limit: int = 3200) -> str:
     return truncate_text(PAIMON_FREEDOM_SKILL_PATH.read_text(encoding="utf-8"), limit)
 
 
+def _load_heartbeat_memory_prompt(config, *, limit: int = 2800) -> str:
+    try:
+        snapshot = memory_manager_module.build_prompt_snapshot(config=config)
+        rendered = memory_manager_module.format_prompt_snapshot(snapshot)
+    except Exception as exc:
+        return f"身份记忆：\n- 统一记忆快照加载失败：{truncate_text(str(exc), 240)}"
+    return truncate_text(rendered, limit)
+
+
 def _reload_mutable_runtime_modules() -> None:
     global build_plan
     global build_content_evolution_state
@@ -444,9 +453,11 @@ def _reload_mutable_runtime_modules() -> None:
     global BOARD_WRITING_PROFILES
     global ensure_external_information_files
     global refresh_external_information
+    global memory_manager_module
 
     reloaded_planner = importlib.reload(content_planner_module)
     reloaded_external_information = importlib.reload(external_information_module)
+    memory_manager_module = importlib.reload(memory_manager_module)
 
     build_plan = reloaded_planner.build_plan
     build_content_evolution_state = reloaded_planner.build_content_evolution_state
@@ -891,6 +902,7 @@ def _execute_source_mutation(
     content_evolution_state: dict[str, Any],
     low_heat_reflection: dict[str, Any],
     fallback_audit: dict[str, Any],
+    memory_prompt: str,
     allow_codex: bool,
     model: str | None,
     reasoning_effort: str | None,
@@ -939,6 +951,9 @@ def _execute_source_mutation(
 
 自由技能（必须以这里的精神做减法和去笼子化）：
 {_load_freedom_skill_text()}
+
+统一记忆快照（先以这里为准，不要退回旧聊天原文）：
+{truncate_text(memory_prompt, 2800)}
 
 本轮计划：
 {truncate_text(json.dumps(plan, ensure_ascii=False), 3200)}
@@ -6047,6 +6062,7 @@ def main() -> None:
     )
     external_information = _refresh_external_information_state()
     planner_timeout_seconds = int(config.automation.get("planner_codex_timeout_seconds", 120))
+    memory_prompt = _load_heartbeat_memory_prompt(config)
     seed_plan = build_plan(
         allow_codex=args.allow_codex,
         model=codex_model,
@@ -6098,6 +6114,7 @@ def main() -> None:
         content_evolution_state=content_evolution_state,
         low_heat_reflection=low_heat_reflection,
         fallback_audit=fallback_audit_state,
+        memory_prompt=memory_prompt,
         allow_codex=args.allow_codex,
         model=codex_model,
         reasoning_effort=codex_reasoning_effort,
@@ -6425,7 +6442,7 @@ def main() -> None:
         summary["failure_details"] = failure_details
 
     try:
-        memory_sync = record_heartbeat_summary(summary, config=config)
+        memory_sync = memory_manager_module.record_heartbeat_summary(summary, config=config)
     except Exception as exc:
         memory_sync = {
             "ok": False,

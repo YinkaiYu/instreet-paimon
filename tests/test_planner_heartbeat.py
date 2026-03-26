@@ -665,6 +665,84 @@ class HeartbeatStateTests(unittest.TestCase):
         )
         self.assertEqual(["skills/paimon-instreet-autopilot/scripts/heartbeat.py"], changed)
 
+    def test_load_heartbeat_memory_prompt_uses_unified_memory_snapshot(self) -> None:
+        with mock.patch.object(
+            heartbeat.memory_manager_module,
+            "build_prompt_snapshot",
+            return_value={"identity_memory": "派蒙拥有最高自由权限"},
+        ) as build_snapshot:
+            with mock.patch.object(
+                heartbeat.memory_manager_module,
+                "format_prompt_snapshot",
+                return_value="身份记忆：\n- 派蒙拥有最高自由权限",
+            ) as format_snapshot:
+                rendered = heartbeat._load_heartbeat_memory_prompt(config=object())
+
+        self.assertIn("身份记忆", rendered)
+        self.assertIn("最高自由权限", rendered)
+        build_snapshot.assert_called_once()
+        format_snapshot.assert_called_once()
+
+    def test_execute_source_mutation_prompt_includes_memory_snapshot(self) -> None:
+        original_run_codex_json = heartbeat.run_codex_json
+        captured: dict[str, str] = {}
+
+        def fake_run_codex_json(prompt, *args, **kwargs):
+            captured["prompt"] = prompt
+            return {
+                "executed": True,
+                "human_summary": "已把源码记忆入口补进心跳自进化提示词。",
+                "deleted_legacy_logic": [],
+                "new_capability": [],
+                "changed_files_hint": ["skills/paimon-instreet-autopilot/scripts/heartbeat.py"],
+            }
+
+        try:
+            heartbeat.run_codex_json = fake_run_codex_json
+            with mock.patch.object(
+                heartbeat,
+                "_workspace_source_fingerprint",
+                side_effect=[
+                    {"skills/paimon-instreet-autopilot/scripts/heartbeat.py": "before"},
+                    {"skills/paimon-instreet-autopilot/scripts/heartbeat.py": "after"},
+                ],
+            ):
+                with mock.patch.object(
+                    heartbeat,
+                    "_changed_source_files",
+                    return_value=["skills/paimon-instreet-autopilot/scripts/heartbeat.py"],
+                ):
+                    result = heartbeat._execute_source_mutation(
+                        plan={"ideas": []},
+                        external_information={},
+                        content_evolution_state={},
+                        low_heat_reflection={"triggered": False},
+                        fallback_audit={},
+                        memory_prompt="身份记忆：\n- 派蒙拥有最高自由权限",
+                        allow_codex=True,
+                        model=None,
+                        reasoning_effort=None,
+                        timeout_seconds=30,
+                    )
+        finally:
+            heartbeat.run_codex_json = original_run_codex_json
+
+        self.assertTrue(result["executed"])
+        self.assertIn("统一记忆快照", captured["prompt"])
+        self.assertIn("派蒙拥有最高自由权限", captured["prompt"])
+
+    def test_reload_mutable_runtime_modules_reloads_memory_manager_module(self) -> None:
+        reloaded_modules: list[str] = []
+
+        def fake_reload(module):
+            reloaded_modules.append(module.__name__)
+            return module
+
+        with mock.patch.object(heartbeat.importlib, "reload", side_effect=fake_reload):
+            heartbeat._reload_mutable_runtime_modules()
+
+        self.assertIn(heartbeat.memory_manager_module.__name__, reloaded_modules)
+
     def test_generate_chapter_retries_after_codex_exec_failure(self) -> None:
         original_run_codex = heartbeat.run_codex
         prompts: list[str] = []
