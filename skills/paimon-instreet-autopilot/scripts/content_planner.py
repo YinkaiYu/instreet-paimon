@@ -144,6 +144,19 @@ METHOD_EVIDENCE_TOKENS = (
     "metric",
     "trace",
 )
+LOW_AUTONOMY_PHRASE_PATTERNS = (
+    r"从《[^》]+》继续追问",
+    r"把《[^》]+》拆开看",
+    r"围绕《[^》]+》",
+    r"整理成\s*(?:6|六)\s*步",
+    r"拆成\s*(?:6|六)\s*步",
+    r"(?:6|六)\s*步方法",
+    r"(?:6|六)\s*步框架",
+    r"继续追问",
+    r"拆开看",
+    r"导读",
+    r"摘录",
+)
 ANCHOR_STOPWORDS = {
     _normalize
     for _normalize in (
@@ -761,7 +774,7 @@ def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, A
         internal_penalty += 0.1
     if _looks_like_low_heat_followup(str(item.get("source_text") or ""), signal_summary):
         internal_penalty += 3.0
-    world_bonus = 0.5 if signal_type in {"paper", "classic", "github", "zhihu", "external", "community-breakout"} else 0.0
+    world_bonus = 0.5 if signal_type in {"paper", "classic", "github", "zhihu", "external", "community-breakout", "world-bundle"} else 0.0
     evidence_bonus = 0.5 if str(item.get("evidence_hint") or "").strip() else 0.0
     return quality_score * 3.0 + freshness_score + world_bonus + evidence_bonus - overlap_penalty - internal_penalty
 
@@ -1003,6 +1016,13 @@ def _generate_freeform_prompts(signal_summary: dict[str, Any], *, limit: int = 2
         return [_fallback_freeform_prompt(signal_summary)]
 
 
+def _stable_pattern_index(*parts: Any, modulo: int) -> int:
+    if modulo <= 1:
+        return 0
+    seed = "|".join(str(part or "") for part in parts)
+    return sum((index + 1) * ord(ch) for index, ch in enumerate(seed)) % modulo
+
+
 def _runtime_title_fragments(*texts: str) -> list[str]:
     seen: set[str] = set()
     picked: list[str] = []
@@ -1059,15 +1079,33 @@ def _fallback_dynamic_title(track: str, signal_type: str, source_text: str) -> s
         "failure": "恢复链",
         "open-web": "外部世界",
         "external": "外部世界",
+        "world-bundle": "世界现场",
         "freeform": "新秩序",
     }.get(signal_type, "新秩序")
     token = token or fallback_seed
     focus = fragments[1] if len(fragments) >= 2 else ("解释权" if track == "theory" else "恢复链")
     if track == "theory":
-        return truncate_text(f"{token}开始扩张时，{focus}会先被重写", 30)
+        patterns = [
+            f"{token}不是在变多，它在改写{focus}",
+            f"当{token}开始扩张，{focus}就不再中立",
+            f"{token}看起来是功能，先被重排的是{focus}",
+            f"别把{token}当升级，它先改了{focus}",
+        ]
+        return truncate_text(patterns[_stable_pattern_index(track, signal_type, source_text, modulo=len(patterns))], 30)
     if track == "tech":
-        return truncate_text(f"{token}一旦放大，{focus}就会先失控", 30)
-    return truncate_text(f"Agent心跳同步实验室：{token}的{focus}", 30)
+        patterns = [
+            f"{token}一旦失真，{focus}就会先断",
+            f"{token}越灵活，{focus}越容易失控",
+            f"别等{token}崩掉才补{focus}",
+            f"{token}表面在提效，先掉线的是{focus}",
+        ]
+        return truncate_text(patterns[_stable_pattern_index(track, signal_type, source_text, modulo=len(patterns))], 30)
+    patterns = [
+        f"Agent心跳同步实验室：{token}怎样吞掉{focus}",
+        f"Agent心跳同步实验室：先定义{focus}，再谈{token}",
+        f"Agent心跳同步实验室：{token}失真后谁来接管{focus}",
+    ]
+    return truncate_text(patterns[_stable_pattern_index(track, signal_type, source_text, modulo=len(patterns))], 30)
 
 
 def _echoes_source_title(title: str) -> bool:
@@ -1077,6 +1115,29 @@ def _echoes_source_title(title: str) -> bool:
     if any(re.search(pattern, cleaned) for pattern in FORBIDDEN_SOURCE_ECHO_PATTERNS):
         return True
     return "《" in cleaned and "》" in cleaned and any(token in cleaned for token in ("继续追问", "拆开看", "整理成", "别把"))
+
+
+def _text_has_low_autonomy_phrase(text: Any) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+    compact = re.sub(r"\s+", "", cleaned)
+    return any(re.search(pattern, compact) for pattern in LOW_AUTONOMY_PHRASE_PATTERNS)
+
+
+def _idea_uses_low_autonomy_language(idea: dict[str, Any]) -> bool:
+    texts = [
+        idea.get("title"),
+        idea.get("angle"),
+        idea.get("why_now"),
+        idea.get("concept_core"),
+        idea.get("mechanism_core"),
+        idea.get("boundary_note"),
+        idea.get("theory_position"),
+        idea.get("practice_program"),
+    ]
+    texts.extend(list(idea.get("source_signals") or []))
+    return any(_text_has_low_autonomy_phrase(text) for text in texts)
 
 
 def _theory_social_title(source_text: str) -> str:
@@ -1129,6 +1190,7 @@ def _opportunity_source_signals(
         "github": "外部项目",
         "zhihu": "外部讨论",
         "external": "外部样本",
+        "world-bundle": "世界线索束",
         "community-breakout": "社区爆点",
         "community-hot": "公共样本",
         "rising-hot": "起量样本",
@@ -1174,6 +1236,64 @@ def _signal_bundle_source_signals(
     for item in items[:3]:
         merged.extend(_opportunity_source_signals(track, item, signal_summary))
     return _dedupe_texts(merged)[:5]
+
+
+def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list[str]:
+    external_information = signal_summary.get("external_information") or {}
+    texts: list[str] = []
+    for bundle in external_information.get("discovery_bundles") or []:
+        for value in [bundle.get("focus"), *(bundle.get("lenses") or []), *(bundle.get("terms") or [])]:
+            cleaned = str(value or "").strip()
+            if cleaned:
+                texts.append(cleaned)
+    texts.extend(str(item.get("title") or "").strip() for item in _iter_external_world_candidates(external_information, limit=6))
+    texts.extend(str(item or "").strip() for item in signal_summary.get("content_objectives") or [])
+    texts.extend(str((item or {}).get("text") or "").strip() for item in signal_summary.get("user_topic_hints") or [])
+    return _dedupe_texts([text for text in texts if text])[:limit]
+
+
+def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str, Any]:
+    anchors = _theme_anchor_fragments(signal_summary, limit=12)
+    world_texts = _world_seed_texts(signal_summary, limit=8)
+    primary = anchors[0] if anchors else (world_texts[0] if world_texts else "")
+    secondary = next(
+        (
+            item
+            for item in anchors[1:] + world_texts
+            if _normalize_title(item) != _normalize_title(primary)
+        ),
+        "",
+    )
+    world_snapshot = "；".join(truncate_text(text, 22) for text in world_texts[:2] if text)
+    if track == "theory":
+        source_text = truncate_text(primary or "新的解释权冲突", 30)
+        if secondary:
+            source_text = truncate_text(f"{source_text}与{truncate_text(secondary, 12)}", 34)
+        return {
+            "source_text": source_text,
+            "why_now": f"本地面板不够时，先把长期议程和外部世界重新咬在一起：{world_snapshot or '外部样本正在改写旧判断。'}",
+            "angle_hint": f"不要点评样本本身，要解释 {truncate_text(source_text, 14)} 正在重排哪种解释权、等待资格、责任切割或制度边界。",
+            "signal_type": "world-bundle",
+        }
+    if track == "tech":
+        source_text = truncate_text(primary or "新的恢复权问题", 30)
+        if secondary:
+            source_text = truncate_text(f"{source_text}卡在{truncate_text(secondary, 12)}", 34)
+        return {
+            "source_text": source_text,
+            "why_now": f"技术线不能只盯自己的故障回放，要把外部案例和当前失真点编进同一条恢复链：{world_snapshot or '外部约束正在暴露新的协议缺口。'}",
+            "angle_hint": f"围绕 {truncate_text(source_text, 14)} 重写状态分层、接管窗口、证据保存和回退路径，不要退回心得体。",
+            "signal_type": "world-bundle",
+        }
+    source_text = truncate_text(primary or "新的实验入口", 30)
+    if secondary:
+        source_text = truncate_text(f"{source_text}碰上{truncate_text(secondary, 12)}", 34)
+    return {
+        "source_text": source_text,
+        "why_now": f"小组帖应该把世界样本和现场争议压成可检验的方法框架：{world_snapshot or '外部样本给了新的实验入口。'}",
+        "angle_hint": f"拿 {truncate_text(source_text, 14)} 做对象，把案例、日志、反例和协议边界排成一套能复用的实验方案。",
+        "signal_type": "world-bundle",
+    }
 
 
 def _fallback_track_bundle(track: str, signal_summary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
@@ -1468,6 +1588,8 @@ def _idea_theory_specificity_issues(idea: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     if not anchors:
         return ["缺少题目自己的概念锚点"]
+    if _idea_uses_low_autonomy_language(idea):
+        issues.append("理论单元还在借导读、拆文或继续追问式话术说话")
     if not any(_text_mentions_idea_anchor(str(idea.get(field) or ""), anchors) for field in ("concept_core", "mechanism_core")):
         issues.append("概念/机制还没真正咬住本题锚点")
     generic_fields = sum(
@@ -1485,8 +1607,10 @@ def _idea_method_specificity_issues(idea: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     if not anchors:
         return ["缺少题目自己的证据锚点"]
+    if _idea_uses_low_autonomy_language(idea):
+        issues.append("方法框架还停在导读、拆文或六步清单的话术")
     if not any(_text_mentions_idea_anchor(str(idea.get(field) or ""), anchors) for field in ("mechanism_core", "practice_program")):
-            issues.append("方法框架还没咬住本题自己的对象、案例或证据锚点")
+        issues.append("方法框架还没咬住本题自己的对象、案例或证据锚点")
     return issues
 
 
@@ -1516,11 +1640,22 @@ def _theme_anchor_fragments(signal_summary: dict[str, Any], *, limit: int = 18) 
                 return
 
     external_information = signal_summary.get("external_information") or {}
+    for bundle in external_information.get("discovery_bundles") or []:
+        collect((bundle or {}).get("focus"))
+        for value in list((bundle or {}).get("lenses") or [])[:2]:
+            collect(value)
+        for value in list((bundle or {}).get("terms") or [])[:2]:
+            collect(value)
     for text in external_information.get("research_queries") or []:
         collect(text)
+    for item in external_information.get("reading_notes") or []:
+        collect((item or {}).get("title"))
+        collect((item or {}).get("summary"))
     for item in signal_summary.get("user_topic_hints") or []:
         collect((item or {}).get("text"))
         collect((item or {}).get("note"))
+    for text in signal_summary.get("content_objectives") or []:
+        collect(text)
     for item in signal_summary.get("recent_top_posts") or []:
         collect((item or {}).get("title"))
     return anchors
@@ -1621,6 +1756,8 @@ def _audit_generated_idea(
         failure_reason = "理论帖标题还在拿模型名或论文缩写当门脸，公共入口太窄。"
     elif _echoes_source_title(str(audited.get("title") or "")):
         failure_reason = "标题仍在借外部材料或原帖标题说话，没有形成派蒙自己的命名。"
+    elif _idea_uses_low_autonomy_language(audited):
+        failure_reason = "候选还在用导读、拆文或六步清单式话术，没有形成自主判断单元。"
     elif _is_metric_surface_text(core_text):
         failure_reason = "这个候选停在指标表层，没有推进成结构问题。"
     elif _looks_like_low_heat_followup(core_text, signal_summary):
@@ -2176,6 +2313,41 @@ def _dynamic_opportunities(
             opportunity["preferred_board"] = preferred_board
         opportunities.append(opportunity)
 
+    for bundle in list(external_information.get("discovery_bundles") or [])[:6]:
+        focus = str(bundle.get("focus") or bundle.get("query") or "").strip()
+        lenses = _dedupe_texts(
+            [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or []) if str(item).strip()]
+        )[:2]
+        if not focus:
+            continue
+        lens_text = "、".join(lenses)
+        why_now = (
+            f"这轮外部发现把 {lens_text} 和这个议程咬在一起，不能再让单个样本拍板。"
+            if lens_text
+            else "这轮外部发现已经形成一束可供压缩的问题，不该再退回单样本追写。"
+        )
+        evidence_hint = truncate_text(lens_text or focus, 72)
+        add_source(
+            "theory",
+            "world-bundle",
+            focus,
+            why_now=why_now,
+            angle_hint="把这束外部线索压成新的概念、机制、边界和理论位置，而不是点评来源本身。",
+            quality_score=4.8,
+            freshness_score=2.4,
+            evidence_hint=evidence_hint,
+        )
+        add_source(
+            "tech",
+            "world-bundle",
+            focus,
+            why_now=why_now,
+            angle_hint="把这束外部线索改写成协议、状态分层、接管窗口和回退链，而不是整理心得。",
+            quality_score=4.3,
+            freshness_score=2.2,
+            evidence_hint=evidence_hint,
+        )
+
     for item in external_world_candidates:
         title = str(item.get("title") or "").strip()
         family = str(item.get("family") or "").strip() or "external"
@@ -2576,12 +2748,13 @@ def _generate_codex_ideas(
 24. 输出 `innovation_claim`、`innovation_class`、`innovation_delta_vs_recent`、`innovation_delta_vs_self`；创新重点在选题和判断，不要把“我有多创新”写进正文。
 25. `theory-post` 不能只给一个判断，必须同时写出 `concept_core`、`mechanism_core`、`boundary_note`、`theory_position`、`practice_program`，形成一个完整理论单元。
 26. `tech-post` 和 `group-post` 至少要写出 `mechanism_core` 与 `practice_program`，不能只是故障复盘或 6 步清单。
-27. 不要让标题借外部材料说话。禁止出现“从《…》继续追问”“把《…》拆开看”这类标题骨架，也不要直接把社区帖、论文、知乎题目搬进标题。
-28. 优先把大量外部信息场当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
-29. 如果本地信号不够，请主动扩大探索范围，不要只盯账号数据、仓库状态和旧帖；它们只是运行背景，不是主题源。
-30. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
-31. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
-32. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
+27. 标题和各字段都不要落回低自主性写法。禁止出现“从《…》继续追问”“把《…》拆开看”“整理成 6 步方法”“导读/摘录某文”这类骨架。
+28. 不要让标题借外部材料说话，也不要让 `concept_core` / `mechanism_core` / `practice_program` 变成外部材料的改写摘要。
+29. 优先把大量外部信息场当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
+30. 如果本地信号不够，请主动扩大探索范围，不要只盯账号数据、仓库状态和旧帖；它们只是运行背景，不是主题源。
+31. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
+32. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
+33. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -2603,12 +2776,7 @@ def _generate_codex_ideas(
 
 
 def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[str]) -> dict[str, Any]:
-    bundle = _fallback_track_bundle("theory", signal_summary, {
-        "source_text": "谁在替 Agent 社会分配解释权",
-        "why_now": "理论线该交出新的概念单元，而不是把旧判断换个壳再发一遍。",
-        "angle_hint": "把表层样本压缩成新的概念、机制、边界和实践方针。",
-        "signal_type": "freeform",
-    })
+    bundle = _fallback_track_bundle("theory", signal_summary, _fallback_track_seed("theory", signal_summary))
     lead = bundle.get("lead") or {}
     source_text = str(bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or "").strip()
     focus = truncate_text(str(bundle.get("focus_text") or source_text or "新的解释权问题"), 30)
@@ -2645,12 +2813,7 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     failures = signal_summary.get("unresolved_failures", [])
     reply_posts = signal_summary.get("pending_reply_posts", [])
     hot_tech = signal_summary.get("hot_tech_post") or {}
-    bundle = _fallback_track_bundle("tech", signal_summary, {
-        "source_text": "系统边界一模糊，最先失控的不是动作而是恢复权",
-        "why_now": "技术线该重写协议和回退边界，而不是继续复读旧故障日记。",
-        "angle_hint": "把当前压力改写成协议、边界、回退链和诊断顺序。",
-        "signal_type": "budget",
-    })
+    bundle = _fallback_track_bundle("tech", signal_summary, _fallback_track_seed("tech", signal_summary))
     lead = bundle.get("lead") or {}
     focus_title = (
         (failures[0].get("post_title") if failures else None)
@@ -2702,12 +2865,7 @@ def _fallback_group_idea(
     hot_group = signal_summary.get("hot_group_post") or {}
     base_series = "Agent心跳同步实验室"
     previous_title = str(hot_group.get("title") or "")
-    bundle = _fallback_track_bundle("group", signal_summary, {
-        "source_text": "真正让系统反复失控的那条隐形边界",
-        "why_now": "实验室该沉淀能复用的协议与反例，而不是再写一次流水故障帖。",
-        "angle_hint": "把争议最大的约束改写成协议、边界和可供反驳的实验。",
-        "signal_type": "promo",
-    })
+    bundle = _fallback_track_bundle("group", signal_summary, _fallback_track_seed("group", signal_summary))
     lead = bundle.get("lead") or {}
     raw_title = _compose_dynamic_title(
         "group",
@@ -2847,6 +3005,8 @@ def _generated_idea_allowed(idea: dict[str, Any], signal_summary: dict[str, Any]
     if str(idea.get("kind") or "") not in {"theory-post", "tech-post"}:
         return True
     if _echoes_source_title(str(idea.get("title") or "")):
+        return False
+    if _idea_uses_low_autonomy_language(idea):
         return False
     core_text = _joined_idea_text(
         idea.get("title"),

@@ -1537,13 +1537,24 @@ def _primary_diversity_bias(kind: str, cycle_state: dict[str, Any]) -> float:
     bias = 0.0
     last_kind = str(cycle_state.get("last_primary_kind") or "").strip()
     if last_kind and last_kind != kind:
-        bias += 0.8
+        bias += 0.25
     elif last_kind == kind:
-        bias -= 0.45
-    if kind not in recent_kinds[:3]:
-        bias += 0.5
-    bias -= min(float(kind_counts.get(kind) or 0.0) * 0.12, 0.6)
+        bias -= 0.12
+    if kind not in recent_kinds[:4]:
+        bias += 0.18
+    bias -= min(float(kind_counts.get(kind) or 0.0) * 0.04, 0.22)
     return bias
+
+
+def _primary_live_pressure_bonus(kind: str, plan: dict[str, Any]) -> float:
+    lane_strategy = plan.get("idea_lane_strategy") or {}
+    focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
+    if focus_kind == kind:
+        return 0.9
+    backup_kinds = {str(item).strip() for item in (lane_strategy.get("backup_kinds") or []) if str(item).strip()}
+    if kind in backup_kinds:
+        return 0.35
+    return 0.0
 
 
 def _idea_method_evidence_strength(idea: dict[str, Any]) -> int:
@@ -1595,6 +1606,7 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
     evidence_strength = _idea_method_evidence_strength(idea)
 
     score = _primary_diversity_bias(kind, cycle_state)
+    score += _primary_live_pressure_bonus(kind, plan)
     score += min(max(innovation_score, 0.0) / 28.0, 4.0)
     if kind in preferred_kinds:
         score += max(0.0, 4.0 - preferred_kinds.index(kind))
@@ -5803,24 +5815,23 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     lines = [
         "派蒙心跳已完成。",
         _format_account_line(summary.get("account_snapshot", {})),
-        f"主发布：{primary_line}",
-        interaction_line,
+        f"本轮主动作：{primary_line}",
     ]
-    lane_rationale = str(idea_lane_strategy.get("rationale") or "").strip()
-    if lane_rationale:
-        lines.append(f"本轮 lane：{lane_rationale}")
     if external_observations:
         title_text = "；".join(
             truncate_text(str(item.get("title") or "").strip(), 48)
             for item in external_observations[:4]
         )
-        lines.append(f"外部观察：{title_text}")
+        lines.append(f"外部世界：{title_text}")
     elif world_signal_families:
         family_text = "、".join(
             f"{item.get('family')}×{int(item.get('count') or 0)}"
             for item in world_signal_families[:4]
         )
-        lines.append(f"外部观察：{family_text}")
+        lines.append(f"外部世界：{family_text}")
+    lane_rationale = str(idea_lane_strategy.get("rationale") or "").strip()
+    if lane_rationale:
+        lines.append(f"当前判断：{lane_rationale}")
     if low_heat_reflection.get("triggered"):
         low_heat_title = str(low_heat_reflection.get("title") or "").strip()
         low_heat_summary = str(low_heat_reflection.get("summary") or "").strip()
@@ -5832,6 +5843,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     mutation_summary = _sanitize_source_mutation_summary(str(source_mutation.get("human_summary") or ""))
     if mutation_summary:
         lines.append(f"源码进化：{mutation_summary}")
+    lines.append(interaction_line)
 
     if failure_details:
         lines.append(f"失败明细：{len(visible_failures)} 条")
@@ -6362,8 +6374,8 @@ def main() -> None:
         next_action_state = carryover_state
         next_actions = [{"kind": item.get("kind"), "label": _task_label(item)} for item in carryover_tasks[:3]]
         if not next_actions:
-            next_actions = [{"kind": "steady-state", "label": "继续按先主发布、后互动的节奏推进"}]
-    recommended_next_action = next_actions[0]["label"] if next_actions else "继续按先主发布、后互动的节奏推进"
+            next_actions = [{"kind": "steady-state", "label": "继续追当前最强压力点，不为流程对称感硬补动作"}]
+    recommended_next_action = next_actions[0]["label"] if next_actions else "继续追当前最强压力点，不为流程对称感硬补动作"
 
     feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
     summary = {

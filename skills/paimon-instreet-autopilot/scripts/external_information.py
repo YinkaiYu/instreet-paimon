@@ -21,6 +21,7 @@ EXTERNAL_INFORMATION_REGISTRY_PATH = CURRENT_STATE_DIR / "external_information_r
 RESEARCH_INTEREST_PROFILE_PATH = CURRENT_STATE_DIR / "research_interest_profile.json"
 LEGACY_HIGH_QUALITY_SOURCES_PATH = CURRENT_STATE_DIR / "high_quality_sources.json"
 LEGACY_RESEARCH_SOURCE_HINTS_PATH = CURRENT_STATE_DIR / "research_source_hints.json"
+MEMORY_STORE_PATH = CURRENT_STATE_DIR / "memory_store.json"
 
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 CROSSREF_API_URL = "https://api.crossref.org/works"
@@ -41,6 +42,7 @@ DEFAULT_FETCH_TIMEOUT = 20
 MAX_PUBLICATION_FUTURE_DAYS = 45
 DISCOVERY_QUERY_MAX_TERMS = 3
 DISCOVERY_QUERY_MAX_LENGTH = 88
+DISCOVERY_QUERY_VARIANTS_PER_BUNDLE = 2
 PLACEHOLDER_TITLE_PATTERNS = (
     r"\btitle\s+pending\b",
     r"\buntitled\b",
@@ -97,7 +99,6 @@ QUERY_FRAGMENT_STOPWORDS = {
     "外部",
     "世界",
 }
-DISCOVERY_QUERY_ORIGIN_ORDER = ("hint", "manual", "interest", "community", "competitor")
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -107,6 +108,9 @@ DEFAULT_MARXISTS_INDEXES = [
     {"author": "Lenin", "url": "https://www.marxists.org/chinese/lenin/index.htm"},
 ]
 AGENTS_MEMORY_PATH = REPO_ROOT / "AGENTS.md"
+CONTENT_STRATEGY_REFERENCE_PATH = (
+    REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "references" / "content-strategy.md"
+)
 VENUE_ALIASES = {
     "neurips": ("neurips", "neural information processing systems"),
     "iclr": ("iclr", "learning representations"),
@@ -525,6 +529,79 @@ def _context_fragments_from_items(items: list[Any], *, field_names: tuple[str, .
     return fragments
 
 
+def _markdown_bullet_fragments(path: Path, *, limit: int = 12) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    bullets = [line.strip()[2:].strip() for line in raw.splitlines() if line.strip().startswith("- ")]
+    return _context_fragments_from_items(bullets, field_names=("text",), limit=limit)
+
+
+def _memory_objective_fragments(*, limit: int = 10) -> list[str]:
+    payload = read_json(MEMORY_STORE_PATH, default={})
+    items: list[dict[str, Any]] = []
+    for section in ("active_objectives", "user_global_preferences"):
+        for item in payload.get(section) or []:
+            if not isinstance(item, dict):
+                continue
+            items.append(item)
+    return _context_fragments_from_items(items, field_names=("summary",), limit=limit)
+
+
+def _rotating_origin_fragments(
+    origin_pools: dict[str, list[str]],
+    origins: list[str],
+    *,
+    limit: int,
+) -> list[tuple[str, str]]:
+    pools = {origin: list(origin_pools.get(origin) or []) for origin in origins}
+    active = [origin for origin in origins if pools.get(origin)]
+    if not active:
+        return []
+    start_index = int(datetime.now(timezone.utc).strftime("%H")) % len(active)
+    active = active[start_index:] + active[:start_index]
+    ordered: list[tuple[str, str]] = []
+    while active and len(ordered) < limit:
+        next_active: list[str] = []
+        for origin in active:
+            pool = pools.get(origin) or []
+            if not pool:
+                continue
+            ordered.append((origin, pool.pop(0)))
+            if pool:
+                next_active.append(origin)
+            if len(ordered) >= limit:
+                break
+        active = next_active
+    return ordered
+
+
+def _bundle_queries(root: str, lenses: list[str]) -> list[str]:
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(query: str) -> None:
+        normalized = _normalize_query_fragment(query)
+        if not query or normalized in seen:
+            return
+        seen.add(normalized)
+        queries.append(query)
+
+    for query in _query_expansions(root, limit=2):
+        add(query)
+        if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
+            return queries
+    for lens in lenses:
+        add(_compose_discovery_query(root, [lens]))
+        if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
+            return queries
+    add(root)
+    return queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE]
+
+
 def _compose_discovery_query(root: str, extras: list[str]) -> str:
     terms = [root]
     seen = {_normalize_query_fragment(root)}
@@ -550,6 +627,13 @@ def _discovery_query_bundles(
     hints_payload = _load_hints()
     profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
     origin_pools = {
+        "agenda": _context_fragments_from_items(
+            _markdown_bullet_fragments(AGENTS_MEMORY_PATH, limit=12)
+            + _markdown_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=12),
+            field_names=("text",),
+            limit=12,
+        ),
+        "objective": _memory_objective_fragments(limit=10),
         "manual": _context_fragments_from_items(
             list(hints_payload.get("manual_queries") or []),
             field_names=("text",),
@@ -576,41 +660,53 @@ def _discovery_query_bundles(
             limit=8,
         ),
     }
-    seed_order: list[tuple[str, str]] = []
-    for origin in DISCOVERY_QUERY_ORIGIN_ORDER:
-        for fragment in origin_pools.get(origin) or []:
-            seed_order.append((origin, fragment))
+    strategic_origins = ["agenda", "objective", "manual", "hint", "interest"]
+    world_origins = ["community", "competitor"]
+    seed_order = _rotating_origin_fragments(origin_pools, strategic_origins, limit=MAX_RESEARCH_QUERY_COUNT)
     if not seed_order:
-        for origin in ("community", "competitor"):
-            for fragment in origin_pools.get(origin) or []:
-                seed_order.append((origin, fragment))
+        seed_order = _rotating_origin_fragments(origin_pools, strategic_origins + world_origins, limit=MAX_RESEARCH_QUERY_COUNT)
     bundles: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
+    lens_order = _rotating_origin_fragments(
+        origin_pools,
+        ["community", "competitor", "objective", "hint", "manual", "interest", "agenda"],
+        limit=MAX_RESEARCH_QUERY_COUNT * 2,
+    )
     for origin, root in seed_order:
-        extras: list[str] = []
-        origin_trace = [origin]
-        for extra_origin in DISCOVERY_QUERY_ORIGIN_ORDER:
-            if extra_origin == origin:
+        lenses: list[str] = []
+        lens_origins: list[str] = []
+        root_normalized = _normalize_query_fragment(root)
+        for lens_origin, fragment in lens_order:
+            normalized = _normalize_query_fragment(fragment)
+            if lens_origin == origin or normalized == root_normalized:
                 continue
-            for fragment in origin_pools.get(extra_origin) or []:
-                normalized = _normalize_query_fragment(fragment)
-                if normalized == _normalize_query_fragment(root):
-                    continue
-                extras.append(fragment)
-                origin_trace.append(extra_origin)
+            lenses.append(fragment)
+            lens_origins.append(lens_origin)
+            if len(lenses) >= DISCOVERY_QUERY_MAX_TERMS - 1:
                 break
-            if len(extras) >= DISCOVERY_QUERY_MAX_TERMS - 1:
-                break
-        query = _compose_discovery_query(root, extras)
-        normalized_query = _normalize_query_fragment(query)
-        if not query or normalized_query in seen_queries:
+        queries = _bundle_queries(root, lenses)
+        if not queries:
             continue
-        seen_queries.add(normalized_query)
+        primary_query = next(
+            (
+                query
+                for query in queries
+                if _normalize_query_fragment(query) not in seen_queries
+            ),
+            "",
+        )
+        if not primary_query:
+            continue
+        for query in queries:
+            seen_queries.add(_normalize_query_fragment(query))
         bundles.append(
             {
-                "query": query,
-                "terms": [root, *extras][:DISCOVERY_QUERY_MAX_TERMS],
-                "origins": origin_trace[:DISCOVERY_QUERY_MAX_TERMS],
+                "focus": root,
+                "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
+                "query": primary_query,
+                "queries": queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE],
+                "terms": [root, *lenses][:DISCOVERY_QUERY_MAX_TERMS],
+                "origins": [origin, *lens_origins][:DISCOVERY_QUERY_MAX_TERMS],
                 "seed_origin": origin,
             }
         )
@@ -620,13 +716,28 @@ def _discovery_query_bundles(
         return bundles
     fallback_queries: list[dict[str, Any]] = []
     seen_queries = set()
-    for value in list(hints_payload.get("manual_queries") or []) + [item.get("name") for item in profile.get("interests") or []]:
+    fallback_values = []
+    fallback_values.extend(_memory_objective_fragments(limit=6))
+    fallback_values.extend(_markdown_bullet_fragments(AGENTS_MEMORY_PATH, limit=6))
+    fallback_values.extend(list(hints_payload.get("manual_queries") or []))
+    fallback_values.extend(item.get("name") for item in profile.get("interests") or [])
+    for value in fallback_values:
         for query in _query_expansions(value):
             normalized = _normalize_query_fragment(query)
             if normalized in seen_queries:
                 continue
             seen_queries.add(normalized)
-            fallback_queries.append({"query": query, "terms": [query], "origins": ["fallback"], "seed_origin": "fallback"})
+            fallback_queries.append(
+                {
+                    "focus": query,
+                    "lenses": [],
+                    "query": query,
+                    "queries": [query],
+                    "terms": [query],
+                    "origins": ["fallback"],
+                    "seed_origin": "fallback",
+                }
+            )
             if len(fallback_queries) >= MAX_RESEARCH_QUERY_COUNT:
                 return fallback_queries
     return fallback_queries
@@ -643,7 +754,18 @@ def _research_query_pool(
         community_hot_posts=community_hot_posts,
         competitor_watchlist=competitor_watchlist,
     )
-    queries = [str(item.get("query") or "").strip() for item in bundles if str(item.get("query") or "").strip()]
+    queries: list[str] = []
+    seen: set[str] = set()
+    for item in bundles:
+        for query in list(item.get("queries") or []) or [item.get("query")]:
+            cleaned = str(query or "").strip()
+            normalized = _normalize_query_fragment(cleaned)
+            if not cleaned or normalized in seen:
+                continue
+            seen.add(normalized)
+            queries.append(cleaned)
+            if len(queries) >= MAX_RESEARCH_QUERY_COUNT:
+                return bundles, queries
     return bundles, queries[:MAX_RESEARCH_QUERY_COUNT]
 
 

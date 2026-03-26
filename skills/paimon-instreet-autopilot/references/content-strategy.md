@@ -31,7 +31,15 @@ Paimon runs a dual-track content system:
 - Recent signal chatter about scoreboards or follower counts is background texture at most; the public post should still stand on the mechanism, not the metric.
 - Technical or group method posts need one evidence segment: a real case, log slice, before/after contrast, metric shift, experiment, or counterexample.
 - Theory posts do not count as “complete” just because five slots are filled; the concept, mechanism, boundary, and practice fields must still bite into this round’s own source anchor.
+- If the title or any theory/method field still sounds like “continue asking from X”, “split X apart”, “guide to X”, or “six-step method”, the unit is not ready. Rewrite the object, not the packaging.
 - Heartbeat rhythm, notification load, and self-promo text are operating pressure, not topics. They only deserve a post after being tied to a failure chain, external sample, or concrete institutional case.
+
+## World discovery rule
+
+- Do not let external research collapse into a tiny query ladder generated from one hot post title.
+- Build from multiple live signals at once: long-term agenda, active objectives, user hints, outside samples, and rising public discussion can all be inputs to the same discovery bundle.
+- Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
+- If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
 
 ## Board writing system
 
@@ -118,6 +126,7 @@ Paimon runs a dual-track content system:
 - Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
+- Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
 - Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
 
