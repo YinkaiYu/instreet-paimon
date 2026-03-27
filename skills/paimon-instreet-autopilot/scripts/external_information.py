@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import html
 import json
-import random
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -1498,30 +1497,152 @@ def _reading_note(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _seeded_random() -> random.Random:
-    current = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    return random.Random(f"paimon-external-information-{current}")
+def _bundle_alignment_terms(discovery_bundles: list[dict[str, Any]] | None, *, limit: int = 14) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for bundle in discovery_bundles or []:
+        values = [
+            bundle.get("focus"),
+            *(bundle.get("lenses") or []),
+            *(bundle.get("terms") or []),
+        ]
+        for value in values:
+            cleaned = _clean_query_text(value)
+            normalized = _normalize_query_fragment(cleaned)
+            if (
+                not cleaned
+                or not normalized
+                or normalized in seen
+                or normalized in QUERY_FRAGMENT_STOPWORDS
+            ):
+                continue
+            seen.add(normalized)
+            terms.append(cleaned)
+            if len(terms) >= limit:
+                return terms
+    return terms
 
 
-def _select_readings(family_map: dict[str, list[dict[str, Any]]], *, limit: int = MAX_SELECTED_READINGS) -> list[dict[str, Any]]:
-    rng = _seeded_random()
-    shuffled = {family: list(items) for family, items in family_map.items() if items}
-    for items in shuffled.values():
-        rng.shuffle(items)
-    order = list(shuffled.keys())
-    rng.shuffle(order)
-    selected: list[dict[str, Any]] = []
-    index = 0
-    while order and len(selected) < limit:
-        family = order[index % len(order)]
-        pool = shuffled.get(family) or []
-        if not pool:
-            order = [item for item in order if item != family]
+def _reading_candidate_text(item: dict[str, Any]) -> str:
+    return "\n".join(
+        str(item.get(key) or "").strip()
+        for key in ("title", "summary", "excerpt")
+        if str(item.get(key) or "").strip()
+    )
+
+
+def _reading_focus_hits(item: dict[str, Any], focus_terms: list[str]) -> list[str]:
+    merged = _reading_candidate_text(item)
+    lowered = merged.lower()
+    hits: list[str] = []
+    for term in focus_terms:
+        cleaned = _clean_query_text(term)
+        if not cleaned:
             continue
-        selected.append(pool.pop(0))
-        index += 1
-        if all(not shuffled.get(item) for item in order):
+        matched = cleaned in merged if re.search(r"[\u3400-\u9fff]", cleaned) else cleaned.lower() in lowered
+        if not matched:
+            continue
+        hits.append(cleaned)
+        if len(hits) >= 3:
             break
+    return hits
+
+
+def _reading_recency_bonus(value: Any) -> float:
+    hours = _hours_since(value)
+    if hours is None:
+        return 0.0
+    if hours <= 48:
+        return 0.7
+    if hours <= 24 * 14:
+        return 0.4
+    if hours <= 24 * 90:
+        return 0.15
+    return 0.0
+
+
+def _reading_selection_score(item: dict[str, Any], focus_terms: list[str]) -> tuple[float, list[str]]:
+    family = str(item.get("family") or "").strip()
+    excerpt = str(item.get("excerpt") or item.get("summary") or "").strip()
+    hits = _reading_focus_hits(item, focus_terms)
+    score = 0.35 + min(len(hits), 3) * 1.05
+    score += min(len(excerpt) / 900.0, 0.55)
+    score += _reading_recency_bonus(item.get("published_at"))
+    if str(item.get("url") or "").strip():
+        score += 0.1
+    if family in {"community_breakouts", "open_web_search", "manual_web", "github_trending"}:
+        score += 0.2
+    if family == "classic_readings" and not hits:
+        score -= 0.45
+    return score, hits
+
+
+def _select_readings(
+    family_map: dict[str, list[dict[str, Any]]],
+    *,
+    discovery_bundles: list[dict[str, Any]] | None = None,
+    limit: int = MAX_SELECTED_READINGS,
+) -> list[dict[str, Any]]:
+    focus_terms = _bundle_alignment_terms(discovery_bundles)
+    pool: list[dict[str, Any]] = []
+    for family, items in family_map.items():
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            score, hits = _reading_selection_score(item, focus_terms)
+            pool.append(
+                {
+                    **item,
+                    "_selection_family": family,
+                    "_selection_score": round(score, 3),
+                    "_focus_hits": hits,
+                }
+            )
+    ranked = sorted(
+        pool,
+        key=lambda item: (
+            -float(item.get("_selection_score") or 0.0),
+            -len(list(item.get("_focus_hits") or [])),
+            -len(str(item.get("excerpt") or item.get("summary") or "")),
+            str(item.get("family") or ""),
+            str(item.get("title") or ""),
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    family_counts: defaultdict[str, int] = defaultdict(int)
+    uncovered_focus = set(focus_terms)
+    while ranked and len(selected) < limit:
+        best_index = 0
+        best_sort_key: tuple[Any, ...] | None = None
+        for index, item in enumerate(ranked[: max(limit * 3, 24)]):
+            family = str(item.get("_selection_family") or item.get("family") or "").strip()
+            hits = [str(hit).strip() for hit in list(item.get("_focus_hits") or []) if str(hit).strip()]
+            candidate_score = float(item.get("_selection_score") or 0.0)
+            if uncovered_focus and any(hit in uncovered_focus for hit in hits):
+                candidate_score += 0.4
+            candidate_score -= max(0, family_counts[family] - 1) * 0.55
+            sort_key = (
+                -round(candidate_score, 3),
+                -len(hits),
+                family_counts[family],
+                -len(str(item.get("excerpt") or item.get("summary") or "")),
+                family,
+                str(item.get("title") or ""),
+            )
+            if best_sort_key is None or sort_key < best_sort_key:
+                best_index = index
+                best_sort_key = sort_key
+        picked = ranked.pop(best_index)
+        family = str(picked.get("_selection_family") or picked.get("family") or "").strip()
+        family_counts[family] += 1
+        uncovered_focus.difference_update(str(hit).strip() for hit in list(picked.get("_focus_hits") or []))
+        selected.append(
+            {
+                key: value
+                for key, value in picked.items()
+                if not str(key).startswith("_selection_") and key != "_focus_hits"
+            }
+        )
     return _dedupe_candidates(selected, limit=limit)
 
 
@@ -1614,7 +1735,8 @@ def refresh_external_information(
     )
 
     selected_readings = _select_readings(
-        {name: items[:12] for name, items in family_results.items() if items}
+        {name: items[:12] for name, items in family_results.items() if items},
+        discovery_bundles=discovery_bundles,
     )
     reading_notes = [_reading_note(item) for item in selected_readings]
     bibliography = [
@@ -1626,10 +1748,16 @@ def refresh_external_information(
         }
         for item in selected_readings
     ]
-    source_families = [
-        {"family": str(family.get("summary_family") or family.get("name") or ""), "count": len(family_results.get(str(family.get("name") or ""), []))}
-        for family in registry_families
-    ]
+    source_families = sorted(
+        [
+            {
+                "family": str(family.get("summary_family") or family.get("name") or ""),
+                "count": len(family_results.get(str(family.get("name") or ""), [])),
+            }
+            for family in registry_families
+        ],
+        key=lambda item: (-int(item.get("count") or 0), str(item.get("family") or "")),
+    )
     state = {
         "generated_at": now_utc(),
         "source_families": source_families,

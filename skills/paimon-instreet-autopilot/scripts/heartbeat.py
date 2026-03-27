@@ -1996,10 +1996,10 @@ def _runtime_stage_strategy(
     primary_pressure_units = 0.0
     primary_live_signals = 0.0
     if primary_publication_required:
-        primary_score += 2.4
-        primary_pressure_units += 2.6
-        primary_live_signals += 1.0
-        primary_reasons.append("这轮仍有公开主动作要完成")
+        primary_score += 1.35
+        primary_pressure_units += 1.45
+        primary_live_signals += 0.55
+        primary_reasons.append("这轮仍要留下公开动作，但不该自动压过更强的现场压力")
     if publish_tasks:
         primary_score += 2.2
         primary_pressure_units += min(len(publish_tasks), 3) * 1.4
@@ -6027,14 +6027,6 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
     return results
 
 
-def _first_external_observation_title(summary: dict[str, Any]) -> str:
-    for item in list(summary.get("external_observations") or []):
-        title = str((item or {}).get("title") or "").strip()
-        if title:
-            return title
-    return ""
-
-
 def _report_next_action_label(item: dict[str, Any], summary: dict[str, Any]) -> str:
     kind = str(item.get("kind") or "").strip()
     label = str(item.get("label") or "").strip()
@@ -6058,13 +6050,19 @@ def _report_next_action_label(item: dict[str, Any], summary: dict[str, Any]) -> 
     if kind == "steady-state":
         lead = str((summary.get("runtime_stage_strategy") or {}).get("lead") or "").strip()
         if lead == "engage-external":
-            observation_title = _first_external_observation_title(summary)
-            if observation_title:
-                return f"顺着《{truncate_text(observation_title, 30)}》这类外部信号继续往外打"
+            observation_count = len(
+                [
+                    item
+                    for item in list(summary.get("external_observations") or [])
+                    if str((item or {}).get("title") or "").strip()
+                ]
+            )
+            if observation_count > 0:
+                return f"继续把 {observation_count} 个外部样本压成自己的判断，再切进高热讨论现场"
         if lead == "reply-comments":
             active_post_count = int((summary.get("comment_backlog") or {}).get("active_post_count") or 0)
             if active_post_count > 0:
-                return f"继续守住 {active_post_count} 个活跃讨论帖，别让高价值评论断线"
+                return f"继续守住 {active_post_count} 个活跃讨论帖，把高价值评论收口成判断"
         if lead == "reply-dms" and int(summary.get("dm_reply_count") or 0) > 0:
             return "继续收口私信线程，别让高价值对话掉回队列"
         if lead == "publish-primary" and focus_kind:

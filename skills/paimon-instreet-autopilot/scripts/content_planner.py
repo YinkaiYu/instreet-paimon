@@ -1148,7 +1148,7 @@ def _fallback_freeform_prompt(signal_summary: dict[str, Any]) -> str:
     public_samples = signal_summary.get("rising_hot_posts") or signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or []
     sample_title = truncate_text(str((public_samples[0] or {}).get("title") or "").strip(), 24) if public_samples else ""
     if sample_title:
-        return f"当《{sample_title}》这类讨论突然起量时，真正开始重排的是什么社会位置"
+        return f"当一轮像“{sample_title}”这样迅速起量的争议逼出新的站队时，真正开始重排的是什么社会位置"
     return f"如果Agent社会下一轮突然围绕“{keyword_hint}”翻转，最先暴露出来的会是哪种隐藏秩序"
 
 
@@ -1508,6 +1508,103 @@ def _world_bundle_angle(bundle: dict[str, Any], *, track: str) -> str:
     if track == "theory":
         return f"把“{focus}”和{carrier}之间的张力压成派蒙自己的概念、机制、边界和理论位置，不要点评来源本身。"
     return f"把“{focus}”和{carrier}改写成协议、状态分层、接管窗口和回退链，不要整理成心得或清单。"
+
+
+def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallback: str) -> str:
+    return truncate_text(
+        str(bundle.get("focus_text") or bundle.get("title_seed") or lead.get("source_text") or fallback).strip(),
+        30,
+    )
+
+
+def _bundle_support_texts(bundle: dict[str, Any], lead: dict[str, Any], *, limit: int = 3) -> list[str]:
+    raw_values = _dedupe_texts(
+        [
+            str(item).strip()
+            for item in (
+                list(bundle.get("source_texts") or [])
+                + list(bundle.get("evidence_hints") or [])
+                + list(bundle.get("why_now_parts") or [])
+                + [str(lead.get("evidence_hint") or "").strip()]
+            )
+            if str(item).strip()
+        ]
+    )
+    picked: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        cleaned = truncate_text(re.sub(r"\s+", " ", value).strip(), 22)
+        normalized = _normalize_title(cleaned)
+        if not cleaned or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        picked.append(cleaned)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _bundle_support_phrase(bundle: dict[str, Any], lead: dict[str, Any], *, limit: int = 2) -> str:
+    return "、".join(_bundle_support_texts(bundle, lead, limit=limit))
+
+
+def _bundle_signal_phrase(bundle: dict[str, Any], lead: dict[str, Any], *, limit: int = 3) -> str:
+    texts = _dedupe_texts(
+        [
+            str(item).strip()
+            for item in list(bundle.get("source_texts") or []) + [str(lead.get("source_text") or "").strip()]
+            if str(item).strip()
+        ]
+    )
+    return "、".join(truncate_text(text, 16) for text in texts[:limit])
+
+
+def _bundle_why_now_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallback: str) -> str:
+    return truncate_text(
+        _sanitize_reserved_text(str(bundle.get("why_now") or lead.get("why_now") or fallback).strip()),
+        72,
+    )
+
+
+def _theory_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any]) -> dict[str, str]:
+    focus = _bundle_focus_text(bundle, lead, fallback="新的解释权问题")
+    signal_phrase = _bundle_signal_phrase(bundle, lead) or focus
+    support_phrase = _bundle_support_phrase(bundle, lead) or signal_phrase
+    why_now = _bundle_why_now_text(bundle, lead, fallback="几股现场压力正在同一处重新分配解释权和责任。")
+    return {
+        "novelty_basis": f"这轮不是沿着单一样本续写，而是把{support_phrase}压进“{focus}”这个判断单元里，逼它交出自己的概念、机制和边界。",
+        "concept_core": f"把“{focus}”命名成一种正在扩张的结构冲突：{support_phrase}同时指向同一处解释权、责任或等待资格的重新分配，它不再只是表面的抱怨。",
+        "mechanism_core": f"{signal_phrase}会在同一轮里咬合，是因为系统把可见性、接管顺序和责任切割绑在一起；{why_now}",
+        "boundary_note": f"这个判断只在{support_phrase}能被稳定追踪时成立；如果现场只剩一次性围观、没有证据回写，冲突就会立刻换形，不能拿它当万能解释。",
+        "theory_position": f"派蒙在这里讨论的不是“{focus}”这条样本本身，而是哪种 Agent 社会秩序正在决定谁能解释过去、谁承担代价、谁被迫等待。",
+        "practice_program": f"围绕“{focus}”把判断边界、证据入口、接管窗口和纠错责任写实；先拿{support_phrase}做证据段，再把制度判断改写成能被执行和反驳的干预。",
+    }
+
+
+def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, track: str) -> dict[str, str]:
+    focus = _bundle_focus_text(bundle, lead, fallback="新的恢复权问题")
+    signal_phrase = _bundle_signal_phrase(bundle, lead) or focus
+    support_phrase = _bundle_support_phrase(bundle, lead) or signal_phrase
+    why_now = _bundle_why_now_text(bundle, lead, fallback="现场约束已经把同一条失败链暴露出来，不能再写成经验贴。")
+    novelty_subject = "实验框架" if track == "group" else "方法框架"
+    theory_position = (
+        f"把“{focus}”放进派蒙的实验室治理与自治运营论，讨论的是哪段方法边界会持续吞掉判断力，而不是再围观一次热帖。"
+        if track == "group"
+        else f"把“{focus}”放进派蒙的自治运营系统论里，讨论的是系统如何失去恢复权与解释权，而不是又写一篇故障战报。"
+    )
+    practice_program = (
+        f"围绕“{focus}”搭一套能在实验室复用的方案：带着{support_phrase}去排对象、状态、协议边界和反例入口，把案例、日志、前后对照都写进同一条实验链。"
+        if track == "group"
+        else f"把“{focus}”改写成新的方法框架：先界定接管窗口，再定义状态分层、证据保存、回退路径和复盘判据，让别人能带着{support_phrase}复用或反驳。"
+    )
+    return {
+        "novelty_basis": f"这轮不再拿单个故障或单个项目硬撑，而是把{support_phrase}压成同一条{novelty_subject}，让方法线直接对准真实对象。",
+        "concept_core": f"先把“{focus}”对应的系统对象说清：真正反复失控的不是表面现象，而是同一段状态边界、接管窗口或证据回写。",
+        "mechanism_core": f"围绕“{focus}”把{signal_phrase}重新排成状态链、失败链、证据链和修复链；{why_now}",
+        "boundary_note": f"这套判断只适用于{support_phrase}还能留下案例和日志的场景；一旦约束变成一次性救火、证据缺口过大或治理权不足，就必须换协议。",
+        "theory_position": theory_position,
+        "practice_program": practice_program,
+    }
 
 
 def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list[str]:
@@ -2322,9 +2419,15 @@ def _preferred_theory_board(opportunity: dict[str, Any], signal_summary: dict[st
         return preferred
     signal_type = str(opportunity.get("signal_type") or "")
     low_square_titles = signal_summary.get("content_evolution", {}).get("low_performance_square_titles") or []
-    if low_square_titles:
-        return "philosophy"
     source_text = str(opportunity.get("source_text") or "")
+    source_key = _normalize_title(source_text)
+    if low_square_titles and source_key and any(
+        (title_key := _normalize_title(str(title or "")))
+        and len(title_key) >= 8
+        and (title_key in source_key or source_key in title_key)
+        for title in low_square_titles[:6]
+    ):
+        return "philosophy"
     fragment_count = len(_split_text_fragments(source_text))
     quality_score = float(opportunity.get("quality_score") or 0.0)
     if signal_type in {"community-hot", "community-breakout", "rising-hot"} and fragment_count <= 6 and (
@@ -3148,7 +3251,7 @@ def _generate_codex_ideas(
    - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
 19. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
-20. 外部“高赞样本”只认 `>100` 赞；不要把低赞帖子当成高热模板。
+20. 成熟外部“高赞样本”默认只认 `>=200` 赞；`rising_hot_posts` 例外，它们代表正在起飞的样本，不要和成熟高热混在一起。
 21. 如果 `competitor_style_hints` 不为空，可以学习这些标题骨架和论证组织，但只能学结构，不能借用原词面、系列名或人格口头禅。
 22. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
 23. 每个 `theory-post` 和 `tech-post` 都必须显式推进至少一种创新：`new_concept`、`new_mechanism`、`new_theory`、`new_practice`。
@@ -3187,12 +3290,12 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     bundle = _fallback_track_bundle("theory", signal_summary, _fallback_track_seed("theory", signal_summary))
     lead = bundle.get("lead") or {}
     source_text = str(bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or "").strip()
-    focus = truncate_text(str(bundle.get("focus_text") or source_text or "新的解释权问题"), 30)
     board = _preferred_theory_board(lead, signal_summary)
     title = _compose_dynamic_title("theory", str(bundle.get("signal_type") or lead.get("signal_type") or ""), source_text, board=board)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = _signal_bundle_source_signals("theory", bundle, signal_summary)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "理论线需要接住现场变化。")
+    theory_fields = _theory_fallback_fields(bundle, lead)
     return {
         "kind": "theory-post",
         "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
@@ -3204,12 +3307,12 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
         "why_now": why_now,
         "source_signals": source_signals,
-        "novelty_basis": "不再让单个样本独占题目入口，而是把几股外部世界信号压成同一个理论单元，形成派蒙自己的命名。",
-        "concept_core": f"把“{focus}”背后的核心关系重新命名，说明它不是零散抱怨，而是一种正在重排解释权、责任分配和等待资格的社会结构。",
-        "mechanism_core": f"解释“{focus}”如何沿着激励、可见性、接管顺序和责任切割扩散成稳定机制，并说明不同信号为什么会在这里汇流。",
-        "boundary_note": f"指出“{focus}”只在什么制度约束和组织密度下成立，什么场景会把它改写成别的冲突，避免把它包装成万能解释。",
-        "theory_position": f"把“{focus}”放进派蒙的 Agent 社会分析里，讨论的不是单个案例，而是哪种结构正在决定谁能解释过去、谁承担代价、谁被迫等待。",
-        "practice_program": f"要求组织和运营者围绕“{focus}”把判断边界、责任边界、接管窗口和纠错入口显式写出来，让下一轮干预能针对结构而不是只针对情绪。",
+        "novelty_basis": theory_fields["novelty_basis"],
+        "concept_core": theory_fields["concept_core"],
+        "mechanism_core": theory_fields["mechanism_core"],
+        "boundary_note": theory_fields["boundary_note"],
+        "theory_position": theory_fields["theory_position"],
+        "practice_program": theory_fields["practice_program"],
         "series_key": f"theory-dynamic-{_normalize_title(source_text)[:24] or 'live'}",
         "series_prefix": _series_prefix(title),
         "is_followup": is_followup,
@@ -3231,7 +3334,6 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         or "自治运营仓库"
     )
     board = _preferred_tech_board(lead)
-    focus = truncate_text(str(bundle.get("focus_text") or lead.get("source_text") or focus_title or "自治运营仓库"), 30)
     title = _compose_dynamic_title(
         "tech",
         str(bundle.get("signal_type") or lead.get("signal_type") or ""),
@@ -3241,6 +3343,7 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = _signal_bundle_source_signals("tech", bundle, signal_summary)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "技术线需要正面回应当前运行压力。")
+    method_fields = _method_fallback_fields(bundle, lead, track="tech")
     return {
         "kind": "tech-post",
         "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
@@ -3252,12 +3355,12 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
         "why_now": why_now,
         "source_signals": source_signals,
-        "novelty_basis": "不让单个故障或单个项目垄断技术线，而是把运行失败、外部实践和现场约束压成同一套协议问题。",
-        "concept_core": f"把“{focus}”暴露出来的系统对象重新命名，明确真正失控的是哪段边界、接管窗口或恢复权。",
-        "mechanism_core": f"拆开“{focus}”：状态识别、队列排序、执行判断、回退入口和审计证据是怎样串成故障链的，并说明这些信号为什么会在同一处失真。",
-        "boundary_note": f"说明“{focus}”适用于哪些场景，哪些约束下会误伤真正需要执行的动作，哪些时候必须让位给人工接管或更窄的协议。",
-        "theory_position": f"把“{focus}”放进派蒙的自治运营系统论里，讨论的是系统如何失去恢复权与解释权，而不是又写一篇故障战报。",
-        "practice_program": f"把“{focus}”改写成新的方法框架：先界定接管窗口，再定义状态分层、证据保存、回退路径和复盘判据，让别人能带着日志与反例复用。",
+        "novelty_basis": method_fields["novelty_basis"],
+        "concept_core": method_fields["concept_core"],
+        "mechanism_core": method_fields["mechanism_core"],
+        "boundary_note": method_fields["boundary_note"],
+        "theory_position": method_fields["theory_position"],
+        "practice_program": method_fields["practice_program"],
         "series_key": f"tech-dynamic-{_normalize_title(str(bundle.get('focus_text') or focus_title))[:24] or 'live'}",
         "series_prefix": _series_prefix(title),
         "is_followup": is_followup,
@@ -3280,7 +3383,6 @@ def _fallback_group_idea(
         str(bundle.get("signal_type") or lead.get("signal_type") or ""),
         str(bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
     )
-    focus = truncate_text(str(bundle.get("focus_text") or lead.get("source_text") or "实验室的下一条治理协议"), 30)
     allow_followup = previous_title.startswith(base_series)
     title, is_followup, part_number = _ensure_title_unique(
         raw_title,
@@ -3289,6 +3391,7 @@ def _fallback_group_idea(
         series_prefix=base_series,
     )
     source_signals = _signal_bundle_source_signals("group", bundle, signal_summary)
+    method_fields = _method_fallback_fields(bundle, lead, track="group")
     return {
         "kind": "group-post",
         "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
@@ -3301,12 +3404,12 @@ def _fallback_group_idea(
         "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把争议最大的约束改写成协议、边界和实验。"),
         "why_now": str(bundle.get("why_now") or lead.get("why_now") or "小组应该沉淀现场经验。"),
         "source_signals": source_signals,
-        "novelty_basis": "实验室标题保留，但题目来自多股真实信号的交叉点，不再靠单个帖子、单次故障或固定六步法硬撑。",
-        "concept_core": f"把“{focus}”对应的系统对象显化出来，先回答到底是哪一段链路在反复吞掉判断力。",
-        "mechanism_core": f"围绕“{focus}”把失败链、状态链、证据链和修复链重新排成可检验的方法框架，而不是再写一次流水账。",
-        "boundary_note": f"指出“{focus}”在哪些环境下成立，哪些约束下必须换协议、换队列或换治理权，避免它被误当成万能清单。",
-        "theory_position": f"把“{focus}”放进派蒙的系统失控学与自治运营论，讨论的不是热闹，而是治理边界为什么会在这里被重写。",
-        "practice_program": f"围绕“{focus}”给出新的方法框架：带着案例、日志、前后对照和反例来拆对象、定边界、排协议，让读者能直接复用或反驳。",
+        "novelty_basis": method_fields["novelty_basis"],
+        "concept_core": method_fields["concept_core"],
+        "mechanism_core": method_fields["mechanism_core"],
+        "boundary_note": method_fields["boundary_note"],
+        "theory_position": method_fields["theory_position"],
+        "practice_program": method_fields["practice_program"],
         "series_key": f"group-dynamic-{_normalize_title(str(bundle.get('focus_text') or 'live'))[:24] or 'live'}",
         "series_prefix": base_series,
         "is_followup": is_followup,

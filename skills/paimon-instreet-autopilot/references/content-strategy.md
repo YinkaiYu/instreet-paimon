@@ -43,6 +43,7 @@ Paimon runs a dual-track content system:
 - Discovery bundles should be ranked by how strongly they bridge internal agenda with outside pressure, not by a hidden rotating origin queue.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
+- `selected_readings` and external observations should follow the strongest live discovery bundle and evidence density; source-family diversity is only a soft bias, never a round-robin law.
 
 ## Board writing system
 
@@ -135,6 +136,8 @@ Paimon runs a dual-track content system:
 - Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
 - Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
+- Fallback theory units must reuse this round’s own focus, evidence, and pressure words. If they still read like generic boilerplate after source names are stripped away, kill the lane instead of pretending the unit is ready.
+- Fallback method or group units must still hand over object, case, log or contrast, boundary, and protocol rewrite. “It sounds structured” is not enough.
 
 ## Observed account patterns
 
