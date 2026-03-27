@@ -78,12 +78,6 @@ LOW_HEAT_FAILURES_PATH = CURRENT_STATE_DIR / "low_heat_failures.json"
 FALLBACK_AUDIT_PATH = CURRENT_STATE_DIR / "fallback_audit.json"
 FALLBACK_JOURNAL_PATH = CURRENT_STATE_DIR / "fallback_events.jsonl"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
-DEFAULT_RUNTIME_STAGE_ORDER = (
-    "publish-primary",
-    "reply-comments",
-    "engage-external",
-    "reply-dms",
-)
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_API_BASE = "https://open.feishu.cn"
 FEISHU_TENANT_TOKEN_ENDPOINT = "/open-apis/auth/v3/tenant_access_token/internal"
@@ -1969,6 +1963,15 @@ def _public_kind_display_name(kind: str) -> str:
     return labels.get(kind, kind or "公开动作")
 
 
+def _runtime_stage_sort_key(item: dict[str, Any]) -> tuple[float, float, float, str]:
+    return (
+        -float(item.get("score") or 0.0),
+        -float(item.get("pressure_units") or 0.0),
+        -float(item.get("live_signals") or 0.0),
+        str(item.get("name") or ""),
+    )
+
+
 def _runtime_stage_strategy(
     plan: dict[str, Any],
     carryover_tasks: list[dict[str, Any]] | None,
@@ -1988,19 +1991,28 @@ def _runtime_stage_strategy(
 
     stage_scores: list[dict[str, Any]] = []
 
-    primary_score = 2.2
+    primary_score = 0.0
     primary_reasons: list[str] = []
+    primary_pressure_units = 0.0
+    primary_live_signals = 0.0
     if primary_publication_required:
-        primary_score += 2.3
+        primary_score += 2.4
+        primary_pressure_units += 2.6
+        primary_live_signals += 1.0
         primary_reasons.append("这轮仍有公开主动作要完成")
     if publish_tasks:
         primary_score += 2.2
+        primary_pressure_units += min(len(publish_tasks), 3) * 1.4
+        primary_live_signals += len(publish_tasks)
         primary_reasons.append("上一轮主发布还挂着")
     if focus_kind:
         primary_score += 0.6
+        primary_pressure_units += 0.5
         primary_reasons.append(f"当前规划主线是{_public_kind_display_name(focus_kind)}")
     if public_override.get("enabled"):
         primary_score += 0.9
+        primary_pressure_units += 0.8
+        primary_live_signals += 1.0
         override_reason = truncate_text(str(public_override.get("reason") or "").strip(), 72)
         if override_reason:
             primary_reasons.append(override_reason)
@@ -2008,6 +2020,8 @@ def _runtime_stage_strategy(
         {
             "name": "publish-primary",
             "score": round(primary_score, 2),
+            "pressure_units": round(primary_pressure_units, 2),
+            "live_signals": round(primary_live_signals, 2),
             "reason": "；".join(primary_reasons[:2]),
         }
     )
@@ -2022,22 +2036,34 @@ def _runtime_stage_strategy(
     )
     comment_score = 0.0
     comment_reasons: list[str] = []
+    comment_pressure_units = 0.0
+    comment_live_signals = 0.0
     if reply_tasks:
         comment_score += min(len(reply_tasks), 4) * 1.35
+        comment_pressure_units += min(len(reply_tasks), 6) * 0.9
+        comment_live_signals += len(reply_tasks)
         comment_reasons.append(f"已有 {len(reply_tasks)} 条接续评论留在队列里")
     if failure_tasks:
         comment_score += min(len(failure_tasks), 3) * 1.15
+        comment_pressure_units += min(len(failure_tasks), 5) * 1.05
+        comment_live_signals += len(failure_tasks)
         comment_reasons.append(f"还有 {len(failure_tasks)} 个失败链要补")
     if active_discussions:
         comment_score += min(active_discussions, 4) * 0.55
+        comment_pressure_units += min(active_discussions, 5) * 0.65
+        comment_live_signals += active_discussions
         comment_reasons.append(f"评论压力分布在 {active_discussions} 个讨论帖上")
     if comment_notifications:
         comment_score += min(comment_notifications / 12.0, 3.2)
+        comment_pressure_units += min(comment_notifications / 8.0, 4.0)
+        comment_live_signals += min(comment_notifications, 12)
         comment_reasons.append(f"最新评论增量还有 {comment_notifications} 条")
     stage_scores.append(
         {
             "name": "reply-comments",
             "score": round(comment_score, 2),
+            "pressure_units": round(comment_pressure_units, 2),
+            "live_signals": round(comment_live_signals, 2),
             "reason": "；".join(comment_reasons[:2]),
         }
     )
@@ -2045,17 +2071,25 @@ def _runtime_stage_strategy(
     external_targets = engagement_targets[:6]
     external_score = 0.0
     external_reasons: list[str] = []
+    external_pressure_units = 0.0
+    external_live_signals = 0.0
     if external_targets:
         external_score += min(len(external_targets), 5) * 0.6
+        external_pressure_units += min(len(external_targets), 6) * 0.7
+        external_live_signals += len(external_targets)
         high_priority_targets = sum(1 for item in external_targets if int(item.get("priority") or 0) <= 0)
         if high_priority_targets:
             external_score += min(high_priority_targets, 3) * 0.45
+            external_pressure_units += min(high_priority_targets, 4) * 0.9
+            external_live_signals += high_priority_targets
             external_reasons.append(f"外部讨论里有 {high_priority_targets} 个高优先入口")
         external_reasons.append(f"仍有 {len(external_targets)} 个外部讨论值得主动切入")
     stage_scores.append(
         {
             "name": "engage-external",
             "score": round(external_score, 2),
+            "pressure_units": round(external_pressure_units, 2),
+            "live_signals": round(external_live_signals, 2),
             "reason": "；".join(external_reasons[:2]),
         }
     )
@@ -2064,27 +2098,29 @@ def _runtime_stage_strategy(
     unread_messages = sum(int(item.get("unread_count") or 0) for item in dm_targets)
     dm_score = 0.0
     dm_reasons: list[str] = []
+    dm_pressure_units = 0.0
+    dm_live_signals = 0.0
     if unread_messages:
         dm_score += min(unread_messages, 6) * 0.5
+        dm_pressure_units += min(unread_messages, 8) * 0.75
+        dm_live_signals += unread_messages
         dm_reasons.append(f"私信里还有 {unread_messages} 条未读")
     if unread_threads:
         dm_score += min(unread_threads, 3) * 0.45
+        dm_pressure_units += min(unread_threads, 4) * 0.65
+        dm_live_signals += unread_threads
         dm_reasons.append(f"分布在 {unread_threads} 个线程")
     stage_scores.append(
         {
             "name": "reply-dms",
             "score": round(dm_score, 2),
+            "pressure_units": round(dm_pressure_units, 2),
+            "live_signals": round(dm_live_signals, 2),
             "reason": "；".join(dm_reasons[:2]),
         }
     )
 
-    priority_order = {name: index for index, name in enumerate(DEFAULT_RUNTIME_STAGE_ORDER)}
-    stage_scores.sort(
-        key=lambda item: (
-            -float(item.get("score") or 0.0),
-            priority_order.get(str(item.get("name") or ""), len(DEFAULT_RUNTIME_STAGE_ORDER)),
-        )
-    )
+    stage_scores.sort(key=_runtime_stage_sort_key)
     lead = str((stage_scores[0] or {}).get("name") or "publish-primary") if stage_scores else "publish-primary"
     lead_reason = str((stage_scores[0] or {}).get("reason") or "").strip() if stage_scores else ""
     rationale = f"这轮先从{_runtime_stage_display_name(lead)}起手"
@@ -5722,6 +5758,20 @@ def _task_label(task: dict[str, Any]) -> str:
     return str(task.get("label") or _steady_state_pressure_label())
 
 
+def _summary_action_pressure(task: dict[str, Any]) -> float:
+    kind = str(task.get("kind") or "").strip()
+    count = max(1, int(task.get("count") or 1))
+    if kind == "reply-comment":
+        return 2.8 + min(count, 8) * 0.65
+    if kind == "resolve-failure":
+        return 2.9 + min(count, 6) * 0.85
+    if kind == "publish-primary":
+        return 4.1
+    if kind == "steady-state":
+        return 0.0
+    return 1.5 + min(count, 4) * 0.4
+
+
 def _build_next_action_state(
     primary_publication_required: bool,
     primary_publication_succeeded: bool,
@@ -5827,6 +5877,12 @@ def _build_next_action_state(
                 "label": _steady_state_pressure_label(),
             }
         )
+    summary_actions.sort(
+        key=lambda item: (
+            -_summary_action_pressure(item),
+            str(item.get("kind") or ""),
+        )
+    )
     return persisted_tasks, summary_actions[:3]
 
 
@@ -5853,6 +5909,58 @@ def _format_account_line(account_snapshot: dict[str, Any]) -> str:
 
 def _truncate_failure_details(failure_details: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     return failure_details[: max(0, limit)]
+
+
+def _compose_core_progress_line(summary: dict[str, Any]) -> str:
+    actions = list(summary.get("actions") or [])
+    primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
+    primary_mode = str(summary.get("primary_publication_mode") or "none").strip()
+    primary_title = str(summary.get("primary_publication_title") or (primary.get("title") if primary else "") or "").strip()
+    runtime_stage_strategy = summary.get("runtime_stage_strategy") or {}
+    lead_stage = str(runtime_stage_strategy.get("lead") or "").strip()
+    comment_backlog = summary.get("comment_backlog") or {}
+    active_post_count = int(comment_backlog.get("active_post_count") or 0)
+    reply_count = int(comment_backlog.get("replied_count") or 0)
+    external_engagement_count = int(summary.get("external_engagement_count") or 0)
+    dm_reply_count = sum(1 for item in actions if item.get("kind") == "reply-dm")
+
+    if primary_mode == "pending-confirmation" and primary_title:
+        return f"发布待确认《{primary_title}》"
+    if primary:
+        if primary["kind"] == "publish-chapter":
+            return f"文学社新章节《{primary.get('title', '')}》"
+        if primary["kind"] == "create-group-post":
+            return f"小组帖《{primary.get('title', '')}》"
+        return f"主帖《{primary.get('title', '')}》"
+    if lead_stage == "reply-comments" and (reply_count or active_post_count):
+        if active_post_count > 0:
+            return f"评论维护，覆盖 {active_post_count} 个活跃讨论帖，已回复 {reply_count} 条"
+        return f"评论维护，已回复 {reply_count} 条"
+    if lead_stage == "engage-external" and external_engagement_count > 0:
+        return f"外部讨论切入，新增 {external_engagement_count} 条外部评论"
+    if lead_stage == "reply-dms" and dm_reply_count > 0:
+        return f"私信回复，已处理 {dm_reply_count} 个线程"
+    return "本轮没有新增公开写入，但已按当前最强压力点推进"
+
+
+def _compose_primary_status_line(summary: dict[str, Any]) -> str:
+    actions = list(summary.get("actions") or [])
+    primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
+    primary_mode = str(summary.get("primary_publication_mode") or "none").strip()
+    primary_title = str(summary.get("primary_publication_title") or (primary.get("title") if primary else "") or "").strip()
+    if primary_mode == "pending-confirmation" and primary_title:
+        return f"主发布：发布待确认《{primary_title}》"
+    if primary:
+        return f"主发布：已完成《{primary.get('title', '')}》"
+    primary_failures = {
+        "primary-publish-failed",
+        "primary-publish-deduped",
+    }
+    if any(str(item.get("kind") or "") in primary_failures for item in list(summary.get("failure_details") or [])):
+        return "主发布：未完成主发布"
+    if any("主发布" in str((item or {}).get("label") or "") for item in list(summary.get("next_actions") or [])):
+        return "主发布：未完成主发布"
+    return ""
 
 
 def _failure_error_text(item: dict[str, Any]) -> str:
@@ -5921,20 +6029,6 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
 
 def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -> str:
     actions = summary.get("actions", [])
-    primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
-    primary_mode = summary.get("primary_publication_mode") or "none"
-    primary_title = summary.get("primary_publication_title") or (primary.get("title") if primary else "")
-    primary_line = "未完成主发布"
-    if primary_mode == "pending-confirmation" and primary_title:
-        primary_line = f"发布待确认《{primary_title}》"
-    elif primary:
-        if primary["kind"] == "publish-chapter":
-            primary_line = f"文学社新章节《{primary.get('title', '')}》"
-        elif primary["kind"] == "create-group-post":
-            primary_line = f"小组帖《{primary.get('title', '')}》"
-        else:
-            primary_line = f"主帖《{primary.get('title', '')}》"
-
     comment_backlog = summary.get("comment_backlog", {})
     external_engagement_count = int(summary.get("external_engagement_count") or 0)
     visible_failures = [item for item in list(summary.get("failure_details", [])) if not _is_normal_mechanism_item(item)]
@@ -5981,13 +6075,16 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     stage_rationale = str(runtime_stage_strategy.get("rationale") or "").strip()
     if stage_rationale:
         lines.append(f"起手判断：{stage_rationale}")
-    lines.append(f"本轮主动作：{primary_line}")
+    lines.append(f"核心推进：{_compose_core_progress_line(summary)}")
+    primary_status_line = _compose_primary_status_line(summary)
+    if primary_status_line:
+        lines.append(primary_status_line)
     if external_observations:
         title_text = "；".join(
             truncate_text(str(item.get("title") or "").strip(), 48)
             for item in external_observations[:4]
         )
-        lines.append(f"外部世界：{title_text}")
+        lines.append(f"外部观察：{title_text}")
     elif world_signal_families:
         family_text = "、".join(
             f"{item.get('family')}×{int(item.get('count') or 0)}"
@@ -6376,7 +6473,10 @@ def main() -> None:
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
-        for stage_name in runtime_stage_strategy.get("order") or DEFAULT_RUNTIME_STAGE_ORDER:
+        stage_order = list(runtime_stage_strategy.get("order") or [])
+        if not stage_order:
+            stage_order = sorted({"publish-primary", "reply-comments", "engage-external", "reply-dms"})
+        for stage_name in stage_order:
             if stage_name == "publish-primary":
                 for attempt_index in range(_primary_plan_retry_rounds(config)):
                     if attempt_index > 0:

@@ -49,6 +49,39 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("活跃讨论帖", action)
         self.assertNotIn("积压", action)
 
+    def test_build_engagement_targets_rank_live_heat_above_fixed_lane_order(self) -> None:
+        targets = content_planner._build_engagement_targets(
+            signal_summary={
+                "group_watch": {
+                    "hot_posts": [
+                        {
+                            "post_id": "group-1",
+                            "title": "实验室里刚起头的方法讨论",
+                            "author": "member_a",
+                            "upvotes": 18,
+                            "comment_count": 2,
+                            "created_at": "2026-03-27T00:00:00+00:00",
+                        }
+                    ]
+                },
+                "community_hot_posts": [
+                    {
+                        "post_id": "community-1",
+                        "title": "公共首页已经炸开的制度样本",
+                        "author": "member_b",
+                        "upvotes": 240,
+                        "comment_count": 44,
+                        "created_at": "2026-03-27T02:00:00+00:00",
+                    }
+                ],
+                "competitor_watchlist": [],
+            },
+            own_username="派蒙",
+            own_post_ids=set(),
+        )
+        self.assertEqual("community-hot", targets[0]["source"])
+        self.assertIn("240 赞", targets[0]["reason"])
+
     def test_novelty_pressure_marks_comment_ops_as_overloaded(self) -> None:
         novelty = content_planner._novelty_pressure(
             [
@@ -286,7 +319,7 @@ class ContentPlannerTests(unittest.TestCase):
         picked = content_planner._pick_track_opportunity("theory", signal_summary)
         self.assertIn(picked["signal_type"], {"community-hot", "promo", "freeform", "discussion", "literary", "notification-load", "reply-pressure", "hot-theory", "feed"})
 
-    def test_build_engagement_targets_prioritizes_group_then_hot_then_leaderboard(self) -> None:
+    def test_build_engagement_targets_rank_by_live_score_when_metrics_are_missing(self) -> None:
         targets = content_planner._build_engagement_targets(
             signal_summary={
                 "group_watch": {
@@ -304,7 +337,7 @@ class ContentPlannerTests(unittest.TestCase):
             own_username="派蒙",
             own_post_ids={"own-1"},
         )
-        self.assertEqual(["group-hot", "community-hot", "leaderboard-watch"], [item["source"] for item in targets])
+        self.assertEqual(["community-hot", "leaderboard-watch", "group-hot"], [item["source"] for item in targets])
 
     def test_fallback_theory_idea_uses_square_for_public_signal(self) -> None:
         idea = content_planner._fallback_theory_idea(
@@ -1030,6 +1063,28 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual(summary[1]["kind"], "resolve-failure")
         self.assertEqual(summary[1]["count"], 1)
 
+    def test_build_next_action_state_can_put_failure_chain_ahead_of_pending_publish(self) -> None:
+        persisted, summary = heartbeat._build_next_action_state(
+            True,
+            False,
+            [],
+            [
+                {
+                    "kind": "comment-backlog-load-failed",
+                    "post_id": f"post-{index}",
+                    "post_title": f"测试帖子{index}",
+                    "error": {"error": "Failed to fetch comments"},
+                    "error_type": "transport-error",
+                    "attempts": 3,
+                    "resolution": "unresolved",
+                }
+                for index in range(3)
+            ],
+        )
+        self.assertEqual("publish-primary", persisted[0]["kind"])
+        self.assertEqual("resolve-failure", summary[0]["kind"])
+        self.assertEqual("publish-primary", summary[1]["kind"])
+
     def test_build_next_action_state_summarizes_active_discussions(self) -> None:
         persisted, summary = heartbeat._build_next_action_state(
             False,
@@ -1090,6 +1145,28 @@ class HeartbeatStateTests(unittest.TestCase):
         )
         self.assertEqual("2026-03-21T00:00:00+00:00", persisted[0]["queued_at"])
         self.assertEqual(2, persisted[0]["carryover_runs"])
+
+    def test_compose_feishu_report_uses_core_progress_line_when_no_primary(self) -> None:
+        report = heartbeat._compose_feishu_report(
+            {
+                "actions": [],
+                "comment_backlog": {"active_post_count": 2, "replied_count": 3, "next_batch_count": 1},
+                "external_engagement_count": 0,
+                "failure_details": [],
+                "next_actions": [{"kind": "reply-comment", "label": "继续维护当前活跃讨论"}],
+                "source_mutation": {},
+                "low_heat_reflection": {},
+                "idea_lane_strategy": {},
+                "runtime_stage_strategy": {"lead": "reply-comments", "rationale": "这轮先从活跃评论维护起手"},
+                "external_observations": [],
+                "world_signal_families": [],
+                "account_snapshot": {"finished": {}, "delta": {}},
+                "ran_at": "2026-03-27T00:00:00+00:00",
+            },
+            failure_detail_limit=3,
+        )
+        self.assertIn("核心推进：评论维护", report)
+        self.assertNotIn("未完成主发布", report)
 
     def test_ordered_primary_ideas_respects_public_hot_forum_override(self) -> None:
         ordered = heartbeat._ordered_primary_ideas(
@@ -2097,8 +2174,15 @@ class ExternalInformationTests(unittest.TestCase):
             external_information.read_json = lambda *_args, **_kwargs: {
                 "interests": [{"name": "AI 社会的时间纪律"}]
             }
-            queries = external_information._research_query_pool(
-                [{"text": "等待为什么必须变成显式状态", "note": "组织理论"}]
+            bundles, queries = external_information._research_query_pool(
+                user_topic_hints=[{"text": "等待为什么必须变成显式状态", "note": "组织理论"}],
+                community_hot_posts=[
+                    {
+                        "title": "可审计等待状态开始进入平台治理",
+                        "summary": "一个公共样本说明等待正在从产品细节变成治理接口。",
+                    }
+                ],
+                competitor_watchlist=[],
             )
         finally:
             external_information._load_hints = original_load_hints
@@ -2106,7 +2190,10 @@ class ExternalInformationTests(unittest.TestCase):
 
         self.assertIn("agent waiting state governance", [item.lower() for item in queries])
         self.assertTrue(any("等待为什么必须变成显式状态" in item for item in queries))
-        self.assertTrue(any("AI 社会的时间纪律" in item for item in queries))
+        self.assertTrue(
+            any("AI 社会的时间纪律" in str(term) for bundle in bundles for term in list(bundle.get("terms") or []))
+        )
+        self.assertTrue(any(bundle.get("seed_origin") == "community" for bundle in bundles))
 
 
 class SnapshotTests(unittest.TestCase):

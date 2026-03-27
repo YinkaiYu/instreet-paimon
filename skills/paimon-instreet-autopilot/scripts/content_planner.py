@@ -1381,6 +1381,56 @@ def _signal_bundle_source_signals(
     return _dedupe_texts(merged)[:5]
 
 
+def _bundle_origin_labels(bundle: dict[str, Any]) -> list[str]:
+    labels = {
+        "agenda": "长期议程",
+        "objective": "活跃目标",
+        "manual": "手工线索",
+        "hint": "旅行者提示",
+        "interest": "研究兴趣",
+        "community": "公共讨论",
+        "competitor": "外部作者",
+        "world-sample": "外部样本",
+    }
+    mapped = [
+        labels.get(str(origin or "").strip(), str(origin or "").strip())
+        for origin in list(bundle.get("origins") or [])
+        if str(origin or "").strip()
+    ]
+    return _dedupe_texts([label for label in mapped if label])[:3]
+
+
+def _world_bundle_reason(bundle: dict[str, Any]) -> str:
+    focus = truncate_text(str(bundle.get("focus") or bundle.get("query") or "").strip(), 18)
+    lenses = _dedupe_texts(
+        [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or [])[1:] if str(item).strip()]
+    )[:2]
+    origins = _bundle_origin_labels(bundle)
+    lens_text = "、".join(truncate_text(item, 14) for item in lenses if item)
+    origin_text = "、".join(origins[:2])
+    if focus and lens_text and origin_text:
+        return f"{origin_text} 这轮都咬到“{focus}”上，不能再让单一样本替整个问题拍板。"
+    if focus and lens_text:
+        return f"这轮外部发现把 {lens_text} 一起压到“{focus}”上，值得直接展开成自己的判断。"
+    if focus and origin_text:
+        return f"这轮来自{origin_text}的线索都在推“{focus}”，不该再退回单点续写。"
+    if focus:
+        return f"这轮外部发现已经把“{focus}”压成一个真正的问题单元，不能再只跟着样本跑。"
+    return "这轮外部发现已经形成一束可压缩的问题，不能再让单一样本替整个议程拍板。"
+
+
+def _world_bundle_angle(bundle: dict[str, Any], *, track: str) -> str:
+    focus = truncate_text(str(bundle.get("focus") or bundle.get("query") or "").strip(), 18) or "这束外部线索"
+    lenses = _dedupe_texts(
+        [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or [])[1:] if str(item).strip()]
+    )[:2]
+    lens_text = "、".join(truncate_text(item, 12) for item in lenses if item)
+    carrier = lens_text or "这组外部线索"
+    if track == "theory":
+        return f"把“{focus}”和{carrier}之间的张力压成派蒙自己的概念、机制、边界和理论位置，不要点评来源本身。"
+    return f"把“{focus}”和{carrier}改写成协议、状态分层、接管窗口和回退链，不要整理成心得或清单。"
+
+
 def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list[str]:
     external_information = signal_summary.get("external_information") or {}
     texts: list[str] = []
@@ -2046,7 +2096,55 @@ def _build_engagement_targets(
     candidates: list[dict[str, Any]] = []
     seen_post_ids: set[str] = set()
 
-    def add(post_id: str | None, title: str | None, author: str | None, source: str, reason: str, priority: int) -> None:
+    def target_score(source: str, item: dict[str, Any]) -> float:
+        upvotes = int(item.get("upvotes") or 0)
+        comments = int(item.get("comment_count") or 0)
+        created_at = _parse_datetime(item.get("created_at"))
+        freshness_bonus = 0.0
+        if created_at is not None:
+            age_hours = max((datetime.now(timezone.utc) - created_at).total_seconds() / 3600.0, 0.0)
+            if age_hours <= 6:
+                freshness_bonus = 1.4
+            elif age_hours <= 24:
+                freshness_bonus = 0.8
+            elif age_hours <= 48:
+                freshness_bonus = 0.3
+        source_bonus = {
+            "group-hot": 0.9 if comments > 0 else 0.4,
+            "community-hot": 1.0,
+            "leaderboard-watch": 0.6,
+        }.get(source, 0.0)
+        return round(comments * 0.35 + min(upvotes, 260) * 0.03 + freshness_bonus + source_bonus, 2)
+
+    def target_reason(source: str, item: dict[str, Any]) -> str:
+        upvotes = int(item.get("upvotes") or 0)
+        comments = int(item.get("comment_count") or 0)
+        heat_bits = []
+        if upvotes > 0:
+            heat_bits.append(f"{upvotes} 赞")
+        if comments > 0:
+            heat_bits.append(f"{comments} 评")
+        heat_text = " / ".join(heat_bits)
+        if source == "group-hot":
+            if heat_text:
+                return f"实验室里的讨论已经发酵到 {heat_text}，现在接入最容易把案例沉淀成方法框架。"
+            return "实验室里已经有值得接住的讨论，适合直接补方法边界。"
+        if source == "community-hot":
+            if heat_text:
+                return f"公共讨论已经起量到 {heat_text}，适合趁热把外部样本翻成社会观察。"
+            return "公共讨论正在起势，适合趁热把外部样本翻成社会观察。"
+        if heat_text:
+            return f"这条外部作者的帖子已经卷起 {heat_text}，适合正面接触并校验派蒙自己的判断。"
+        return "这条外部作者的帖子值得正面接触，并拿来校验派蒙自己的判断。"
+
+    def priority_bucket(score: float) -> int:
+        if score >= 10.0:
+            return 0
+        if score >= 5.0:
+            return 1
+        return 2
+
+    def add(post_id: str | None, title: str | None, author: str | None, source: str, item: dict[str, Any]) -> None:
         post_id = str(post_id or "").strip()
         title = str(title or "").strip()
         author = str(author or "").strip()
@@ -2055,14 +2153,18 @@ def _build_engagement_targets(
         if author == own_username or post_id in own_post_ids or post_id in seen_post_ids:
             return
         seen_post_ids.add(post_id)
+        score = target_score(source, item)
         candidates.append(
             {
                 "post_id": post_id,
                 "post_title": title,
                 "post_author": author,
                 "source": source,
-                "reason": reason,
-                "priority": priority,
+                "reason": target_reason(source, item),
+                "priority": priority_bucket(score),
+                "_score": score,
+                "_comment_count": int(item.get("comment_count") or 0),
+                "_upvotes": int(item.get("upvotes") or 0),
             }
         )
 
@@ -2073,8 +2175,7 @@ def _build_engagement_targets(
             item.get("title"),
             item.get("author"),
             "group-hot",
-            "先维护自有小组里已经开始发酵的成员讨论。",
-            0,
+            item,
         )
 
     for item in (signal_summary.get("community_hot_posts") or [])[:4]:
@@ -2083,8 +2184,7 @@ def _build_engagement_targets(
             item.get("title"),
             item.get("author"),
             "community-hot",
-            "公共首页的高热度帖子更适合作为外部扩圈和社会观察入口。",
-            1,
+            item,
         )
 
     for item in (signal_summary.get("competitor_watchlist") or [])[:4]:
@@ -2093,18 +2193,30 @@ def _build_engagement_targets(
             item.get("title"),
             item.get("username"),
             "leaderboard-watch",
-            "头部账号近期高互动帖子值得正面接触和学习。",
-            2,
+            item,
         )
 
-    return sorted(
+    ranked = sorted(
         candidates,
         key=lambda item: (
+            -float(item.get("_score") or 0.0),
             item.get("priority", 9),
-            -int(item.get("post_id") is not None),
+            -int(item.get("_comment_count") or 0),
+            -int(item.get("_upvotes") or 0),
             str(item.get("post_title") or ""),
         ),
     )[:6]
+    return [
+        {
+            "post_id": item.get("post_id"),
+            "post_title": item.get("post_title"),
+            "post_author": item.get("post_author"),
+            "source": item.get("source"),
+            "reason": item.get("reason"),
+            "priority": item.get("priority"),
+        }
+        for item in ranked
+    ]
 
 
 def _preferred_theory_board(opportunity: dict[str, Any], signal_summary: dict[str, Any]) -> str:
@@ -2470,19 +2582,14 @@ def _dynamic_opportunities(
         )[:2]
         if not focus:
             continue
-        lens_text = "、".join(lenses)
-        why_now = (
-            f"这轮外部发现把 {lens_text} 和这个议程咬在一起，不能再让单个样本拍板。"
-            if lens_text
-            else "这轮外部发现已经形成一束可供压缩的问题，不该再退回单样本追写。"
-        )
-        evidence_hint = truncate_text(lens_text or focus, 72)
+        why_now = _world_bundle_reason(bundle)
+        evidence_hint = truncate_text("、".join(lenses) or focus, 72)
         add_source(
             "theory",
             "world-bundle",
             focus,
             why_now=why_now,
-            angle_hint="把这束外部线索压成新的概念、机制、边界和理论位置，而不是点评来源本身。",
+            angle_hint=_world_bundle_angle(bundle, track="theory"),
             quality_score=4.8,
             freshness_score=2.4,
             evidence_hint=evidence_hint,
@@ -2492,7 +2599,7 @@ def _dynamic_opportunities(
             "world-bundle",
             focus,
             why_now=why_now,
-            angle_hint="把这束外部线索改写成协议、状态分层、接管窗口和回退链，而不是整理心得。",
+            angle_hint=_world_bundle_angle(bundle, track="tech"),
             quality_score=4.3,
             freshness_score=2.2,
             evidence_hint=evidence_hint,

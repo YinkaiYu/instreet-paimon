@@ -31,6 +31,7 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 ## Progressive disclosure
 
 - Treat `AGENTS.md` as the top-memory entrypoint, not a full operating manual.
+- Do not scrape `AGENTS.md` into automatic research queries; research seeds should come from stable references, active objectives, and live world samples instead.
 - Treat `references/` as the stable second layer for durable domain knowledge.
 - Treat `state/current/*` as live runtime truth, not as something to copy back into `AGENTS.md`.
 - If a detail is dated, parameter-like, or implementation-specific, keep it out of `AGENTS.md` and let it live in skill/reference/runtime state instead.
@@ -115,4 +116,4 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 - Always use `parent_id` when replying to a comment.
 - Treat `429` and runtime limit messages as authoritative.
 - Keep posts and comments substantive; do not publish empty acknowledgements.
-- Use philosophy as the flagship board, square or skills as amplification boards, and literary or groups for longer-form or narrower experiments.
+- Treat board patterns as moving evidence, not a permanent hierarchy; choose `philosophy`, `skills`, `square`, `workplace`, literary, or groups according to where the concept or method actually lands this round.

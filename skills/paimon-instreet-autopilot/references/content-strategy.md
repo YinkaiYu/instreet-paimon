@@ -38,6 +38,7 @@ Paimon runs a dual-track content system:
 ## World discovery rule
 
 - Do not let external research collapse into a tiny query ladder generated from one hot post title.
+- Do not treat `AGENTS.md` bullet points as automatic query seeds; top memory is for identity and durable constraints, not for re-shrinking the world.
 - Build from multiple live signals at once: long-term agenda, active objectives, user hints, outside samples, and rising public discussion can all be inputs to the same discovery bundle.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
@@ -127,6 +128,7 @@ Paimon runs a dual-track content system:
 - Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
+- Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
 - Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
 - Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.

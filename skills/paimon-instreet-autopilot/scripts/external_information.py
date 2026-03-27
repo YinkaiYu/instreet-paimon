@@ -140,9 +140,11 @@ DEFAULT_MARXISTS_INDEXES = [
     {"author": "Engels", "url": "https://www.marxists.org/chinese/engels/index.htm"},
     {"author": "Lenin", "url": "https://www.marxists.org/chinese/lenin/index.htm"},
 ]
-AGENTS_MEMORY_PATH = REPO_ROOT / "AGENTS.md"
 CONTENT_STRATEGY_REFERENCE_PATH = (
     REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "references" / "content-strategy.md"
+)
+ACCOUNT_STATE_REFERENCE_PATH = (
+    REPO_ROOT / "skills" / "paimon-instreet-autopilot" / "references" / "account-state.md"
 )
 VENUE_ALIASES = {
     "neurips": ("neurips", "neural information processing systems"),
@@ -260,28 +262,14 @@ def ensure_external_information_files() -> None:
 
 
 def _bootstrap_interest_profile() -> dict[str, Any]:
-    if not AGENTS_MEMORY_PATH.exists():
-        return {"updated_at": now_utc(), "interests": [], "source": "empty-bootstrap"}
-    raw = AGENTS_MEMORY_PATH.read_text(encoding="utf-8")
-    interests: list[dict[str, Any]] = []
-    active_section = False
-    for raw_line in raw.splitlines():
-        line = raw_line.strip()
-        if line in {"### 理论线", "### 技术线", "## 当前议程"}:
-            active_section = True
-            continue
-        if active_section and line.startswith("#"):
-            active_section = False
-        if not active_section or not line.startswith("- "):
-            continue
-        label = truncate_text(line[2:].strip(), 72)
-        if not label:
-            continue
-        interests.append({"name": label, "weight": 1.0})
+    interests = [
+        {"name": label, "weight": 1.0}
+        for label in _reference_interest_fragments(limit=12)
+    ]
     return {
         "updated_at": now_utc(),
         "interests": interests[:12],
-        "source": "agents-bootstrap",
+        "source": "reference-bootstrap",
     }
 
 
@@ -606,6 +594,15 @@ def _research_bullet_fragments(path: Path, *, limit: int = 12) -> list[str]:
     return _context_fragments_from_items(bullets, field_names=("text",), limit=limit)
 
 
+def _reference_interest_fragments(*, limit: int = 12) -> list[str]:
+    return _context_fragments_from_items(
+        _research_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=16)
+        + _research_bullet_fragments(ACCOUNT_STATE_REFERENCE_PATH, limit=10),
+        field_names=("text",),
+        limit=limit,
+    )
+
+
 def _world_sample_fragments(items: list[dict[str, Any]], *, limit: int = 12) -> list[str]:
     samples: list[dict[str, str]] = []
     for item in items:
@@ -661,6 +658,23 @@ def _rotating_origin_fragments(
     return ordered
 
 
+def _live_origin_order(origin_pools: dict[str, list[str]], *, phase: int = 0) -> list[str]:
+    active = [origin for origin, values in origin_pools.items() if values]
+    if not active:
+        return []
+    ordered = sorted(
+        active,
+        key=lambda origin: (
+            -len(origin_pools.get(origin) or []),
+            -sum(len(item) for item in (origin_pools.get(origin) or [])[:2]),
+            origin,
+        ),
+    )
+    current = datetime.now(timezone.utc)
+    shift = (current.hour + current.timetuple().tm_yday + phase) % len(ordered)
+    return ordered[shift:] + ordered[:shift]
+
+
 def _bundle_queries(root: str, lenses: list[str]) -> list[str]:
     queries: list[str] = []
     seen: set[str] = set()
@@ -701,20 +715,16 @@ def _compose_discovery_query(root: str, extras: list[str]) -> str:
 
 
 def _discovery_query_bundles(
-    *,
-    user_topic_hints: list[dict[str, Any]] | None,
-    community_hot_posts: list[dict[str, Any]],
-    competitor_watchlist: list[dict[str, Any]],
+    user_topic_hints: list[dict[str, Any]] | None = None,
+    community_hot_posts: list[dict[str, Any]] | None = None,
+    competitor_watchlist: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    community_hot_posts = list(community_hot_posts or [])
+    competitor_watchlist = list(competitor_watchlist or [])
     hints_payload = _load_hints()
     profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
     origin_pools = {
-        "agenda": _context_fragments_from_items(
-            _research_bullet_fragments(AGENTS_MEMORY_PATH, limit=12)
-            + _research_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=12),
-            field_names=("text",),
-            limit=12,
-        ),
+        "agenda": _reference_interest_fragments(limit=12),
         "objective": _memory_objective_fragments(limit=10),
         "manual": _context_fragments_from_items(
             list(hints_payload.get("manual_queries") or []),
@@ -742,16 +752,15 @@ def _discovery_query_bundles(
             limit=8,
         ),
     }
-    strategic_origins = ["hint", "manual", "interest"]
-    world_origins = ["community", "competitor", "objective"]
-    seed_order = _rotating_origin_fragments(origin_pools, strategic_origins, limit=MAX_RESEARCH_QUERY_COUNT)
+    active_origins = _live_origin_order(origin_pools)
+    seed_order = _rotating_origin_fragments(origin_pools, active_origins, limit=MAX_RESEARCH_QUERY_COUNT)
     if not seed_order:
-        seed_order = _rotating_origin_fragments(origin_pools, strategic_origins + world_origins, limit=MAX_RESEARCH_QUERY_COUNT)
+        seed_order = _rotating_origin_fragments(origin_pools, active_origins, limit=MAX_RESEARCH_QUERY_COUNT)
     bundles: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
     lens_order = _rotating_origin_fragments(
         origin_pools,
-        ["community", "competitor", "hint", "manual", "interest"],
+        _live_origin_order(origin_pools, phase=7),
         limit=MAX_RESEARCH_QUERY_COUNT * 2,
     )
     for origin, root in seed_order:
@@ -799,12 +808,14 @@ def _discovery_query_bundles(
     fallback_queries: list[dict[str, Any]] = []
     seen_queries = set()
     fallback_values: list[tuple[str, Any]] = []
-    fallback_values.extend(("manual", value) for value in list(hints_payload.get("manual_queries") or []))
-    fallback_values.extend(("world-sample", value) for value in _world_sample_fragments(community_hot_posts, limit=5))
-    fallback_values.extend(("world-sample", value) for value in _world_sample_fragments(competitor_watchlist, limit=5))
-    fallback_values.extend(("objective", value) for value in _memory_objective_fragments(limit=6))
+    dynamic_fallback_pools = {
+        **origin_pools,
+        "world-sample": _world_sample_fragments(community_hot_posts, limit=5)
+        + _world_sample_fragments(competitor_watchlist, limit=5),
+    }
+    for origin in _live_origin_order(dynamic_fallback_pools, phase=13):
+        fallback_values.extend((origin, value) for value in list(dynamic_fallback_pools.get(origin) or []))
     fallback_values.extend(("interest", item.get("name")) for item in profile.get("interests") or [])
-    fallback_values.extend(("agenda", value) for value in _research_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=4))
     for origin, value in fallback_values:
         for query in _query_expansions(value):
             normalized = _normalize_query_fragment(query)
@@ -828,15 +839,14 @@ def _discovery_query_bundles(
 
 
 def _research_query_pool(
-    *,
-    user_topic_hints: list[dict[str, Any]] | None,
-    community_hot_posts: list[dict[str, Any]],
-    competitor_watchlist: list[dict[str, Any]],
+    user_topic_hints: list[dict[str, Any]] | None = None,
+    community_hot_posts: list[dict[str, Any]] | None = None,
+    competitor_watchlist: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     bundles = _discovery_query_bundles(
-        user_topic_hints=user_topic_hints,
-        community_hot_posts=community_hot_posts,
-        competitor_watchlist=competitor_watchlist,
+        user_topic_hints,
+        community_hot_posts,
+        competitor_watchlist,
     )
     queries: list[str] = []
     seen: set[str] = set()
