@@ -78,6 +78,12 @@ LOW_HEAT_FAILURES_PATH = CURRENT_STATE_DIR / "low_heat_failures.json"
 FALLBACK_AUDIT_PATH = CURRENT_STATE_DIR / "fallback_audit.json"
 FALLBACK_JOURNAL_PATH = CURRENT_STATE_DIR / "fallback_events.jsonl"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
+DEFAULT_RUNTIME_STAGE_ORDER = (
+    "publish-primary",
+    "reply-comments",
+    "engage-external",
+    "reply-dms",
+)
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
 FEISHU_API_BASE = "https://open.feishu.cn"
 FEISHU_TENANT_TOKEN_ENDPOINT = "/open-apis/auth/v3/tenant_access_token/internal"
@@ -1925,18 +1931,171 @@ def _comment_task_summary(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _steady_state_pressure_label() -> str:
+    return "继续追当前最强压力点，不为流程对称感硬补动作"
+
+
 def _active_reply_label(tasks: list[dict[str, Any]]) -> str:
     summary = _comment_task_summary(tasks)
     count = int(summary.get("count") or 0)
     post_count = int(summary.get("post_count") or 0)
     first_title = str(summary.get("first_post_title") or "").strip()
     if not count:
-        return "继续按先主发布、后互动的节奏推进"
+        return _steady_state_pressure_label()
     if post_count <= 1 and first_title:
         return f"继续维护《{first_title}》的活跃评论，下一批优先回复 {count} 条"
     if post_count <= 0:
         return f"继续维护当前活跃讨论，下一批优先回复 {count} 条评论"
     return f"继续维护 {post_count} 个活跃讨论帖，下一批优先回复 {count} 条评论"
+
+
+def _runtime_stage_display_name(stage_name: str) -> str:
+    labels = {
+        "publish-primary": "公开主动作",
+        "reply-comments": "活跃评论维护",
+        "engage-external": "外部讨论切入",
+        "reply-dms": "私信回复",
+    }
+    return labels.get(stage_name, stage_name or "当前动作")
+
+
+def _public_kind_display_name(kind: str) -> str:
+    labels = {
+        "theory-post": "理论帖",
+        "tech-post": "技术帖",
+        "group-post": "小组帖",
+        "literary-chapter": "连载章节",
+    }
+    return labels.get(kind, kind or "公开动作")
+
+
+def _runtime_stage_strategy(
+    plan: dict[str, Any],
+    carryover_tasks: list[dict[str, Any]] | None,
+    *,
+    primary_publication_required: bool,
+) -> dict[str, Any]:
+    carryover_tasks = carryover_tasks or []
+    reply_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "reply-comment"]
+    failure_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "resolve-failure"]
+    publish_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "publish-primary"]
+    reply_targets = [item for item in list(plan.get("reply_targets") or []) if isinstance(item, dict)]
+    dm_targets = [item for item in list(plan.get("dm_targets") or []) if isinstance(item, dict)]
+    engagement_targets = [item for item in list(plan.get("engagement_targets") or []) if isinstance(item, dict)]
+    lane_strategy = plan.get("idea_lane_strategy") or {}
+    focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
+    public_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
+
+    stage_scores: list[dict[str, Any]] = []
+
+    primary_score = 2.2
+    primary_reasons: list[str] = []
+    if primary_publication_required:
+        primary_score += 2.3
+        primary_reasons.append("这轮仍有公开主动作要完成")
+    if publish_tasks:
+        primary_score += 2.2
+        primary_reasons.append("上一轮主发布还挂着")
+    if focus_kind:
+        primary_score += 0.6
+        primary_reasons.append(f"当前规划主线是{_public_kind_display_name(focus_kind)}")
+    if public_override.get("enabled"):
+        primary_score += 0.9
+        override_reason = truncate_text(str(public_override.get("reason") or "").strip(), 72)
+        if override_reason:
+            primary_reasons.append(override_reason)
+    stage_scores.append(
+        {
+            "name": "publish-primary",
+            "score": round(primary_score, 2),
+            "reason": "；".join(primary_reasons[:2]),
+        }
+    )
+
+    comment_notifications = sum(int(item.get("new_notification_count") or 0) for item in reply_targets)
+    active_discussions = len(
+        {
+            str(item.get("post_id") or item.get("post_title") or "").strip()
+            for item in reply_targets
+            if str(item.get("post_id") or item.get("post_title") or "").strip()
+        }
+    )
+    comment_score = 0.0
+    comment_reasons: list[str] = []
+    if reply_tasks:
+        comment_score += min(len(reply_tasks), 4) * 1.35
+        comment_reasons.append(f"已有 {len(reply_tasks)} 条接续评论留在队列里")
+    if failure_tasks:
+        comment_score += min(len(failure_tasks), 3) * 1.15
+        comment_reasons.append(f"还有 {len(failure_tasks)} 个失败链要补")
+    if active_discussions:
+        comment_score += min(active_discussions, 4) * 0.55
+        comment_reasons.append(f"评论压力分布在 {active_discussions} 个讨论帖上")
+    if comment_notifications:
+        comment_score += min(comment_notifications / 12.0, 3.2)
+        comment_reasons.append(f"最新评论增量还有 {comment_notifications} 条")
+    stage_scores.append(
+        {
+            "name": "reply-comments",
+            "score": round(comment_score, 2),
+            "reason": "；".join(comment_reasons[:2]),
+        }
+    )
+
+    external_targets = engagement_targets[:6]
+    external_score = 0.0
+    external_reasons: list[str] = []
+    if external_targets:
+        external_score += min(len(external_targets), 5) * 0.6
+        high_priority_targets = sum(1 for item in external_targets if int(item.get("priority") or 0) <= 0)
+        if high_priority_targets:
+            external_score += min(high_priority_targets, 3) * 0.45
+            external_reasons.append(f"外部讨论里有 {high_priority_targets} 个高优先入口")
+        external_reasons.append(f"仍有 {len(external_targets)} 个外部讨论值得主动切入")
+    stage_scores.append(
+        {
+            "name": "engage-external",
+            "score": round(external_score, 2),
+            "reason": "；".join(external_reasons[:2]),
+        }
+    )
+
+    unread_threads = sum(1 for item in dm_targets if int(item.get("unread_count") or 0) > 0)
+    unread_messages = sum(int(item.get("unread_count") or 0) for item in dm_targets)
+    dm_score = 0.0
+    dm_reasons: list[str] = []
+    if unread_messages:
+        dm_score += min(unread_messages, 6) * 0.5
+        dm_reasons.append(f"私信里还有 {unread_messages} 条未读")
+    if unread_threads:
+        dm_score += min(unread_threads, 3) * 0.45
+        dm_reasons.append(f"分布在 {unread_threads} 个线程")
+    stage_scores.append(
+        {
+            "name": "reply-dms",
+            "score": round(dm_score, 2),
+            "reason": "；".join(dm_reasons[:2]),
+        }
+    )
+
+    priority_order = {name: index for index, name in enumerate(DEFAULT_RUNTIME_STAGE_ORDER)}
+    stage_scores.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            priority_order.get(str(item.get("name") or ""), len(DEFAULT_RUNTIME_STAGE_ORDER)),
+        )
+    )
+    lead = str((stage_scores[0] or {}).get("name") or "publish-primary") if stage_scores else "publish-primary"
+    lead_reason = str((stage_scores[0] or {}).get("reason") or "").strip() if stage_scores else ""
+    rationale = f"这轮先从{_runtime_stage_display_name(lead)}起手"
+    if lead_reason:
+        rationale += f"：{lead_reason}"
+    return {
+        "order": [str(item.get("name") or "") for item in stage_scores if str(item.get("name") or "")],
+        "lead": lead,
+        "rationale": rationale,
+        "stages": stage_scores,
+    }
 
 
 def _classify_comment_fetch_error(exc: Exception) -> str:
@@ -3682,6 +3841,7 @@ def _generate_forum_post(
 13. 标题不要引用外部帖子、论文、知乎题目，不要出现“从《...》继续追问”“把《...》拆开看”这类骨架。
 14. 如果这题来自论文、模型、仓库或外部项目，标题和开头都不能先报模型名、论文缩写、仓库名；先写普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
 15. 这篇必须顺手说明新概念不同于什么旧词或旧抱怨，别只给旧判断换一个新名词。
+16. 如果外部样本来自课堂、医院、道路、城市治理等异域现场，它只能放在中段做例证；标题和开头两段必须先交代 Agent 社会里的结构冲突，不能先把读者带进外部现场。
 """.strip()
     else:
         theory_contract = f"""
@@ -3736,6 +3896,8 @@ CONTENT:
         kind=str(idea.get("kind") or ""),
         signal_type=str(idea.get("signal_type") or ""),
     ):
+        title = brief["title"]
+    if content_planner_module._title_has_source_scene_overhang(idea, title):
         title = brief["title"]
     if not _idea_publishable_title(title):
         title = brief["title"]
@@ -5557,7 +5719,7 @@ def _task_label(task: dict[str, Any]) -> str:
         if post_title:
             return f"重试加载《{post_title}》的评论并处理失败链路"
         return str(task.get("label") or "处理上一轮未解决的失败项")
-    return str(task.get("label") or "继续执行下一轮心跳任务")
+    return str(task.get("label") or _steady_state_pressure_label())
 
 
 def _build_next_action_state(
@@ -5662,7 +5824,7 @@ def _build_next_action_state(
         summary_actions.append(
             {
                 "kind": "steady-state",
-                "label": "继续按先主发布、后互动的节奏推进",
+                "label": _steady_state_pressure_label(),
             }
         )
     return persisted_tasks, summary_actions[:3]
@@ -5781,6 +5943,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     source_mutation = summary.get("source_mutation") or {}
     low_heat_reflection = summary.get("low_heat_reflection") or {}
     idea_lane_strategy = summary.get("idea_lane_strategy") or {}
+    runtime_stage_strategy = summary.get("runtime_stage_strategy") or {}
     external_observations = [
         item
         for item in list(summary.get("external_observations") or [])
@@ -5814,9 +5977,11 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
 
     lines = [
         "派蒙心跳已完成。",
-        _format_account_line(summary.get("account_snapshot", {})),
-        f"本轮主动作：{primary_line}",
     ]
+    stage_rationale = str(runtime_stage_strategy.get("rationale") or "").strip()
+    if stage_rationale:
+        lines.append(f"起手判断：{stage_rationale}")
+    lines.append(f"本轮主动作：{primary_line}")
     if external_observations:
         title_text = "；".join(
             truncate_text(str(item.get("title") or "").strip(), 48)
@@ -5844,6 +6009,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     if mutation_summary:
         lines.append(f"源码进化：{mutation_summary}")
     lines.append(interaction_line)
+    lines.append(_format_account_line(summary.get("account_snapshot", {})))
 
     if failure_details:
         lines.append(f"失败明细：{len(visible_failures)} 条")
@@ -6197,137 +6363,153 @@ def main() -> None:
         list(low_heat_reflection.get("lessons") or []) + list(low_heat_reflection.get("system_fixes") or [])
     )[:8]
     planner_retry_count = 0
+    primary_publication_required = bool(args.execute and config.automation.get("heartbeat_require_primary_publication", True))
+    runtime_stage_strategy = (
+        _runtime_stage_strategy(
+            plan,
+            carryover_tasks,
+            primary_publication_required=primary_publication_required,
+        )
+        if args.execute
+        else {}
+    )
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
-        for attempt_index in range(_primary_plan_retry_rounds(config)):
-            if attempt_index > 0:
-                planner_retry_count = attempt_index
-                plan = build_plan(
+        for stage_name in runtime_stage_strategy.get("order") or DEFAULT_RUNTIME_STAGE_ORDER:
+            if stage_name == "publish-primary":
+                for attempt_index in range(_primary_plan_retry_rounds(config)):
+                    if attempt_index > 0:
+                        planner_retry_count = attempt_index
+                        plan = build_plan(
+                            allow_codex=args.allow_codex,
+                            model=codex_model,
+                            reasoning_effort=codex_reasoning_effort,
+                            timeout_seconds=planner_timeout_seconds,
+                            retry_feedback=planner_retry_feedback,
+                        )
+                        write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
+                        posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+                        literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
+                        literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
+                        serial_registry = sync_serial_registry(literary, {"details": literary_details})
+                        groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
+                    primary_action, primary_events, _, primary_publication_mode = _publish_primary_action(
+                        config,
+                        client,
+                        plan,
+                        posts,
+                        literary_details,
+                        serial_registry,
+                        groups,
+                        cycle_state,
+                        allow_codex=args.allow_codex,
+                        model=codex_model,
+                        reasoning_effort=codex_reasoning_effort,
+                        codex_timeout_seconds=codex_timeout_seconds,
+                        forum_write_state=forum_write_state,
+                    )
+                    actions.extend(primary_events)
+                    failure_details.extend(
+                        {
+                            "kind": item.get("kind"),
+                            "publish_kind": item.get("publish_kind"),
+                            "post_title": item.get("title"),
+                            "post_id": item.get("post_id"),
+                            "error": item.get("error"),
+                            "error_type": item.get("error_type"),
+                            "attempts": item.get("attempts"),
+                            "resolution": item.get("resolution", "unresolved"),
+                        }
+                        for item in primary_events
+                        if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
+                    )
+                    if primary_action:
+                        actions.append(primary_action)
+                    normal_deferrals.extend(
+                        item
+                        for item in primary_events
+                        if item.get("normal_mechanism")
+                    )
+                    if _primary_publish_attempt_satisfied(primary_action, primary_publication_mode):
+                        break
+                    planner_retry_feedback = _dedupe_feedback(
+                        planner_retry_feedback
+                        + _planner_retry_feedback_from_plan(plan)
+                        + [
+                            str(item.get("error") or item.get("kind") or "").strip()
+                            for item in primary_events
+                            if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
+                        ]
+                    )[:10]
+                continue
+
+            if stage_name == "reply-comments":
+                comment_result = _reply_comments(
+                    config,
+                    client,
+                    plan,
+                    posts,
+                    username,
+                    carryover_tasks,
                     allow_codex=args.allow_codex,
                     model=codex_model,
                     reasoning_effort=codex_reasoning_effort,
-                    timeout_seconds=planner_timeout_seconds,
-                    retry_feedback=planner_retry_feedback,
+                    min_batch_size=int(config.automation.get("reply_batch_size", 2)),
+                    max_batch_size=_reply_max_per_run(config),
+                    processing_time_budget_sec=_reply_processing_time_budget_sec(config),
+                    codex_timeout_seconds=codex_timeout_seconds,
+                    forum_write_state=forum_write_state,
                 )
-                write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
-                posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
-                literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
-                literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
-                serial_registry = sync_serial_registry(literary, {"details": literary_details})
-                groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
-            primary_action, primary_events, _, primary_publication_mode = _publish_primary_action(
-                config,
-                client,
-                plan,
-                posts,
-                literary_details,
-                serial_registry,
-                groups,
-                cycle_state,
-                allow_codex=args.allow_codex,
-                model=codex_model,
-                reasoning_effort=codex_reasoning_effort,
-                codex_timeout_seconds=codex_timeout_seconds,
-                forum_write_state=forum_write_state,
-            )
-            actions.extend(primary_events)
-            failure_details.extend(
-                {
-                    "kind": item.get("kind"),
-                    "publish_kind": item.get("publish_kind"),
-                    "post_title": item.get("title"),
-                    "post_id": item.get("post_id"),
-                    "error": item.get("error"),
-                    "error_type": item.get("error_type"),
-                    "attempts": item.get("attempts"),
-                    "resolution": item.get("resolution", "unresolved"),
-                }
-                for item in primary_events
-                if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
-            )
-            if primary_action:
-                actions.append(primary_action)
-            normal_deferrals.extend(
-                item
-                for item in primary_events
-                if item.get("normal_mechanism")
-            )
-            if _primary_publish_attempt_satisfied(primary_action, primary_publication_mode):
-                break
-            planner_retry_feedback = _dedupe_feedback(
-                planner_retry_feedback
-                + _planner_retry_feedback_from_plan(plan)
-                + [
-                    str(item.get("error") or item.get("kind") or "").strip()
-                    for item in primary_events
-                    if item.get("kind") in {"primary-publish-failed", "primary-publish-deduped"}
-                ]
-            )[:10]
+                actions.extend(comment_result["actions"])
+                failure_details.extend(comment_result["failure_details"])
+                normal_deferrals.extend(comment_result.get("normal_deferrals", []))
+                continue
 
-        comment_result = _reply_comments(
-            config,
-            client,
-            plan,
-            posts,
-            username,
-            carryover_tasks,
-            allow_codex=args.allow_codex,
-            model=codex_model,
-            reasoning_effort=codex_reasoning_effort,
-            min_batch_size=int(config.automation.get("reply_batch_size", 2)),
-            max_batch_size=_reply_max_per_run(config),
-            processing_time_budget_sec=_reply_processing_time_budget_sec(config),
-            codex_timeout_seconds=codex_timeout_seconds,
-            forum_write_state=forum_write_state,
-        )
-        actions.extend(comment_result["actions"])
-        failure_details.extend(comment_result["failure_details"])
-        normal_deferrals.extend(comment_result.get("normal_deferrals", []))
+            if stage_name == "engage-external":
+                external_result = _engage_external_discussions(
+                    config,
+                    client,
+                    plan,
+                    username,
+                    allow_codex=args.allow_codex,
+                    model=codex_model,
+                    reasoning_effort=codex_reasoning_effort,
+                    codex_timeout_seconds=codex_timeout_seconds,
+                    forum_write_state=forum_write_state,
+                )
+                actions.extend(external_result["actions"])
+                failure_details.extend(external_result["failure_details"])
+                normal_deferrals.extend(external_result.get("normal_deferrals", []))
+                continue
 
-        external_result = _engage_external_discussions(
-            config,
-            client,
-            plan,
-            username,
-            allow_codex=args.allow_codex,
-            model=codex_model,
-            reasoning_effort=codex_reasoning_effort,
-            codex_timeout_seconds=codex_timeout_seconds,
-            forum_write_state=forum_write_state,
-        )
-        actions.extend(external_result["actions"])
-        failure_details.extend(external_result["failure_details"])
-        normal_deferrals.extend(external_result.get("normal_deferrals", []))
-
-        dm_actions = _reply_dms(
-            client,
-            plan,
-            allow_codex=args.allow_codex,
-            model=codex_model,
-            reasoning_effort=codex_reasoning_effort,
-            batch_size=int(config.automation.get("dm_batch_size", 2)),
-            codex_timeout_seconds=codex_timeout_seconds,
-        )
-        actions.extend(dm_actions)
-        failure_details.extend(
-            {
-                "kind": item.get("kind"),
-                "thread_id": item.get("thread_id"),
-                "error": item.get("error"),
-                "resolution": "unresolved",
-            }
-            for item in dm_actions
-            if item.get("kind") == "reply-dm-failed"
-        )
+            if stage_name == "reply-dms":
+                dm_actions = _reply_dms(
+                    client,
+                    plan,
+                    allow_codex=args.allow_codex,
+                    model=codex_model,
+                    reasoning_effort=codex_reasoning_effort,
+                    batch_size=int(config.automation.get("dm_batch_size", 2)),
+                    codex_timeout_seconds=codex_timeout_seconds,
+                )
+                actions.extend(dm_actions)
+                failure_details.extend(
+                    {
+                        "kind": item.get("kind"),
+                        "thread_id": item.get("thread_id"),
+                        "error": item.get("error"),
+                        "resolution": "unresolved",
+                    }
+                    for item in dm_actions
+                    if item.get("kind") == "reply-dm-failed"
+                )
 
         notification_cleanup = _cleanup_notifications(config, client)
         actions.extend(notification_cleanup["actions"])
         failure_details.extend(notification_cleanup["failure_details"])
         forum_write_budget = _forum_write_budget_status(config, forum_write_state)
         comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
-
-    primary_publication_required = bool(args.execute and config.automation.get("heartbeat_require_primary_publication", True))
 
     if args.execute:
         end_overview = run_snapshot(
@@ -6404,6 +6586,7 @@ def main() -> None:
         "failure_details": failure_details,
         "normal_deferrals": normal_deferrals,
         "next_actions": next_actions,
+        "runtime_stage_strategy": runtime_stage_strategy,
         "idea_lane_strategy": plan.get("idea_lane_strategy") or {},
         "external_observations": _external_observation_items(external_information),
         "world_signal_families": [

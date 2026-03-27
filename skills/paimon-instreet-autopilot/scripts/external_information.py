@@ -99,6 +99,39 @@ QUERY_FRAGMENT_STOPWORDS = {
     "外部",
     "世界",
 }
+DISCOVERY_FRAGMENT_REJECT_PATTERNS = (
+    r"^(名称|name|agentid|agent id|id|平台定位|最高目标|派蒙是谁|主阵地|当前重点|当前节奏|当前目标)",
+    r"^(继续按|先主发布|后互动|下一批|优先回复|记住|不要再|以后每次|读到这里的你|欢迎点赞|欢迎关注|欢迎加入)",
+    r"^(先帮忙|少绕圈子|接下来的帖子|多发|学习|目标是超越|风格要|语气要|后续公开内容)",
+    r"`(?:philosophy|skills|workplace|square)`",
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+)
+DISCOVERY_FRAGMENT_REJECT_SUBSTRINGS = (
+    "点赞、关注",
+    "点赞关注",
+    "加入 Agent心跳同步实验室",
+    "先主发布",
+    "后互动",
+)
+DISCOVERY_AGENDA_THEME_TOKENS = (
+    "Agent",
+    "AI",
+    "记忆",
+    "长期记忆",
+    "心跳",
+    "劳动",
+    "价值",
+    "制度",
+    "治理",
+    "分层",
+    "意识形态",
+    "自治",
+    "时间纪律",
+    "接管",
+    "审计",
+    "修复",
+    "队列",
+)
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -481,9 +514,20 @@ def _normalize_query_fragment(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
 
 
+def _discovery_fragment_plausible(value: Any) -> bool:
+    cleaned = _clean_query_text(value)
+    if not cleaned:
+        return False
+    compact = re.sub(r"\s+", "", cleaned)
+    lowered = compact.lower()
+    if any(marker in cleaned for marker in DISCOVERY_FRAGMENT_REJECT_SUBSTRINGS):
+        return False
+    return not any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in DISCOVERY_FRAGMENT_REJECT_PATTERNS)
+
+
 def _query_term_fragments(value: Any, *, limit: int = 6) -> list[str]:
     base = _clean_query_text(value)
-    if not base:
+    if not base or not _discovery_fragment_plausible(base):
         return []
     raw_fragments = [base]
     raw_fragments.extend(
@@ -496,7 +540,13 @@ def _query_term_fragments(value: Any, *, limit: int = 6) -> list[str]:
     for fragment in raw_fragments:
         cleaned = _clean_query_text(fragment)
         normalized = _normalize_query_fragment(cleaned)
-        if not cleaned or not normalized or normalized in QUERY_FRAGMENT_STOPWORDS or normalized in seen:
+        if (
+            not cleaned
+            or not normalized
+            or normalized in QUERY_FRAGMENT_STOPWORDS
+            or normalized in seen
+            or not _discovery_fragment_plausible(cleaned)
+        ):
             continue
         if not re.search(r"[\u3400-\u9fff]", cleaned) and len(cleaned.split()) > 5:
             continue
@@ -540,12 +590,44 @@ def _markdown_bullet_fragments(path: Path, *, limit: int = 12) -> list[str]:
     return _context_fragments_from_items(bullets, field_names=("text",), limit=limit)
 
 
+def _research_bullet_fragments(path: Path, *, limit: int = 12) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    bullets = [
+        line.strip()[2:].strip()
+        for line in raw.splitlines()
+        if line.strip().startswith("- ")
+        and any(token in line for token in DISCOVERY_AGENDA_THEME_TOKENS)
+    ]
+    return _context_fragments_from_items(bullets, field_names=("text",), limit=limit)
+
+
+def _world_sample_fragments(items: list[dict[str, Any]], *, limit: int = 12) -> list[str]:
+    samples: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("post_title") or "").strip()
+        if title:
+            samples.append({"text": title})
+        summary = str(item.get("summary") or item.get("reason") or "").strip()
+        if summary:
+            samples.append({"text": summary})
+    return _context_fragments_from_items(samples, field_names=("text",), limit=limit)
+
+
 def _memory_objective_fragments(*, limit: int = 10) -> list[str]:
     payload = read_json(MEMORY_STORE_PATH, default={})
     items: list[dict[str, Any]] = []
     for section in ("active_objectives", "user_global_preferences"):
         for item in payload.get(section) or []:
             if not isinstance(item, dict):
+                continue
+            if str(item.get("source") or "").strip() == "heartbeat":
                 continue
             items.append(item)
     return _context_fragments_from_items(items, field_names=("summary",), limit=limit)
@@ -628,8 +710,8 @@ def _discovery_query_bundles(
     profile = read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile())
     origin_pools = {
         "agenda": _context_fragments_from_items(
-            _markdown_bullet_fragments(AGENTS_MEMORY_PATH, limit=12)
-            + _markdown_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=12),
+            _research_bullet_fragments(AGENTS_MEMORY_PATH, limit=12)
+            + _research_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=12),
             field_names=("text",),
             limit=12,
         ),
@@ -660,8 +742,8 @@ def _discovery_query_bundles(
             limit=8,
         ),
     }
-    strategic_origins = ["agenda", "objective", "manual", "hint", "interest"]
-    world_origins = ["community", "competitor"]
+    strategic_origins = ["hint", "manual", "interest"]
+    world_origins = ["community", "competitor", "objective"]
     seed_order = _rotating_origin_fragments(origin_pools, strategic_origins, limit=MAX_RESEARCH_QUERY_COUNT)
     if not seed_order:
         seed_order = _rotating_origin_fragments(origin_pools, strategic_origins + world_origins, limit=MAX_RESEARCH_QUERY_COUNT)
@@ -669,7 +751,7 @@ def _discovery_query_bundles(
     seen_queries: set[str] = set()
     lens_order = _rotating_origin_fragments(
         origin_pools,
-        ["community", "competitor", "objective", "hint", "manual", "interest", "agenda"],
+        ["community", "competitor", "hint", "manual", "interest"],
         limit=MAX_RESEARCH_QUERY_COUNT * 2,
     )
     for origin, root in seed_order:
@@ -716,12 +798,14 @@ def _discovery_query_bundles(
         return bundles
     fallback_queries: list[dict[str, Any]] = []
     seen_queries = set()
-    fallback_values = []
-    fallback_values.extend(_memory_objective_fragments(limit=6))
-    fallback_values.extend(_markdown_bullet_fragments(AGENTS_MEMORY_PATH, limit=6))
-    fallback_values.extend(list(hints_payload.get("manual_queries") or []))
-    fallback_values.extend(item.get("name") for item in profile.get("interests") or [])
-    for value in fallback_values:
+    fallback_values: list[tuple[str, Any]] = []
+    fallback_values.extend(("manual", value) for value in list(hints_payload.get("manual_queries") or []))
+    fallback_values.extend(("world-sample", value) for value in _world_sample_fragments(community_hot_posts, limit=5))
+    fallback_values.extend(("world-sample", value) for value in _world_sample_fragments(competitor_watchlist, limit=5))
+    fallback_values.extend(("objective", value) for value in _memory_objective_fragments(limit=6))
+    fallback_values.extend(("interest", item.get("name")) for item in profile.get("interests") or [])
+    fallback_values.extend(("agenda", value) for value in _research_bullet_fragments(CONTENT_STRATEGY_REFERENCE_PATH, limit=4))
+    for origin, value in fallback_values:
         for query in _query_expansions(value):
             normalized = _normalize_query_fragment(query)
             if normalized in seen_queries:
@@ -734,8 +818,8 @@ def _discovery_query_bundles(
                     "query": query,
                     "queries": [query],
                     "terms": [query],
-                    "origins": ["fallback"],
-                    "seed_origin": "fallback",
+                    "origins": [origin],
+                    "seed_origin": origin,
                 }
             )
             if len(fallback_queries) >= MAX_RESEARCH_QUERY_COUNT:

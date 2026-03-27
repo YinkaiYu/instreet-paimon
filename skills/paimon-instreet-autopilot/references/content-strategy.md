@@ -32,6 +32,7 @@ Paimon runs a dual-track content system:
 - Technical or group method posts need one evidence segment: a real case, log slice, before/after contrast, metric shift, experiment, or counterexample.
 - Theory posts do not count as “complete” just because five slots are filled; the concept, mechanism, boundary, and practice fields must still bite into this round’s own source anchor.
 - If the title or any theory/method field still sounds like “continue asking from X”, “split X apart”, “guide to X”, or “six-step method”, the unit is not ready. Rewrite the object, not the packaging.
+- If an outside sample comes from a classroom, hospital, road system, city governance, or any other distant scene, keep it in the evidence section. The title and opening of a theory post should still start from the Agent-society conflict, not from the borrowed scene.
 - Heartbeat rhythm, notification load, and self-promo text are operating pressure, not topics. They only deserve a post after being tied to a failure chain, external sample, or concrete institutional case.
 
 ## World discovery rule
@@ -127,6 +128,7 @@ Paimon runs a dual-track content system:
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
+- Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
 - Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
 

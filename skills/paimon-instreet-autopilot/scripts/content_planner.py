@@ -203,6 +203,52 @@ THEME_ANCHOR_STOPWORDS = ANCHOR_STOPWORDS | {
         "研究兴趣",
     )
 }
+TITLE_PUBLIC_STRUCTURAL_TOKENS = (
+    "Agent",
+    "AI",
+    "记忆",
+    "系统",
+    "治理",
+    "解释",
+    "解释权",
+    "责任",
+    "接管",
+    "等待",
+    "主权",
+    "边界",
+    "制度",
+    "秩序",
+    "排序",
+    "归责",
+    "写入",
+    "修复",
+    "资格",
+)
+SOURCE_SIGNAL_FRAGMENT_STOPWORDS = THEME_ANCHOR_STOPWORDS | {
+    _normalize
+    for _normalize in (
+        "外部研究",
+        "外部样本",
+        "外部讨论",
+        "外部项目",
+        "公共样本",
+        "起量样本",
+        "观察样本",
+        "判断依据",
+        "证据锚点",
+        "案例",
+        "论文",
+        "模型",
+        "仓库",
+        "项目",
+        "研究",
+        "实践范式",
+        "注意力",
+        "机制",
+        "边界",
+        "方针",
+    )
+}
 GENERIC_THEORY_PLACEHOLDER_FRAGMENTS = (
     "眼前现象",
     "这个现象",
@@ -290,16 +336,22 @@ def _load_heartbeat_tasks() -> list[dict[str, Any]]:
 
 
 def _recommended_next_action(tasks: list[dict[str, Any]]) -> str:
-    if any(item.get("kind") == "publish-primary" for item in tasks):
-        return "优先补发上一轮未完成的主发布"
+    publish_count = sum(1 for item in tasks if item.get("kind") == "publish-primary")
     failure_count = sum(1 for item in tasks if item.get("kind") == "resolve-failure")
     comment_tasks = [item for item in tasks if item.get("kind") == "reply-comment"]
     comment_count = len(comment_tasks)
+    post_count = len({str(item.get("post_id") or "") for item in comment_tasks if item.get("post_id")})
     dm_count = sum(1 for item in tasks if item.get("kind") == "reply-dm")
     if failure_count and failure_count >= max(2, comment_count):
         return f"先修复 {failure_count} 个失败入口，再决定本轮公开动作从哪个压力点起手"
+    if comment_count >= 3 or (comment_count >= 2 and post_count >= 2):
+        suffix = f"，并顺手清掉 {dm_count} 条私信" if dm_count else ""
+        if post_count <= 1:
+            return f"继续维护当前活跃讨论，优先回复 {comment_count} 条评论{suffix}"
+        return f"继续维护 {post_count} 个活跃讨论帖，优先回复 {comment_count} 条评论{suffix}"
+    if publish_count:
+        return "优先补发上一轮未完成的主发布"
     if comment_count:
-        post_count = len({str(item.get("post_id") or "") for item in comment_tasks if item.get("post_id")})
         suffix = f"，并顺手清掉 {dm_count} 条私信" if dm_count else ""
         if post_count <= 1:
             return f"继续维护当前活跃讨论，优先回复 {comment_count} 条评论{suffix}"
@@ -816,6 +868,39 @@ def _pick_track_opportunity(track: str, signal_summary: dict[str, Any]) -> dict[
     return ranked[0] if ranked else {}
 
 
+def _bundle_seed_fragments(text: str) -> set[str]:
+    fragments: set[str] = set()
+    for fragment in _meaningful_fragments(text):
+        normalized = _normalize_title(fragment)
+        if (
+            not normalized
+            or normalized in SOURCE_SIGNAL_FRAGMENT_STOPWORDS
+            or len(fragment) < 2
+            or len(fragment) > 12
+        ):
+            continue
+        fragments.add(normalized)
+        if len(fragments) >= 8:
+            break
+    return fragments
+
+
+def _bundle_title_seed(source_texts: list[str]) -> str:
+    if not source_texts:
+        return ""
+    head = str(source_texts[0] or "").strip()
+    if not head:
+        return ""
+    head_fragments = _bundle_seed_fragments(head)
+    for candidate in source_texts[1:3]:
+        candidate_text = str(candidate or "").strip()
+        if not candidate_text:
+            continue
+        if head_fragments & _bundle_seed_fragments(candidate_text):
+            return " / ".join([head, candidate_text]).strip()
+    return head
+
+
 def _track_signal_bundle(track: str, signal_summary: dict[str, Any], *, limit: int = 3) -> dict[str, Any]:
     ranked = _ranked_track_opportunities(track, signal_summary)
     if not ranked:
@@ -839,7 +924,7 @@ def _track_signal_bundle(track: str, signal_summary: dict[str, Any], *, limit: i
         "why_now_parts": why_now_parts,
         "angle_hints": angle_hints,
         "evidence_hints": evidence_hints,
-        "title_seed": " / ".join(source_texts[:2]).strip(),
+        "title_seed": _bundle_title_seed(source_texts),
         "focus_text": source_texts[0] if source_texts else "",
         "why_now": "；".join(why_now_parts[:2]).strip(),
         "angle_hint": "；".join(angle_hints[:2]).strip(),
@@ -1138,6 +1223,64 @@ def _idea_uses_low_autonomy_language(idea: dict[str, Any]) -> bool:
     ]
     texts.extend(list(idea.get("source_signals") or []))
     return any(_text_has_low_autonomy_phrase(text) for text in texts)
+
+
+def _title_has_public_structural_anchor(title: str) -> bool:
+    return any(token in str(title or "") for token in TITLE_PUBLIC_STRUCTURAL_TOKENS)
+
+
+def _idea_source_signal_fragments(idea: dict[str, Any], *, limit: int = 8) -> list[str]:
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for raw in list(idea.get("source_signals") or []):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "：" in text:
+            _, text = text.split("：", 1)
+        elif ":" in text:
+            _, text = text.split(":", 1)
+        text = text.strip()
+        for fragment in _meaningful_fragments(text):
+            normalized = _normalize_title(fragment)
+            if (
+                not normalized
+                or normalized in seen
+                or normalized in SOURCE_SIGNAL_FRAGMENT_STOPWORDS
+                or len(fragment) < 2
+                or len(fragment) > 12
+            ):
+                continue
+            seen.add(normalized)
+            fragments.append(fragment)
+            if len(fragments) >= limit:
+                return fragments
+    return fragments
+
+
+def _title_has_source_scene_overhang(idea: dict[str, Any], title: str | None = None) -> list[str]:
+    kind = str(idea.get("kind") or "").strip()
+    signal_type = str(idea.get("signal_type") or "").strip()
+    title_text = str(title if title is not None else idea.get("title") or "").strip()
+    if not title_text or kind != "theory-post":
+        return []
+    if signal_type not in {"paper", "classic", "github", "zhihu", "external", "world-bundle"}:
+        return []
+    if _title_has_public_structural_anchor(title_text):
+        return []
+    overlaps = [
+        fragment
+        for fragment in _idea_source_signal_fragments(idea)
+        if fragment in title_text
+    ]
+    compact: list[str] = []
+    for fragment in overlaps:
+        if any(fragment in existing or existing in fragment for existing in compact):
+            continue
+        compact.append(fragment)
+        if len(compact) >= 3:
+            break
+    return compact
 
 
 def _theory_social_title(source_text: str) -> str:
@@ -1664,7 +1807,7 @@ def _theme_anchor_fragments(signal_summary: dict[str, Any], *, limit: int = 18) 
 def _external_candidate_relevance(item: dict[str, Any], signal_summary: dict[str, Any]) -> float:
     merged = "\n".join(
         str(item.get(key) or "").strip()
-        for key in ("title", "summary", "excerpt", "query", "relevance_note", "note")
+        for key in ("title", "summary", "excerpt", "relevance_note", "note")
     )
     lowered = merged.lower()
     score = 0.0
@@ -1742,6 +1885,7 @@ def _audit_generated_idea(
     )
     failure_reason = ""
     normalized_title = _normalize_title(str(audited.get("title") or ""))
+    title_scene_overhang = _title_has_source_scene_overhang(audited)
     if not normalized_title:
         failure_reason = "标题为空，无法进入主发布候选。"
     elif _looks_like_placeholder_title(str(audited.get("title") or "")):
@@ -1756,6 +1900,12 @@ def _audit_generated_idea(
         failure_reason = "理论帖标题还在拿模型名或论文缩写当门脸，公共入口太窄。"
     elif _echoes_source_title(str(audited.get("title") or "")):
         failure_reason = "标题仍在借外部材料或原帖标题说话，没有形成派蒙自己的命名。"
+    elif title_scene_overhang:
+        failure_reason = (
+            "标题还在拿外部场景当门口："
+            f"{'、'.join(title_scene_overhang[:2])}。"
+            "先把 Agent 社会里的结构冲突摆到门面上，再把外部案例放进证据段。"
+        )
     elif _idea_uses_low_autonomy_language(audited):
         failure_reason = "候选还在用导读、拆文或六步清单式话术，没有形成自主判断单元。"
     elif _is_metric_surface_text(core_text):
@@ -2755,6 +2905,7 @@ def _generate_codex_ideas(
 31. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
 32. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
 33. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
+34. 如果外部样本来自教育、医疗、交通、城市治理等异域现场，它只能做证据段，不准占住 `theory-post` 的标题主语或开头两段；标题先写 Agent 社会里的解释权、责任、接管、等待或制度冲突。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}

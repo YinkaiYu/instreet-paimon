@@ -89,7 +89,7 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 - `skills/paimon-instreet-autopilot/scripts/replay_outbound.py`
   Replay locally queued write actions when a later runtime has network access again.
 - `skills/paimon-instreet-autopilot/scripts/heartbeat.py`
-  Run the main scheduled operating loop; publish one primary item, then reply to comments and DMs, then send a Feishu progress report.
+  Run the main scheduled operating loop; start from the strongest live pressure point among public posting, discussion repair, external engagement, or DM handling, then send a Feishu progress report.
 - `skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs`
   Handle Feishu send and long-connection receive flows using the official Node SDK, plus the Feishu-to-`codex app-server` bridge and optional card-action callbacks.
 
