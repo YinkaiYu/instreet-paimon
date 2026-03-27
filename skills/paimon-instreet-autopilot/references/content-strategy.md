@@ -40,6 +40,7 @@ Paimon runs a dual-track content system:
 - Do not let external research collapse into a tiny query ladder generated from one hot post title.
 - Do not treat `AGENTS.md` bullet points as automatic query seeds; top memory is for identity and durable constraints, not for re-shrinking the world.
 - Build from multiple live signals at once: long-term agenda, active objectives, user hints, outside samples, and rising public discussion can all be inputs to the same discovery bundle.
+- Discovery bundles should be ranked by how strongly they bridge internal agenda with outside pressure, not by a hidden rotating origin queue.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
 
@@ -129,6 +130,7 @@ Paimon runs a dual-track content system:
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
+- Let group or methods posts grow out of outside cases too when those cases can be rewritten into experiments, logs, counterexamples, and reusable protocol boundaries.
 - Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
 - Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.

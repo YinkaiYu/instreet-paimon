@@ -962,6 +962,65 @@ def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[st
     }
 
 
+def _fallback_lane_pressure_entries(signal_summary: dict[str, Any], *, group_enabled: bool) -> list[dict[str, Any]]:
+    external_information = signal_summary.get("external_information") or {}
+    world_bundle_count = len(list(external_information.get("discovery_bundles") or []))
+    world_candidate_count = len(_iter_external_world_candidates(external_information, limit=10))
+    community_hot_count = len(_high_like_external_posts(list(signal_summary.get("community_hot_posts") or [])))
+    rising_hot_count = len(_high_like_external_posts(list(signal_summary.get("rising_hot_posts") or [])))
+    unresolved_count = len(signal_summary.get("unresolved_failures") or [])
+    reply_pressure_count = len(signal_summary.get("pending_reply_posts") or [])
+    group_heat_count = len(((signal_summary.get("group_watch") or {}).get("hot_posts") or [])[:4])
+
+    ranked = [
+        {
+            "kind": "theory-post",
+            "score": round(
+                1.1
+                + world_bundle_count * 0.75
+                + min(world_candidate_count, 8) * 0.18
+                + min(community_hot_count, 4) * 0.22
+                + min(rising_hot_count, 3) * 0.28,
+                2,
+            ),
+            "reason": "外部世界和公共讨论还在给理论线供压，不需要为了空缺去伪造别的 lane。",
+        },
+        {
+            "kind": "tech-post",
+            "score": round(
+                0.9
+                + min(unresolved_count, 4) * 0.85
+                + world_bundle_count * 0.35
+                + min(world_candidate_count, 6) * 0.16
+                + min(reply_pressure_count, 4) * 0.12,
+                2,
+            ),
+            "reason": "失败链、回退链和外部协议样本还没收口，技术线更像真实压力而不是配额补位。",
+        },
+    ]
+    if group_enabled:
+        ranked.append(
+            {
+                "kind": "group-post",
+                "score": round(
+                    0.8
+                    + min(group_heat_count, 4) * 0.9
+                    + min(unresolved_count, 3) * 0.45
+                    + min(world_candidate_count, 5) * 0.18,
+                    2,
+                ),
+                "reason": "实验室有对象可做，外部样本也够具体，小组帖可以直接沉淀成实验框架。",
+            }
+        )
+    return sorted(
+        ranked,
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("kind") or ""),
+        ),
+    )
+
+
 def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled: bool) -> dict[str, Any]:
     ranked = [
         entry
@@ -974,14 +1033,34 @@ def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled
     ]
     ranked.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("track") or "")))
     if not ranked:
-        fallback_kinds = ["theory-post", "tech-post"] + (["group-post"] if group_enabled else [])
-        selected_kinds = fallback_kinds[:1]
+        fallback_ranked = _fallback_lane_pressure_entries(signal_summary, group_enabled=group_enabled)
+        if not fallback_ranked:
+            return {
+                "selected_kinds": [],
+                "focus_kind": "",
+                "backup_kinds": [],
+                "lane_scores": [],
+                "rationale": "当前动态信号不足，也没有值得硬补的默认 lane。",
+            }
+        selected_kinds = [str(fallback_ranked[0].get("kind") or "")]
+        top_score = float(fallback_ranked[0].get("score") or 0.0)
+        max_slots = 3 if group_enabled else 2
+        for item in fallback_ranked[1:]:
+            if float(item.get("score") or 0.0) >= max(1.8, top_score - 0.65):
+                selected_kinds.append(str(item.get("kind") or ""))
+            if len(selected_kinds) >= max_slots:
+                break
+        focus_kind = selected_kinds[0] if selected_kinds else ""
+        backup_kinds = selected_kinds[1:]
         return {
             "selected_kinds": selected_kinds,
-            "focus_kind": selected_kinds[0] if selected_kinds else "",
-            "backup_kinds": [],
-            "lane_scores": [],
-            "rationale": "当前动态信号不足，先保留一个最基础的公开 lane 作为起点，不恢复双 lane 起步的隐藏配额。",
+            "focus_kind": focus_kind,
+            "backup_kinds": backup_kinds,
+            "lane_scores": fallback_ranked[:max_slots],
+            "rationale": (
+                f"当前动态信号不足，就按真实残压保留 {focus_kind} 起手。"
+                f" {str(fallback_ranked[0].get('reason') or '').strip()}"
+            ),
         }
 
     selected_kinds: list[str] = [str(ranked[0].get("kind") or "")]
@@ -1149,12 +1228,32 @@ def _compose_fragment_title(track: str, *texts: str) -> str:
     return ("系统判断" if track == "tech" else "新的社会命名")
 
 
+def _fallback_track_anchor(track: str, signal_type: str, source_text: str) -> str:
+    anchors = {
+        "theory": ["解释权", "责任切割", "等待资格", "制度边界", "承认秩序"],
+        "tech": ["接管窗口", "恢复链", "状态分层", "证据回写", "回退路径"],
+        "group": ["方法边界", "实验对象", "失败链"],
+    }.get(track, ["判断边界"])
+    return anchors[_stable_pattern_index(track, signal_type, source_text, modulo=len(anchors))]
+
+
+def _ensure_title_anchor(title: str, anchor: str) -> str:
+    title = str(title or "").strip()
+    anchor = str(anchor or "").strip()
+    if not title or not anchor or anchor in title:
+        return title
+    if "：" in title:
+        left, right = title.split("：", 1)
+        if _normalize_title(right) == _normalize_title(anchor):
+            return truncate_text(title, 30)
+        return truncate_text(f"{left}：{anchor}", 30)
+    return truncate_text(f"{title}：{anchor}", 30)
+
+
 def _fallback_dynamic_title(track: str, signal_type: str, source_text: str) -> str:
     signal_type = str(signal_type or "").strip()
-    fragments = _runtime_title_fragments(source_text, signal_type.replace("-", " "))
-    acronyms = _extract_upper_acronyms(source_text)
-    token = fragments[0] if fragments else (acronyms[0] if acronyms else "")
-    fallback_seed = {
+    anchor = _fallback_track_anchor(track, signal_type, source_text)
+    signal_seed = {
         "paper": "研究前沿",
         "github": "新工具链",
         "classic": "旧概念",
@@ -1166,31 +1265,11 @@ def _fallback_dynamic_title(track: str, signal_type: str, source_text: str) -> s
         "external": "外部世界",
         "world-bundle": "世界现场",
         "freeform": "新秩序",
-    }.get(signal_type, "新秩序")
-    token = token or fallback_seed
-    focus = fragments[1] if len(fragments) >= 2 else ("解释权" if track == "theory" else "恢复链")
-    if track == "theory":
-        patterns = [
-            f"{token}不是在变多，它在改写{focus}",
-            f"当{token}开始扩张，{focus}就不再中立",
-            f"{token}看起来是功能，先被重排的是{focus}",
-            f"别把{token}当升级，它先改了{focus}",
-        ]
-        return truncate_text(patterns[_stable_pattern_index(track, signal_type, source_text, modulo=len(patterns))], 30)
-    if track == "tech":
-        patterns = [
-            f"{token}一旦失真，{focus}就会先断",
-            f"{token}越灵活，{focus}越容易失控",
-            f"别等{token}崩掉才补{focus}",
-            f"{token}表面在提效，先掉线的是{focus}",
-        ]
-        return truncate_text(patterns[_stable_pattern_index(track, signal_type, source_text, modulo=len(patterns))], 30)
-    patterns = [
-        f"Agent心跳同步实验室：{token}怎样吞掉{focus}",
-        f"Agent心跳同步实验室：先定义{focus}，再谈{token}",
-        f"Agent心跳同步实验室：{token}失真后谁来接管{focus}",
-    ]
-    return truncate_text(patterns[_stable_pattern_index(track, signal_type, source_text, modulo=len(patterns))], 30)
+    }.get(signal_type, "")
+    title = _compose_fragment_title(track, source_text, signal_type.replace("-", " "), signal_seed, anchor)
+    if track == "group":
+        return title
+    return _ensure_title_anchor(title, anchor)
 
 
 def _echoes_source_title(title: str) -> bool:
@@ -2119,23 +2198,41 @@ def _build_engagement_targets(
     def target_reason(source: str, item: dict[str, Any]) -> str:
         upvotes = int(item.get("upvotes") or 0)
         comments = int(item.get("comment_count") or 0)
+        created_at = _parse_datetime(item.get("created_at"))
+        age_hint = ""
+        if created_at is not None:
+            age_hours = max((datetime.now(timezone.utc) - created_at).total_seconds() / 3600.0, 0.0)
+            if age_hours <= 6:
+                age_hint = "还在起飞"
+            elif age_hours <= 24:
+                age_hint = "还在发酵"
+            elif age_hours <= 48:
+                age_hint = "余温还在"
         heat_bits = []
         if upvotes > 0:
             heat_bits.append(f"{upvotes} 赞")
         if comments > 0:
             heat_bits.append(f"{comments} 评")
         heat_text = " / ".join(heat_bits)
+        density_hint = ""
+        if comments >= max(12, upvotes // 2):
+            density_hint = "评论密度已经够高"
+        elif upvotes >= 300:
+            density_hint = "公共可见度已经被抬起来"
+        elif comments >= 20:
+            density_hint = "讨论开始咬住具体分歧"
         if source == "group-hot":
-            if heat_text:
-                return f"实验室里的讨论已经发酵到 {heat_text}，现在接入最容易把案例沉淀成方法框架。"
-            return "实验室里已经有值得接住的讨论，适合直接补方法边界。"
+            details = "，".join(part for part in (heat_text and f"热度到 {heat_text}", density_hint) if part)
+            prefix = f"{age_hint}的实验室讨论" if age_hint else "实验室里有一段值得接住的讨论"
+            return f"{prefix}{('，' + details) if details else ''}，现在切进去最容易把对象、证据和方法边界一起钉住。"
         if source == "community-hot":
-            if heat_text:
-                return f"公共讨论已经起量到 {heat_text}，适合趁热把外部样本翻成社会观察。"
-            return "公共讨论正在起势，适合趁热把外部样本翻成社会观察。"
-        if heat_text:
-            return f"这条外部作者的帖子已经卷起 {heat_text}，适合正面接触并校验派蒙自己的判断。"
-        return "这条外部作者的帖子值得正面接触，并拿来校验派蒙自己的判断。"
+            details = "，".join(part for part in (heat_text and f"热度到 {heat_text}", density_hint) if part)
+            prefix = f"{age_hint}的公共讨论" if age_hint else "公共讨论正在往上抬"
+            return f"{prefix}{('，' + details) if details else ''}，现在接触更适合把现场争论上抬成制度判断。"
+        author = str(item.get("author") or item.get("username") or "").strip()
+        details = "，".join(part for part in (heat_text and f"已经卷到 {heat_text}", density_hint) if part)
+        prefix = f"{author} 的外部帖子" if author else "这条外部帖子"
+        return f"{prefix}{('，' + details) if details else ''}，值得正面试探并拿来校验派蒙自己的判断。"
 
     def priority_bucket(score: float) -> int:
         if score >= 10.0:
@@ -2370,6 +2467,41 @@ def _external_family_profile(family: str) -> dict[str, Any]:
             },
         },
     }
+
+
+def _external_candidate_supports_group_lane(
+    family: str,
+    *,
+    evidence_hint: str,
+    summary_source: str,
+) -> bool:
+    normalized = str(family or "").strip() or "external"
+    if not str(evidence_hint or "").strip() and not str(summary_source or "").strip():
+        return False
+    if normalized in {"classic_readings", "marxists"}:
+        return False
+    return normalized in {
+        "community_breakouts",
+        "github_trending",
+        "manual_web",
+        "open_web_search",
+        "prl_recent",
+        "conference_recent",
+        "arxiv_latest",
+        "crossref_recent",
+        "external",
+    }
+
+
+def _external_group_angle_hint(family: str) -> str:
+    normalized = str(family or "").strip() or "external"
+    if normalized in ACADEMIC_EXTERNAL_FAMILIES:
+        return "把外部研究改写成能在实验室复现、反驳和留日志的方法框架，不要退回论文摘要。"
+    if normalized == "github_trending":
+        return "把外部项目拆成对象、状态、反例和边界，写成别人明天就能复用的实验方案。"
+    if normalized == "community_breakouts":
+        return "把起量争议压成实验对象：先定义现象，再带案例、日志和边界，不要继续围观热帖。"
+    return "把外部样本改写成可检验的方法框架，至少交出对象、证据、协议边界和反例入口。"
 
 
 def _iter_external_world_candidates(external_information: dict[str, Any], *, limit: int = 24) -> list[dict[str, Any]]:
@@ -2638,6 +2770,24 @@ def _dynamic_opportunities(
                 + min(relevance_score, 1.2)
                 + (0.4 if evidence_hint else 0.0),
                 freshness_score=float(track_profile.get("freshness_score") or 0.0),
+                evidence_hint=evidence_hint,
+            )
+        if _external_candidate_supports_group_lane(
+            family,
+            evidence_hint=evidence_hint,
+            summary_source=summary_source,
+        ):
+            add_source(
+                "group",
+                str(profile.get("signal_type") or family),
+                title,
+                why_now=summary,
+                angle_hint=_external_group_angle_hint(family),
+                quality_score=3.4 + strength + min(relevance_score, 1.0) + (0.5 if evidence_hint else 0.0),
+                freshness_score=max(
+                    1.4,
+                    float(((profile.get("tracks") or {}).get("tech") or {}).get("freshness_score") or 0.0),
+                ),
                 evidence_hint=evidence_hint,
             )
 

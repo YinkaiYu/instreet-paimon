@@ -6027,6 +6027,67 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
     return results
 
 
+def _first_external_observation_title(summary: dict[str, Any]) -> str:
+    for item in list(summary.get("external_observations") or []):
+        title = str((item or {}).get("title") or "").strip()
+        if title:
+            return title
+    return ""
+
+
+def _report_next_action_label(item: dict[str, Any], summary: dict[str, Any]) -> str:
+    kind = str(item.get("kind") or "").strip()
+    label = str(item.get("label") or "").strip()
+    primary_title = str(summary.get("primary_publication_title") or "").strip()
+    focus_kind = str((summary.get("idea_lane_strategy") or {}).get("focus_kind") or "").strip()
+    if kind == "publish-primary":
+        if primary_title:
+            return f"把《{truncate_text(primary_title, 30)}》这条公开主线补完"
+        if focus_kind:
+            return f"把这轮{_public_kind_display_name(focus_kind)}主动作补完"
+        return label or "继续完成这轮公开主动作"
+    if kind == "resolve-failure":
+        visible_failures = [
+            detail
+            for detail in list(summary.get("failure_details") or [])
+            if not _is_normal_mechanism_item(detail)
+        ]
+        if visible_failures:
+            return f"先收口 {len(visible_failures)} 个失败链，别让恢复链继续挂空"
+        return label or "先把未解决失败项收口"
+    if kind == "steady-state":
+        lead = str((summary.get("runtime_stage_strategy") or {}).get("lead") or "").strip()
+        if lead == "engage-external":
+            observation_title = _first_external_observation_title(summary)
+            if observation_title:
+                return f"顺着《{truncate_text(observation_title, 30)}》这类外部信号继续往外打"
+        if lead == "reply-comments":
+            active_post_count = int((summary.get("comment_backlog") or {}).get("active_post_count") or 0)
+            if active_post_count > 0:
+                return f"继续守住 {active_post_count} 个活跃讨论帖，别让高价值评论断线"
+        if lead == "reply-dms" and int(summary.get("dm_reply_count") or 0) > 0:
+            return "继续收口私信线程，别让高价值对话掉回队列"
+        if lead == "publish-primary" and focus_kind:
+            return f"继续把这轮{_public_kind_display_name(focus_kind)}主动作往前推"
+        return label or _steady_state_pressure_label()
+    return label or _steady_state_pressure_label()
+
+
+def _report_next_action_lines(summary: dict[str, Any], *, limit: int = 3) -> list[str]:
+    labels: list[str] = []
+    for item in list(summary.get("next_actions") or [])[:limit]:
+        label = _report_next_action_label(item, summary)
+        if label and label not in labels:
+            labels.append(label)
+    if labels:
+        return labels[:limit]
+    fallback = _report_next_action_label(
+        {"kind": "steady-state", "label": _steady_state_pressure_label()},
+        summary,
+    )
+    return [fallback] if fallback else []
+
+
 def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -> str:
     actions = summary.get("actions", [])
     comment_backlog = summary.get("comment_backlog", {})
@@ -6115,7 +6176,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         lines.append("失败明细：0 条")
 
     lines.append("下一轮待办：")
-    lines.extend(f"- {item.get('label')}" for item in next_actions[:3])
+    lines.extend(f"- {label}" for label in _report_next_action_lines(summary, limit=3))
     lines.append(f"完成时间：{summary.get('ran_at') or now_utc()}")
     return "\n".join(lines)
 
@@ -6716,6 +6777,10 @@ def main() -> None:
         "low_heat_reflection": low_heat_reflection,
         "actions": actions,
     }
+    summary["recommended_next_action"] = next(
+        iter(_report_next_action_lines(summary, limit=1)),
+        summary.get("recommended_next_action") or _steady_state_pressure_label(),
+    )
 
     feishu_report_sent = False
     if feishu_report_required:

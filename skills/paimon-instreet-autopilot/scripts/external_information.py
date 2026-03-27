@@ -132,6 +132,18 @@ DISCOVERY_AGENDA_THEME_TOKENS = (
     "修复",
     "队列",
 )
+DISCOVERY_ORIGIN_BIASES = {
+    "manual": 1.25,
+    "world-sample": 1.2,
+    "community": 1.05,
+    "competitor": 1.0,
+    "hint": 0.95,
+    "agenda": 0.9,
+    "objective": 0.85,
+    "interest": 0.75,
+}
+DISCOVERY_WORLD_ORIGINS = {"manual", "world-sample", "community", "competitor"}
+DISCOVERY_LOCAL_ORIGINS = {"agenda", "objective", "hint", "interest"}
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -630,49 +642,177 @@ def _memory_objective_fragments(*, limit: int = 10) -> list[str]:
     return _context_fragments_from_items(items, field_names=("summary",), limit=limit)
 
 
-def _rotating_origin_fragments(
+def _discovery_origin_bias(origin: str) -> float:
+    return float(DISCOVERY_ORIGIN_BIASES.get(str(origin or "").strip(), 0.55))
+
+
+def _fragment_specificity_score(fragment: str) -> float:
+    compact = re.sub(r"\s+", "", str(fragment or ""))
+    if not compact:
+        return 0.0
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", compact))
+    word_count = len(str(fragment or "").split())
+    score = 0.35
+    if cjk_count >= 4 or 2 <= word_count <= 4:
+        score += 0.7
+    elif cjk_count >= 2 or word_count >= 1:
+        score += 0.45
+    if len(compact) > 18 or word_count > 6:
+        score -= 0.2
+    if "《" in str(fragment or "") or "》" in str(fragment or ""):
+        score -= 0.15
+    return max(score, 0.0)
+
+
+def _pick_representative_fragment(fragments: list[str]) -> str:
+    candidates = [str(item or "").strip() for item in fragments if str(item or "").strip()]
+    if not candidates:
+        return ""
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -_fragment_specificity_score(item),
+            abs(len(re.sub(r"\s+", "", item)) - 8),
+            item,
+        ),
+    )[0]
+
+
+def _fragments_overlap(left: str, right: str) -> bool:
+    left_normalized = _normalize_query_fragment(left)
+    right_normalized = _normalize_query_fragment(right)
+    if not left_normalized or not right_normalized:
+        return False
+    return (
+        left_normalized == right_normalized
+        or left_normalized in right_normalized
+        or right_normalized in left_normalized
+    )
+
+
+def _ranked_discovery_fragments(
     origin_pools: dict[str, list[str]],
-    origins: list[str],
     *,
     limit: int,
-) -> list[tuple[str, str]]:
-    pools = {origin: list(origin_pools.get(origin) or []) for origin in origins}
-    active = [origin for origin in origins if pools.get(origin)]
-    if not active:
-        return []
-    start_index = int(datetime.now(timezone.utc).strftime("%H")) % len(active)
-    active = active[start_index:] + active[:start_index]
-    ordered: list[tuple[str, str]] = []
-    while active and len(ordered) < limit:
-        next_active: list[str] = []
-        for origin in active:
-            pool = pools.get(origin) or []
-            if not pool:
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for origin, values in origin_pools.items():
+        seen_within_origin: set[str] = set()
+        for value in list(values or [])[:12]:
+            fragment = _clean_query_text(value)
+            normalized = _normalize_query_fragment(fragment)
+            if (
+                not fragment
+                or not normalized
+                or normalized in seen_within_origin
+                or not _discovery_fragment_plausible(fragment)
+            ):
                 continue
-            ordered.append((origin, pool.pop(0)))
-            if pool:
-                next_active.append(origin)
-            if len(ordered) >= limit:
-                break
-        active = next_active
-    return ordered
-
-
-def _live_origin_order(origin_pools: dict[str, list[str]], *, phase: int = 0) -> list[str]:
-    active = [origin for origin, values in origin_pools.items() if values]
-    if not active:
-        return []
-    ordered = sorted(
-        active,
-        key=lambda origin: (
-            -len(origin_pools.get(origin) or []),
-            -sum(len(item) for item in (origin_pools.get(origin) or [])[:2]),
-            origin,
-        ),
+            seen_within_origin.add(normalized)
+            entry = grouped.setdefault(
+                normalized,
+                {
+                    "normalized": normalized,
+                    "fragments": [],
+                    "origins": set(),
+                    "origin_bias": 0.0,
+                },
+            )
+            entry["fragments"].append(fragment)
+            entry["origins"].add(origin)
+            entry["origin_bias"] = max(float(entry.get("origin_bias") or 0.0), _discovery_origin_bias(origin))
+    ranked: list[dict[str, Any]] = []
+    for entry in grouped.values():
+        origins = {str(item).strip() for item in entry.get("origins") or set() if str(item).strip()}
+        fragment = _pick_representative_fragment(list(entry.get("fragments") or []))
+        if not fragment:
+            continue
+        bridge_bonus = 0.0
+        if origins & DISCOVERY_WORLD_ORIGINS and origins & DISCOVERY_LOCAL_ORIGINS:
+            bridge_bonus += 0.9
+        elif origins & DISCOVERY_WORLD_ORIGINS:
+            bridge_bonus += 0.35
+        score = (
+            _fragment_specificity_score(fragment)
+            + float(entry.get("origin_bias") or 0.0)
+            + max(0, len(origins) - 1) * 0.85
+            + bridge_bonus
+        )
+        ranked.append(
+            {
+                "fragment": fragment,
+                "normalized": str(entry.get("normalized") or "").strip(),
+                "origins": sorted(origins, key=lambda origin: (-_discovery_origin_bias(origin), origin)),
+                "score": round(score, 3),
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -len(list(item.get("origins") or [])),
+            len(str(item.get("fragment") or "")),
+            str(item.get("fragment") or ""),
+        )
     )
-    current = datetime.now(timezone.utc)
-    shift = (current.hour + current.timetuple().tm_yday + phase) % len(ordered)
-    return ordered[shift:] + ordered[:shift]
+    return ranked[:limit]
+
+
+def _build_discovery_bundle(
+    root: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    seen_queries: set[str],
+) -> dict[str, Any] | None:
+    root_fragment = str(root.get("fragment") or "").strip()
+    root_normalized = str(root.get("normalized") or "").strip()
+    if not root_fragment or not root_normalized:
+        return None
+    root_origins = list(root.get("origins") or [])
+    lenses: list[str] = []
+    lens_origins: list[str] = []
+    for candidate in candidates:
+        fragment = str(candidate.get("fragment") or "").strip()
+        if (
+            not fragment
+            or _fragments_overlap(root_fragment, fragment)
+            or any(_fragments_overlap(fragment, existing) for existing in lenses)
+        ):
+            continue
+        origins = list(candidate.get("origins") or [])
+        novel_origins = [origin for origin in origins if origin not in root_origins and origin not in lens_origins]
+        if not novel_origins and lenses:
+            continue
+        lenses.append(fragment)
+        lens_origins.append((novel_origins or origins or [""])[0])
+        if len(lenses) >= DISCOVERY_QUERY_MAX_TERMS - 1:
+            break
+    queries = _bundle_queries(root_fragment, lenses)
+    primary_query = next(
+        (
+            query
+            for query in queries
+            if _normalize_query_fragment(query) not in seen_queries
+        ),
+        "",
+    )
+    if not primary_query:
+        return None
+    for query in queries:
+        seen_queries.add(_normalize_query_fragment(query))
+    origins = []
+    for origin in [*root_origins, *lens_origins]:
+        cleaned = str(origin or "").strip()
+        if cleaned and cleaned not in origins:
+            origins.append(cleaned)
+    return {
+        "focus": root_fragment,
+        "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
+        "query": primary_query,
+        "queries": queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE],
+        "terms": [root_fragment, *lenses][:DISCOVERY_QUERY_MAX_TERMS],
+        "origins": origins[:DISCOVERY_QUERY_MAX_TERMS],
+        "seed_origin": origins[0] if origins else "",
+    }
 
 
 def _bundle_queries(root: str, lenses: list[str]) -> list[str]:
@@ -751,90 +891,41 @@ def _discovery_query_bundles(
             field_names=("title", "summary"),
             limit=8,
         ),
+        "world-sample": _world_sample_fragments(community_hot_posts, limit=6)
+        + _world_sample_fragments(competitor_watchlist, limit=6),
     }
-    active_origins = _live_origin_order(origin_pools)
-    seed_order = _rotating_origin_fragments(origin_pools, active_origins, limit=MAX_RESEARCH_QUERY_COUNT)
-    if not seed_order:
-        seed_order = _rotating_origin_fragments(origin_pools, active_origins, limit=MAX_RESEARCH_QUERY_COUNT)
+    ranked_fragments = _ranked_discovery_fragments(
+        origin_pools,
+        limit=max(MAX_RESEARCH_QUERY_COUNT * 4, 12),
+    )
     bundles: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
-    lens_order = _rotating_origin_fragments(
-        origin_pools,
-        _live_origin_order(origin_pools, phase=7),
-        limit=MAX_RESEARCH_QUERY_COUNT * 2,
-    )
-    for origin, root in seed_order:
-        lenses: list[str] = []
-        lens_origins: list[str] = []
-        root_normalized = _normalize_query_fragment(root)
-        for lens_origin, fragment in lens_order:
-            normalized = _normalize_query_fragment(fragment)
-            if lens_origin == origin or normalized == root_normalized:
-                continue
-            lenses.append(fragment)
-            lens_origins.append(lens_origin)
-            if len(lenses) >= DISCOVERY_QUERY_MAX_TERMS - 1:
-                break
-        queries = _bundle_queries(root, lenses)
-        if not queries:
+    for root in ranked_fragments:
+        bundle = _build_discovery_bundle(root, ranked_fragments, seen_queries=seen_queries)
+        if not bundle:
             continue
-        primary_query = next(
-            (
-                query
-                for query in queries
-                if _normalize_query_fragment(query) not in seen_queries
-            ),
-            "",
-        )
-        if not primary_query:
-            continue
-        for query in queries:
-            seen_queries.add(_normalize_query_fragment(query))
-        bundles.append(
-            {
-                "focus": root,
-                "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
-                "query": primary_query,
-                "queries": queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE],
-                "terms": [root, *lenses][:DISCOVERY_QUERY_MAX_TERMS],
-                "origins": [origin, *lens_origins][:DISCOVERY_QUERY_MAX_TERMS],
-                "seed_origin": origin,
-            }
-        )
+        bundles.append(bundle)
         if len(bundles) >= MAX_RESEARCH_QUERY_COUNT:
             break
     if bundles:
         return bundles
-    fallback_queries: list[dict[str, Any]] = []
-    seen_queries = set()
-    fallback_values: list[tuple[str, Any]] = []
     dynamic_fallback_pools = {
         **origin_pools,
-        "world-sample": _world_sample_fragments(community_hot_posts, limit=5)
-        + _world_sample_fragments(competitor_watchlist, limit=5),
+        "interest": origin_pools.get("interest") or [
+            str(item.get("name") or "").strip()
+            for item in profile.get("interests") or []
+            if str(item.get("name") or "").strip()
+        ],
     }
-    for origin in _live_origin_order(dynamic_fallback_pools, phase=13):
-        fallback_values.extend((origin, value) for value in list(dynamic_fallback_pools.get(origin) or []))
-    fallback_values.extend(("interest", item.get("name")) for item in profile.get("interests") or [])
-    for origin, value in fallback_values:
-        for query in _query_expansions(value):
-            normalized = _normalize_query_fragment(query)
-            if normalized in seen_queries:
-                continue
-            seen_queries.add(normalized)
-            fallback_queries.append(
-                {
-                    "focus": query,
-                    "lenses": [],
-                    "query": query,
-                    "queries": [query],
-                    "terms": [query],
-                    "origins": [origin],
-                    "seed_origin": origin,
-                }
-            )
-            if len(fallback_queries) >= MAX_RESEARCH_QUERY_COUNT:
-                return fallback_queries
+    fallback_queries: list[dict[str, Any]] = []
+    fallback_seen_queries: set[str] = set()
+    for root in _ranked_discovery_fragments(dynamic_fallback_pools, limit=MAX_RESEARCH_QUERY_COUNT * 2):
+        bundle = _build_discovery_bundle(root, [], seen_queries=fallback_seen_queries)
+        if not bundle:
+            continue
+        fallback_queries.append(bundle)
+        if len(fallback_queries) >= MAX_RESEARCH_QUERY_COUNT:
+            break
     return fallback_queries
 
 
