@@ -550,6 +550,24 @@ def _looks_like_placeholder_title(text: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in PLACEHOLDER_TITLE_PATTERNS)
 
 
+def _signal_seed_text(*values: Any, limit: int = 72) -> str:
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text or _looks_like_placeholder_title(text):
+            continue
+        return truncate_text(text, limit)
+    return ""
+
+
+def _preferred_signal_seed_text(
+    item: dict[str, Any],
+    *,
+    field_order: tuple[str, ...],
+    limit: int = 72,
+) -> str:
+    return _signal_seed_text(*(item.get(field) for field in field_order), limit=limit)
+
+
 def _extract_upper_acronyms(*texts: str, limit: int = 3) -> list[str]:
     picked: list[str] = []
     seen: set[str] = set()
@@ -1765,7 +1783,22 @@ def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list
             cleaned = str(value or "").strip()
             if cleaned:
                 texts.append(cleaned)
-    texts.extend(str(item.get("title") or "").strip() for item in _iter_external_world_candidates(external_information, limit=6))
+    for item in external_information.get("reading_notes") or []:
+        seed = _preferred_signal_seed_text(
+            item,
+            field_order=("summary", "excerpt", "title"),
+            limit=72,
+        )
+        if seed:
+            texts.append(seed)
+    for item in _iter_external_world_candidates(external_information, limit=6):
+        seed = _preferred_signal_seed_text(
+            item,
+            field_order=("relevance_note", "summary", "abstract", "excerpt", "note", "query", "title"),
+            limit=72,
+        )
+        if seed:
+            texts.append(seed)
     texts.extend(str(item or "").strip() for item in signal_summary.get("content_objectives") or [])
     texts.extend(str((item or {}).get("text") or "").strip() for item in signal_summary.get("user_topic_hints") or [])
     return _dedupe_texts([text for text in texts if text])[:limit]
@@ -2168,8 +2201,8 @@ def _theme_anchor_fragments(signal_summary: dict[str, Any], *, limit: int = 18) 
     for text in external_information.get("research_queries") or []:
         collect(text)
     for item in external_information.get("reading_notes") or []:
-        collect((item or {}).get("title"))
         collect((item or {}).get("summary"))
+        collect((item or {}).get("title"))
     for item in signal_summary.get("user_topic_hints") or []:
         collect((item or {}).get("text"))
         collect((item or {}).get("note"))
@@ -3010,13 +3043,14 @@ def _dynamic_opportunities(
             or ""
         ).strip()
         summary = truncate_text(summary_source, 180)
+        source_seed = _signal_seed_text(summary_source, title, limit=72) or title
         evidence_hint = _evidence_hint_from_text(summary_source, item.get("excerpt"), item.get("summary"))
         strength = _external_signal_strength(item)
         for track, track_profile in (profile.get("tracks") or {}).items():
             add_source(
                 track,
                 str(profile.get("signal_type") or family),
-                title,
+                source_seed,
                 why_now=summary,
                 angle_hint=str(track_profile.get("angle_hint") or "").strip(),
                 preferred_board=str(track_profile.get("preferred_board") or "").strip() or None,
@@ -3035,7 +3069,7 @@ def _dynamic_opportunities(
             add_source(
                 "group",
                 str(profile.get("signal_type") or family),
-                title,
+                source_seed,
                 why_now=summary,
                 angle_hint=_external_group_angle_hint(family),
                 quality_score=3.4 + strength + min(relevance_score, 1.0) + (0.5 if evidence_hint else 0.0),
@@ -3047,38 +3081,44 @@ def _dynamic_opportunities(
             )
 
     for item in rising_hot_posts[:3]:
-        title = str(item.get("title") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "content", "title"), limit=72)
         velocity = float(item.get("velocity_per_hour") or 0.0)
         why_now = f"正在起飞的公共样本，当前增速约 {velocity:.1f}/小时"
         add_source("theory", "rising-hot", title, why_now=why_now, quality_score=4.0, freshness_score=3.0)
         add_source("tech", "rising-hot", title, why_now=why_now, quality_score=3.5, freshness_score=3.0)
     for item in community_hot_posts[:4]:
-        title = str(item.get("title") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "content", "title"), limit=72)
         why_now = f"高热公共讨论，约 {int(item.get('upvotes') or 0)} 赞 / {int(item.get('comment_count') or 0)} 评"
         add_source("theory", "community-hot", title, why_now=why_now, quality_score=4.0, freshness_score=2.0)
         add_source("tech", "community-hot", title, why_now=why_now, quality_score=3.0, freshness_score=2.0)
     for item in (group_watch.get("hot_posts") or [])[:3]:
-        title = str(item.get("title") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "content", "title"), limit=72)
         add_source("theory", "discussion", title, quality_score=2.0, freshness_score=1.0)
         add_source("tech", "community-hot", title, quality_score=2.5, freshness_score=1.0)
     for item in competitor_watchlist[:4]:
-        title = str(item.get("title") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "reason", "title"), limit=72)
         add_source("theory", "discussion", title, quality_score=3.0, freshness_score=1.5)
         add_source("tech", "community-hot", title, quality_score=3.0, freshness_score=1.5)
     for item in unresolved[:2]:
-        title = str(item.get("post_title") or item.get("error") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "post_title", "error"), limit=72)
         add_source("tech", "failure", title, why_now="现场失败链路", quality_score=2.0, freshness_score=1.0)
         add_source("group", "failure", title, why_now="现场失败链路", quality_score=2.0, freshness_score=1.0)
     for item in reply_posts[:2]:
-        title = str(item.get("post_title") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "post_title"), limit=72)
         add_source("theory", "reply-pressure", title, quality_score=1.0, freshness_score=1.0)
         add_source("tech", "reply-pressure", title, quality_score=1.0, freshness_score=1.0)
     for item in feed_watchlist[:3]:
-        title = str(item.get("title") or "").strip()
+        title = _preferred_signal_seed_text(item, field_order=("summary", "reason", "title"), limit=72)
         add_source("theory", "feed", title, quality_score=2.0, freshness_score=1.0)
         add_source("tech", "feed", title, quality_score=2.0, freshness_score=1.0)
     for item in top_discussion[:2]:
-        add_source("theory", "discussion", str(item.get("title") or "").strip(), quality_score=2.0, freshness_score=1.0)
+        add_source(
+            "theory",
+            "discussion",
+            _preferred_signal_seed_text(item, field_order=("summary", "post_title", "title"), limit=72),
+            quality_score=2.0,
+            freshness_score=1.0,
+        )
     for prompt in _generate_freeform_prompts(signal_summary):
         add_source("theory", "freeform", prompt, quality_score=1.5, freshness_score=1.0)
     for hint in signal_summary.get("user_topic_hints", [])[:4]:

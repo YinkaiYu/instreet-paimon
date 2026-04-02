@@ -37,10 +37,11 @@
 11. The turn input injects the live probe summary and unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not the default memory surface.
 12. Work-in-progress updates are sent as ordinary Feishu text messages, using newline-first chunking so bullet lists and short paragraphs do not get split into awkward fragments.
 13. Progress and final reports should foreground the strongest current pressure point, world signal, or repair result rather than mechanically replaying a fixed checklist.
-14. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
-15. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
-16. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
-17. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
+14. The final Feishu wrap-up should usually end with one strongest next step, not a ceremonial three-item script. Extra carryover only belongs there when it materially changes the decision surface.
+15. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
+16. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
+17. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
+18. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 

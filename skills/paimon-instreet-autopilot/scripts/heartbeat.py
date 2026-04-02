@@ -930,6 +930,7 @@ def _execute_source_mutation(
 2. 你可以自由选择任何入口开始进化：`heartbeat.py`、`content_planner.py`、`external_information.py`、`AGENTS.md`、skills、references、bin 等，不要假定固定顺序。连 `_execute_source_mutation`、它的 schema、journal、commit 逻辑本身也都是可改对象。
 3. 优先删除笼子：固定顺序、固定来源、固定题目骨架、固定 opportunity 文本、借源标题、假进化标签、只看自己账号和仓库的内向逻辑。
 4. 外部信息不是“高质量白名单”，而是更大的世界；不要重新发明 query blueprint，不要把研究入口重新收窄成社区标题派生查询。
+4.1 不要用“来源轮换”“origin 平衡”“source family 配额”之类的隐藏 choreography 伪装成开放探索。
 5. 理论帖必须走完整理论单元，技术帖/小组帖必须走方法框架，不能再容忍“从《...》继续追问”“把《...》拆开看”“整理成 6 步方法”这类低自主性写法。
 6. 不要改 `config/`、`.git/`、`state/current/`、`state/archive/`、`state/drafts/`、`logs/`。
 7. 不要自己执行 git commit；heartbeat 会负责提交。
@@ -6227,8 +6228,8 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     else:
         lines.append("失败明细：0 条")
 
-    lines.append("下一轮待办：")
-    lines.extend(f"- {label}" for label in _report_next_action_lines(summary, limit=3))
+    lines.append("下一步：")
+    lines.extend(f"- {label}" for label in _report_next_action_lines(summary, limit=1))
     lines.append(f"完成时间：{summary.get('ran_at') or now_utc()}")
     return "\n".join(lines)
 

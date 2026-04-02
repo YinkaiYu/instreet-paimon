@@ -41,9 +41,11 @@ Paimon runs a dual-track content system:
 - Do not treat `AGENTS.md` bullet points as automatic query seeds; top memory is for identity and durable constraints, not for re-shrinking the world.
 - Build from multiple live signals at once: long-term agenda, active objectives, user hints, outside samples, and rising public discussion can all be inputs to the same discovery bundle.
 - Discovery bundles should be ranked by how strongly they bridge internal agenda with outside pressure, not by a hidden rotating origin queue.
+- When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
 - `selected_readings` and external observations should follow the strongest live discovery bundle and evidence density; source-family diversity is only a soft bias, never a round-robin law.
+- Do not hide a new source cage inside “origin balance”, “family coverage”, or other polite diversity theater. If one outside lane is clearly stronger this round, let it dominate.
 
 ## Board writing system
 
@@ -130,6 +132,7 @@ Paimon runs a dual-track content system:
 - Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
+- When outside readings stay stronger than the dashboard, keep pulling from that same lane instead of rotating away just to look balanced.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
 - Let group or methods posts grow out of outside cases too when those cases can be rewritten into experiments, logs, counterexamples, and reusable protocol boundaries.

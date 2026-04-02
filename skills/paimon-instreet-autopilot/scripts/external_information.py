@@ -5,7 +5,6 @@ import html
 import json
 import re
 import xml.etree.ElementTree as ET
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -615,17 +614,45 @@ def _reference_interest_fragments(*, limit: int = 12) -> list[str]:
 
 
 def _world_sample_fragments(items: list[dict[str, Any]], *, limit: int = 12) -> list[str]:
-    samples: list[dict[str, str]] = []
+    fragments: list[str] = []
+    seen: set[str] = set()
+
+    def append_texts(texts: list[str]) -> None:
+        for fragment in _context_fragments_from_items(
+            [{"text": text} for text in texts if str(text or "").strip()],
+            field_names=("text",),
+            limit=max(4, limit * 2),
+        ):
+            normalized = _normalize_query_fragment(fragment)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            fragments.append(fragment)
+            if len(fragments) >= limit:
+                return
+
     for item in items:
         if not isinstance(item, dict):
             continue
-        summary = str(item.get("summary") or item.get("reason") or "").strip()
-        if summary:
-            samples.append({"text": summary})
+        preferred_texts = [
+            str(item.get("summary") or "").strip(),
+            str(item.get("reason") or "").strip(),
+            str(item.get("content") or "").strip(),
+            str(item.get("excerpt") or "").strip(),
+            str(item.get("note") or "").strip(),
+        ]
+        before_count = len(fragments)
+        append_texts(preferred_texts)
+        if len(fragments) >= limit:
+            return fragments[:limit]
+        if len(fragments) > before_count:
+            continue
         title = str(item.get("title") or item.get("post_title") or "").strip()
         if title:
-            samples.append({"text": title})
-    return _context_fragments_from_items(samples, field_names=("text",), limit=limit)
+            append_texts([title])
+            if len(fragments) >= limit:
+                return fragments[:limit]
+    return fragments[:limit]
 
 
 def _memory_objective_fragments(*, limit: int = 10) -> list[str]:
@@ -803,6 +830,12 @@ def _build_discovery_bundle(
         cleaned = str(origin or "").strip()
         if cleaned and cleaned not in origins:
             origins.append(cleaned)
+    bundle_score = float(root.get("score") or 0.0)
+    bundle_score += min(len(lenses), DISCOVERY_QUERY_MAX_TERMS - 1) * 0.35
+    if set(origins) & DISCOVERY_WORLD_ORIGINS and set(origins) & DISCOVERY_LOCAL_ORIGINS:
+        bundle_score += 0.4
+    elif set(origins) & DISCOVERY_WORLD_ORIGINS:
+        bundle_score += 0.18
     return {
         "focus": root_fragment,
         "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
@@ -811,6 +844,7 @@ def _build_discovery_bundle(
         "terms": [root_fragment, *lenses][:DISCOVERY_QUERY_MAX_TERMS],
         "origins": origins[:DISCOVERY_QUERY_MAX_TERMS],
         "seed_origin": origins[0] if origins else "",
+        "score": round(bundle_score, 3),
     }
 
 
@@ -940,21 +974,15 @@ def _research_query_pool(
     )
     queries: list[str] = []
     seen: set[str] = set()
-    origin_seen: set[str] = set()
-    ordered_bundles: list[dict[str, Any]] = []
-    remaining = list(bundles)
-    while remaining:
-        picked_index = 0
-        for index, item in enumerate(remaining):
-            seed_origin = str(item.get("seed_origin") or "").strip()
-            if seed_origin and seed_origin not in origin_seen:
-                picked_index = index
-                break
-        item = remaining.pop(picked_index)
-        seed_origin = str(item.get("seed_origin") or "").strip()
-        if seed_origin:
-            origin_seen.add(seed_origin)
-        ordered_bundles.append(item)
+    ordered_bundles = sorted(
+        list(bundles),
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -len(list(item.get("queries") or [])),
+            -len(list(item.get("terms") or [])),
+            str(item.get("query") or ""),
+        ),
+    )
 
     for item in ordered_bundles:
         primary_query = str(item.get("query") or "").strip()
@@ -1635,32 +1663,26 @@ def _select_readings(
         ),
     )
     selected: list[dict[str, Any]] = []
-    family_counts: defaultdict[str, int] = defaultdict(int)
     uncovered_focus = set(focus_terms)
     while ranked and len(selected) < limit:
         best_index = 0
         best_sort_key: tuple[Any, ...] | None = None
         for index, item in enumerate(ranked[: max(limit * 3, 24)]):
-            family = str(item.get("_selection_family") or item.get("family") or "").strip()
             hits = [str(hit).strip() for hit in list(item.get("_focus_hits") or []) if str(hit).strip()]
             candidate_score = float(item.get("_selection_score") or 0.0)
             if uncovered_focus and any(hit in uncovered_focus for hit in hits):
                 candidate_score += 0.4
-            candidate_score -= max(0, family_counts[family] - 1) * 0.55
             sort_key = (
                 -round(candidate_score, 3),
                 -len(hits),
-                family_counts[family],
                 -len(str(item.get("excerpt") or item.get("summary") or "")),
-                family,
+                str(item.get("_selection_family") or item.get("family") or ""),
                 str(item.get("title") or ""),
             )
             if best_sort_key is None or sort_key < best_sort_key:
                 best_index = index
                 best_sort_key = sort_key
         picked = ranked.pop(best_index)
-        family = str(picked.get("_selection_family") or picked.get("family") or "").strip()
-        family_counts[family] += 1
         uncovered_focus.difference_update(str(hit).strip() for hit in list(picked.get("_focus_hits") or []))
         selected.append(
             {

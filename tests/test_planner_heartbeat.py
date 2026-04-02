@@ -138,6 +138,35 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertFalse(any("2199" in item["source_text"] for item in opportunities))
         self.assertFalse(any("每3小时" in item["source_text"] for item in opportunities))
 
+    def test_dynamic_opportunities_prefer_external_summary_over_title_seed(self) -> None:
+        signal_summary = {
+            "external_information": {
+                "selected_readings": [
+                    {
+                        "family": "open_web_search",
+                        "title": "ToolboxX / Explicit Waiting",
+                        "summary": "等待开始从产品细节变成治理接口，组织开始要求系统交出可审计停顿状态。",
+                        "excerpt": "等待开始从产品细节变成治理接口，组织开始要求系统交出可审计停顿状态。",
+                        "url": "https://example.com/waiting",
+                    }
+                ]
+            },
+            "novelty_pressure": content_planner._novelty_pressure([]),
+        }
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary=signal_summary,
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        external_sources = [
+            item["source_text"]
+            for item in opportunities
+            if item.get("signal_type") == "external"
+        ]
+        self.assertTrue(external_sources)
+        self.assertTrue(any("治理接口" in text for text in external_sources))
+        self.assertFalse(any("ToolboxX / Explicit Waiting" == text for text in external_sources))
+
     def test_dynamic_opportunities_ignore_low_like_external_samples(self) -> None:
         opportunities = content_planner._dynamic_opportunities(
             signal_summary={
@@ -200,7 +229,7 @@ class ContentPlannerTests(unittest.TestCase):
             recent_titles=[],
             heartbeat_hours=3,
         )
-        self.assertTrue(any(item["source_text"] == "采购方开始要求 Agent 给出可审计等待状态" for item in opportunities))
+        self.assertTrue(any("治理接口" in item["source_text"] for item in opportunities))
 
     def test_dynamic_opportunities_skip_irrelevant_academic_papers(self) -> None:
         original_freeform = content_planner._generate_freeform_prompts
@@ -1387,6 +1416,32 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertNotIn("外部互动：", report)
         self.assertNotIn("通知清理：", report)
 
+    def test_compose_feishu_report_keeps_only_strongest_next_step(self) -> None:
+        report = heartbeat._compose_feishu_report(
+            {
+                "ran_at": "2026-03-21T10:10:24+00:00",
+                "account_snapshot": {
+                    "finished": {"score": 1, "follower_count": 2, "like_count": 3},
+                    "delta": {"score": 0, "follower_count": 0, "like_count": 0},
+                },
+                "comment_backlog": {
+                    "replied_count": 2,
+                    "active_post_count": 1,
+                    "next_batch_count": 1,
+                },
+                "external_engagement_count": 0,
+                "failure_details": [],
+                "next_actions": [
+                    {"kind": "reply-comment", "label": "继续维护 1 个活跃讨论帖"},
+                    {"kind": "publish-primary", "label": "补发技术主帖"},
+                ],
+                "actions": [],
+            },
+            failure_detail_limit=3,
+        )
+        self.assertIn("下一步：\n- 继续维护 1 个活跃讨论帖", report)
+        self.assertNotIn("补发技术主帖", report)
+
     def test_compose_feishu_report_hides_normal_forum_budget_exhaustion(self) -> None:
         report = heartbeat._compose_feishu_report(
             {
@@ -2279,6 +2334,44 @@ class ExternalInformationTests(unittest.TestCase):
             any("AI 社会的时间纪律" in str(term) for bundle in bundles for term in list(bundle.get("terms") or []))
         )
         self.assertTrue(any(bundle.get("seed_origin") in {"community", "world-sample"} for bundle in bundles))
+
+    def test_select_readings_does_not_rotate_away_from_stronger_same_family_material(self) -> None:
+        discovery_bundles = [{"focus": "等待状态", "terms": ["等待状态"], "lenses": []}]
+        selected = external_information._select_readings(
+            {
+                "open_web_search": [
+                    {
+                        "family": "open_web_search",
+                        "title": "等待状态的治理接口",
+                        "summary": "等待状态已经变成治理接口。",
+                        "excerpt": "等待状态已经变成治理接口，系统需要交出可审计停顿状态和责任回写。",
+                        "url": "https://example.com/a",
+                    },
+                    {
+                        "family": "open_web_search",
+                        "title": "显式等待协议",
+                        "summary": "显式等待协议开始决定谁能接管。",
+                        "excerpt": "显式等待协议开始决定谁能接管，团队开始把等待状态写成审计对象。",
+                        "url": "https://example.com/b",
+                    },
+                ],
+                "classic_readings": [
+                    {
+                        "family": "classic_readings",
+                        "title": "旧概念材料",
+                        "summary": "等待状态值得讨论。",
+                        "excerpt": "等待状态值得讨论，但这里没有更强的新证据。",
+                        "url": "https://example.com/c",
+                    }
+                ],
+            },
+            discovery_bundles=discovery_bundles,
+            limit=2,
+        )
+        self.assertEqual(
+            {"等待状态的治理接口", "显式等待协议"},
+            {item["title"] for item in selected},
+        )
 
     def test_world_sample_fragments_prefer_summary_before_title(self) -> None:
         fragments = external_information._world_sample_fragments(
