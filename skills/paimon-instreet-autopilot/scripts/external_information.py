@@ -198,15 +198,9 @@ def _normalize_registry_family(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _registry_families(registry: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = list(registry.get("families") or [])
+    raw = [item for item in list(registry.get("families") or []) if isinstance(item, dict)]
     if not raw:
         raw = _default_registry_families()
-    else:
-        seen_names = {str((item or {}).get("name") or "").strip() for item in raw if isinstance(item, dict)}
-        for item in _default_registry_families():
-            name = str(item.get("name") or "").strip()
-            if name and name not in seen_names:
-                raw.append(item)
     return [_normalize_registry_family(item) for item in raw if isinstance(item, dict)]
 
 
@@ -776,6 +770,18 @@ def _ranked_discovery_fragments(
     return ranked[:limit]
 
 
+def _fragment_has_world_grounding(entry: dict[str, Any]) -> bool:
+    origins = {str(item).strip() for item in list(entry.get("origins") or []) if str(item).strip()}
+    return bool(origins & DISCOVERY_WORLD_ORIGINS)
+
+
+def _prioritize_root_fragments(ranked_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    world_grounded = [item for item in ranked_fragments if _fragment_has_world_grounding(item)]
+    if not world_grounded:
+        return ranked_fragments
+    return world_grounded + [item for item in ranked_fragments if not _fragment_has_world_grounding(item)]
+
+
 def _build_discovery_bundle(
     root: dict[str, Any],
     candidates: list[dict[str, Any]],
@@ -908,7 +914,7 @@ def _discovery_query_bundles(
     )
     bundles: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
-    for root in ranked_fragments:
+    for root in _prioritize_root_fragments(ranked_fragments):
         bundle = _build_discovery_bundle(root, ranked_fragments, seen_queries=seen_queries)
         if not bundle:
             continue
@@ -927,7 +933,8 @@ def _discovery_query_bundles(
     }
     fallback_queries: list[dict[str, Any]] = []
     fallback_seen_queries: set[str] = set()
-    for root in _ranked_discovery_fragments(dynamic_fallback_pools, limit=MAX_RESEARCH_QUERY_COUNT * 2):
+    fallback_ranked = _ranked_discovery_fragments(dynamic_fallback_pools, limit=MAX_RESEARCH_QUERY_COUNT * 2)
+    for root in _prioritize_root_fragments(fallback_ranked):
         bundle = _build_discovery_bundle(root, [], seen_queries=fallback_seen_queries)
         if not bundle:
             continue
@@ -958,6 +965,27 @@ def _research_query_pool(
             str(item.get("query") or ""),
         ),
     )
+    hints_payload = _load_hints()
+    direct_reference_queries = _context_fragments_from_items(
+        list(hints_payload.get("manual_queries") or []),
+        field_names=("text",),
+        limit=4,
+    ) + _context_fragments_from_items(
+        list(user_topic_hints or []),
+        field_names=("text", "note"),
+        limit=4,
+    )
+    reserved_direct_slots = min(
+        2,
+        len(
+            {
+                _normalize_query_fragment(str(query or "").strip())
+                for query in direct_reference_queries
+                if _normalize_query_fragment(str(query or "").strip())
+            }
+        ),
+    )
+    primary_query_limit = max(1, MAX_RESEARCH_QUERY_COUNT - reserved_direct_slots)
 
     for item in ordered_bundles:
         primary_query = str(item.get("query") or "").strip()
@@ -966,6 +994,16 @@ def _research_query_pool(
             continue
         seen.add(normalized)
         queries.append(primary_query)
+        if len(queries) >= primary_query_limit:
+            break
+
+    for query in direct_reference_queries:
+        cleaned = str(query or "").strip()
+        normalized = _normalize_query_fragment(cleaned)
+        if not cleaned or normalized in seen:
+            continue
+        seen.add(normalized)
+        queries.append(cleaned)
         if len(queries) >= MAX_RESEARCH_QUERY_COUNT:
             return bundles, queries
 
@@ -1635,17 +1673,52 @@ def _reading_recency_bonus(value: Any) -> float:
     return 0.0
 
 
+def _reading_evidence_density_bonus(text: str) -> float:
+    if not text:
+        return 0.0
+    lowered = text.lower()
+    markers = (
+        "案例",
+        "机制",
+        "边界",
+        "协议",
+        "失败",
+        "治理",
+        "日志",
+        "实验",
+        "对照",
+        "冲突",
+        "case",
+        "evidence",
+        "failure",
+        "protocol",
+        "boundary",
+        "governance",
+        "audit",
+        "log",
+    )
+    hits = 0
+    for marker in markers:
+        if re.search(r"[\u3400-\u9fff]", marker):
+            matched = marker in text
+        else:
+            matched = marker in lowered
+        if matched:
+            hits += 1
+    return min(hits, 4) * 0.09
+
+
 def _reading_selection_score(item: dict[str, Any], focus_terms: list[str]) -> tuple[float, list[str]]:
     family = str(item.get("family") or "").strip()
     excerpt = str(item.get("excerpt") or item.get("summary") or "").strip()
     hits = _reading_focus_hits(item, focus_terms)
+    candidate_text = _reading_candidate_text(item)
     score = 0.35 + min(len(hits), 3) * 1.05
     score += min(len(excerpt) / 900.0, 0.55)
     score += _reading_recency_bonus(item.get("published_at"))
+    score += _reading_evidence_density_bonus(candidate_text)
     if str(item.get("url") or "").strip():
         score += 0.1
-    if family in {"community_breakouts", "open_web_search", "manual_web", "github_trending"}:
-        score += 0.2
     if family == "classic_readings" and not hits:
         score -= 0.45
     return score, hits
@@ -1678,7 +1751,6 @@ def _select_readings(
             -float(item.get("_selection_score") or 0.0),
             -len(list(item.get("_focus_hits") or [])),
             -len(str(item.get("excerpt") or item.get("summary") or "")),
-            str(item.get("family") or ""),
             str(item.get("title") or ""),
         ),
     )
@@ -1696,7 +1768,6 @@ def _select_readings(
                 -round(candidate_score, 3),
                 -len(hits),
                 -len(str(item.get("excerpt") or item.get("summary") or "")),
-                str(item.get("_selection_family") or item.get("family") or ""),
                 str(item.get("title") or ""),
             )
             if best_sort_key is None or sort_key < best_sort_key:

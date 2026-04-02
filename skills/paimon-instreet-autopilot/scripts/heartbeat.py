@@ -986,7 +986,7 @@ fallback 轨迹：
     return {
         "generated_at": now_utc(),
         "executed": bool(changed_files),
-        "human_summary": str(last_result.get("human_summary") or "").strip(),
+        "human_summary": _sanitize_source_mutation_summary(str(last_result.get("human_summary") or "").strip()),
         "commit_sha": "",
         "changed_files": changed_files,
         "deleted_legacy_logic": _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or []))[:6],
@@ -1522,18 +1522,8 @@ def _run_heartbeat_write(
 
 
 def _primary_diversity_bias(kind: str, cycle_state: dict[str, Any]) -> float:
-    recent_kinds = [str(item).strip() for item in (cycle_state.get("recent_kinds") or []) if str(item).strip()]
-    kind_counts = cycle_state.get("kind_counts") or {}
-    bias = 0.0
-    last_kind = str(cycle_state.get("last_primary_kind") or "").strip()
-    if last_kind and last_kind != kind:
-        bias += 0.25
-    elif last_kind == kind:
-        bias -= 0.12
-    if kind not in recent_kinds[:4]:
-        bias += 0.18
-    bias -= min(float(kind_counts.get(kind) or 0.0) * 0.04, 0.22)
-    return bias
+    del kind, cycle_state
+    return 0.0
 
 
 def _primary_live_pressure_bonus(kind: str, plan: dict[str, Any]) -> float:

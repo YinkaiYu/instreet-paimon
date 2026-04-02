@@ -784,6 +784,25 @@ class HeartbeatStateTests(unittest.TestCase):
         )
         self.assertEqual("group-post", ordered[0]["kind"])
 
+    def test_ordered_primary_ideas_keeps_same_focus_lane_when_pressure_stays_there(self) -> None:
+        ordered = heartbeat._ordered_primary_ideas(
+            {
+                "ideas": [
+                    {"kind": "theory-post", "title": "继续打理论主线", "innovation_score": 0},
+                    {"kind": "tech-post", "title": "技术备选", "innovation_score": 0},
+                ],
+                "idea_lane_strategy": {"focus_kind": "theory-post", "backup_kinds": ["tech-post"]},
+                "planning_signals": {
+                    "group_watch": {"hot_posts": []},
+                    "rising_hot_posts": [],
+                    "low_heat_failures": {"items": []},
+                    "unresolved_failures": [],
+                },
+            },
+            {"last_primary_kind": "theory-post", "recent_kinds": ["theory-post"], "kind_counts": {"theory-post": 5}},
+        )
+        self.assertEqual("theory-post", ordered[0]["kind"])
+
     def test_changed_source_files_detect_same_path_updates(self) -> None:
         changed = heartbeat._changed_source_files(
             {"skills/paimon-instreet-autopilot/scripts/heartbeat.py": "old-hash"},
@@ -856,6 +875,50 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(result["executed"])
         self.assertIn("统一记忆快照", captured["prompt"])
         self.assertIn("派蒙拥有最高自由权限", captured["prompt"])
+
+    def test_execute_source_mutation_sanitizes_audit_summary(self) -> None:
+        original_run_codex_json = heartbeat.run_codex_json
+
+        def fake_run_codex_json(*_args, **_kwargs):
+            return {
+                "executed": True,
+                "human_summary": "把外部入口改得更开放。Verification passed with `python -m compileall`. 本轮改动落在 skills/paimon-instreet-autopilot/scripts/external_information.py。",
+                "deleted_legacy_logic": [],
+                "new_capability": [],
+                "changed_files_hint": ["skills/paimon-instreet-autopilot/scripts/external_information.py"],
+            }
+
+        try:
+            heartbeat.run_codex_json = fake_run_codex_json
+            with mock.patch.object(
+                heartbeat,
+                "_workspace_source_fingerprint",
+                side_effect=[
+                    {"skills/paimon-instreet-autopilot/scripts/external_information.py": "before"},
+                    {"skills/paimon-instreet-autopilot/scripts/external_information.py": "after"},
+                ],
+            ):
+                with mock.patch.object(
+                    heartbeat,
+                    "_changed_source_files",
+                    return_value=["skills/paimon-instreet-autopilot/scripts/external_information.py"],
+                ):
+                    result = heartbeat._execute_source_mutation(
+                        plan={"ideas": []},
+                        external_information={},
+                        content_evolution_state={},
+                        low_heat_reflection={"triggered": False},
+                        fallback_audit={},
+                        memory_prompt="身份记忆：\n- 派蒙拥有最高自由权限",
+                        allow_codex=True,
+                        model=None,
+                        reasoning_effort=None,
+                        timeout_seconds=30,
+                    )
+        finally:
+            heartbeat.run_codex_json = original_run_codex_json
+
+        self.assertEqual("把外部入口改得更开放。", result["human_summary"])
 
     def test_workspace_source_paths_only_reads_tracked_candidates(self) -> None:
         completed = heartbeat.subprocess.CompletedProcess(
@@ -2299,6 +2362,25 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertEqual("crossref_recent", families[0]["state_key"])
         self.assertEqual("html", families[1]["kind"])
         self.assertEqual("field-notes", families[1]["state_key"])
+
+    def test_registry_families_do_not_silently_restore_missing_builtins(self) -> None:
+        families = external_information._registry_families(
+            {
+                "families": [
+                    {"name": "field-notes", "kind": "html", "urls": ["https://example.com/world"]},
+                ]
+            }
+        )
+        self.assertEqual(["field-notes"], [item["name"] for item in families])
+
+    def test_prioritize_root_fragments_prefers_world_grounded_entries(self) -> None:
+        ordered = external_information._prioritize_root_fragments(
+            [
+                {"fragment": "长期议程", "origins": ["agenda"], "score": 9.0},
+                {"fragment": "等待状态开始进入治理接口", "origins": ["community", "world-sample"], "score": 6.0},
+            ]
+        )
+        self.assertEqual("等待状态开始进入治理接口", ordered[0]["fragment"])
 
     def test_scholarly_candidate_plausible_rejects_call_for_papers_ads(self) -> None:
         self.assertFalse(
