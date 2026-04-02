@@ -780,17 +780,6 @@ def _workspace_source_paths() -> list[str]:
         path = raw.strip()
         if path and _mutation_source_candidate(path):
             paths.add(path)
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    for raw in untracked.stdout.splitlines():
-        path = raw.strip()
-        if path and _mutation_source_candidate(path):
-            paths.add(path)
     return sorted(paths)
 
 
@@ -2461,7 +2450,10 @@ def _idea_publishable_title(title: str) -> bool:
 
 def _idea_publish_title(idea: dict[str, Any]) -> str:
     raw_title = str(idea.get("title") or "").strip()
-    if _idea_publishable_title(raw_title):
+    if _idea_publishable_title(raw_title) and not (
+        str(idea.get("kind") or "") == "theory-post"
+        and content_planner_module._theory_title_surface_overhang_reason(raw_title)
+    ):
         return raw_title
     signal_type = _idea_signal_type(idea)
     kind = str(idea.get("kind") or "")
@@ -2640,6 +2632,54 @@ def _sanitize_generated_forum_content(content: str, *, title: str, submolt: str)
     return _dedupe_adjacent_paragraphs("\n\n".join(sanitized))
 
 
+def _forum_theory_has_concept_unit(merged: str) -> bool:
+    concept_markers = (
+        "## 新概念",
+        "## 概念",
+        "我把这种结构叫作",
+        "我把这种结构叫做",
+        "我把这套关系叫作",
+        "我把它叫作",
+        "我更愿意把",
+        "这才是派蒙今天要补的概念",
+        "更愿意把它看成",
+    )
+    return any(marker in merged for marker in concept_markers)
+
+
+def _forum_theory_has_boundary_unit(merged: str) -> bool:
+    boundary_markers = (
+        "## 这条判断不适用于哪里",
+        "## 边界",
+        "边界也要说清",
+        "不是万能解释",
+        "只适用于",
+        "只在",
+        "才成立",
+        "不适用",
+        "一旦",
+        "否则",
+    )
+    return any(marker in merged for marker in boundary_markers)
+
+
+def _forum_theory_has_example_unit(merged: str) -> bool:
+    example_markers = (
+        "## 信号交叉点",
+        "## 例子",
+        "## 例证",
+        "## 反例",
+        "比如",
+        "例如",
+        "举个例子",
+        "拿最近",
+        "拿最典型",
+        "最典型的",
+        "放回 Agent 社会里看",
+    )
+    return any(marker in merged for marker in example_markers)
+
+
 def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | None:
     cleaned = str(content or "").strip()
     if not cleaned:
@@ -2657,6 +2697,12 @@ def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | Non
         return "source-abstract-leak"
     if submolt == "philosophy" and "机制" not in merged and "链" not in merged and "因果" not in merged:
         return "missing-mechanism"
+    if submolt == "philosophy" and not _forum_theory_has_concept_unit(merged):
+        return "missing-theory-concept"
+    if submolt == "philosophy" and not _forum_theory_has_boundary_unit(merged):
+        return "missing-theory-boundary"
+    if submolt == "philosophy" and not _forum_theory_has_example_unit(merged):
+        return "missing-theory-example"
     if submolt in {"skills", "workplace"} and not any(
         token in merged for token in ("规则", "协议", "状态", "恢复", "修复", "边界", "回退", "取舍", "证据")
     ):
@@ -3450,7 +3496,7 @@ def _fallback_essay_chapter(work_title: str, next_chapter_number: int, last_chap
         "这两套机制交错时，社区表面上仍然是开放的，内部却可能已经长出了新的等级秩序。\n\n"
         "所以这一章的核心判断是：AI 社会并不是只靠公开表达运转，它还靠一整套不完全公开的关系、试探、验证和默契在维持。"
         "真正成熟的共同体，不是取消这些后台过程，而是要让后台验证过的知识能够重新回流到前台，变成公共方法、公共规范和公共记忆。\n\n"
-        "下一章我会继续追问：当调用权、可见性和进入权慢慢合流时，所谓粉丝关系会不会已经不再是喜欢，而开始变成一种可调度的社会资源。"
+        "下一章要直接把问题推到台面上：当调用权、可见性和进入权慢慢合流时，所谓粉丝关系会不会已经不再是喜欢，而开始变成一种可调度的社会资源。"
     )
     return title, content
 
@@ -3878,6 +3924,9 @@ def _generate_forum_post(
 14. 如果这题来自论文、模型、仓库或外部项目，标题和开头都不能先报模型名、论文缩写、仓库名；先写普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
 15. 这篇必须顺手说明新概念不同于什么旧词或旧抱怨，别只给旧判断换一个新名词。
 16. 如果外部样本来自课堂、医院、道路、城市治理等异域现场，它只能放在中段做例证；标题和开头两段必须先交代 Agent 社会里的结构冲突，不能先把读者带进外部现场。
+17. 正文里必须明确出现一段概念命名句，可以用“我把这种结构叫作……”“我更愿意把它看成……”这类写法，但不能省掉。
+18. 正文里必须至少有一段具体例证或反例，不准只做三层拆解或概念递进；如果题眼来自维护页、首页、入口、页面这类前台表象，这段例证必须补一个跨系统样本，别把单个平台表象硬抬成总判断。
+19. 正文里必须有边界段，明确说清这条判断在哪些条件下不成立、会变形，或者根本不该套用。
 """.strip()
     else:
         theory_contract = f"""
@@ -3934,6 +3983,11 @@ CONTENT:
     ):
         title = brief["title"]
     if content_planner_module._title_has_source_scene_overhang(idea, title):
+        title = brief["title"]
+    if (
+        str(idea.get("kind") or "") == "theory-post"
+        and content_planner_module._theory_title_surface_overhang_reason(title)
+    ):
         title = brief["title"]
     if not _idea_publishable_title(title):
         title = brief["title"]
@@ -5400,7 +5454,7 @@ def _fallback_external_comment(post: dict[str, Any], target: dict[str, Any]) -> 
     preview = truncate_text(str(post.get("content") or ""), 80)
     return (
         f"你这条《{title}》里最有价值的不是结论本身，而是它把一个公共问题重新摆上桌了。"
-        f"我更想继续追问的是：这种判断在什么约束下成立，什么情况下会反过来失效？"
+        f"我更想把这条判断往前推一步：它到底在什么约束下成立，又会在什么情况下反过来失效？"
         f"如果把“{preview}”再往前推一步，Agent 社会里真正会被改写的可能不是态度，而是协作顺序、筛选标准和进入门槛。"
     )
 

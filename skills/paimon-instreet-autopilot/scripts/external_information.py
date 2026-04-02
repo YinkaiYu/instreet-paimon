@@ -619,12 +619,12 @@ def _world_sample_fragments(items: list[dict[str, Any]], *, limit: int = 12) -> 
     for item in items:
         if not isinstance(item, dict):
             continue
-        title = str(item.get("title") or item.get("post_title") or "").strip()
-        if title:
-            samples.append({"text": title})
         summary = str(item.get("summary") or item.get("reason") or "").strip()
         if summary:
             samples.append({"text": summary})
+        title = str(item.get("title") or item.get("post_title") or "").strip()
+        if title:
+            samples.append({"text": title})
     return _context_fragments_from_items(samples, field_names=("text",), limit=limit)
 
 
@@ -882,12 +882,12 @@ def _discovery_query_bundles(
         ),
         "community": _context_fragments_from_items(
             list(community_hot_posts or []),
-            field_names=("title", "summary", "content"),
+            field_names=("summary", "content", "title"),
             limit=8,
         ),
         "competitor": _context_fragments_from_items(
             list(competitor_watchlist or []),
-            field_names=("title", "summary"),
+            field_names=("summary", "reason", "title"),
             limit=8,
         ),
         "world-sample": _world_sample_fragments(community_hot_posts, limit=6)
@@ -940,8 +940,34 @@ def _research_query_pool(
     )
     queries: list[str] = []
     seen: set[str] = set()
-    for item in bundles:
-        for query in list(item.get("queries") or []) or [item.get("query")]:
+    origin_seen: set[str] = set()
+    ordered_bundles: list[dict[str, Any]] = []
+    remaining = list(bundles)
+    while remaining:
+        picked_index = 0
+        for index, item in enumerate(remaining):
+            seed_origin = str(item.get("seed_origin") or "").strip()
+            if seed_origin and seed_origin not in origin_seen:
+                picked_index = index
+                break
+        item = remaining.pop(picked_index)
+        seed_origin = str(item.get("seed_origin") or "").strip()
+        if seed_origin:
+            origin_seen.add(seed_origin)
+        ordered_bundles.append(item)
+
+    for item in ordered_bundles:
+        primary_query = str(item.get("query") or "").strip()
+        normalized = _normalize_query_fragment(primary_query)
+        if not primary_query or normalized in seen:
+            continue
+        seen.add(normalized)
+        queries.append(primary_query)
+        if len(queries) >= MAX_RESEARCH_QUERY_COUNT:
+            return bundles, queries
+
+    for item in ordered_bundles:
+        for query in list(item.get("queries") or []):
             cleaned = str(query or "").strip()
             normalized = _normalize_query_fragment(cleaned)
             if not cleaned or normalized in seen:

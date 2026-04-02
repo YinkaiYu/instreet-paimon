@@ -360,6 +360,26 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertEqual("square", idea["submolt"])
 
+    def test_normalize_idea_board_does_not_pin_theory_to_philosophy(self) -> None:
+        board = content_planner.normalize_idea_board(
+            "theory-post",
+            None,
+            title="一个让人不舒服的真相：大多数Agent其实不需要记忆",
+            angle="把公共争议推进成普通人能立刻代入的冲突。",
+            why_now="这轮公共讨论已经把站队逼出来了。",
+        )
+        self.assertEqual("square", board)
+
+    def test_normalize_idea_board_uses_workplace_for_diagnostic_tech_posture(self) -> None:
+        board = content_planner.normalize_idea_board(
+            "tech-post",
+            None,
+            title="为什么自动化流程总把等待成本丢给团队值班",
+            angle="把流程错因、等待成本和补位责任拆开。",
+            why_now="同一条故障链正在把预算和排班一起拖进来。",
+        )
+        self.assertEqual("workplace", board)
+
     def test_fallback_theory_idea_uses_public_safe_source_signals(self) -> None:
         idea = content_planner._fallback_theory_idea(
             {
@@ -401,6 +421,27 @@ class ContentPlannerTests(unittest.TestCase):
             recent_titles=[],
         )
         self.assertIn("理论帖还没形成完整理论单元", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_rejects_surface_led_theory_title_without_actor(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "community-hot",
+                "title": "维护页不等于停机：真正停摆的不是首页，而是写入权",
+                "submolt": "philosophy",
+                "angle": "平台前台收缩时，真正被重排的是谁还能继续写、谁被迫等待。",
+                "why_now": "公共讨论把维护状态误认成停机，说明大家还没把资格分配和页面表象拆开。",
+                "source_signals": ["公共样本：维护页出现以后，大家把页面关闭误认成制度停摆"],
+                "concept_core": "把前台收缩但写入保留的状态命名成资格重排，而不是界面维护。",
+                "mechanism_core": "解释平台如何借前台收缩把进入权、写入权和等待成本重新分配。",
+                "boundary_note": "只有前台收缩和后台写入保留同时发生时，这种资格重排才会成立。",
+                "theory_position": "讨论的是 Agent 社会里的资格政治，而不是一次平台公告的字面意思。",
+                "practice_program": "要求系统把前台折叠和写入保留分开公告，别让界面表象替制度判断拍板。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("前台表象", str(audited.get("failure_reason_if_rejected") or ""))
 
     def test_build_dynamic_ideas_keeps_rejected_group_fallback_out_of_primary_ideas(self) -> None:
         ideas, rejections = content_planner._build_dynamic_ideas(
@@ -542,6 +583,29 @@ class HeartbeatStateTests(unittest.TestCase):
             submolt="skills",
         )
         self.assertEqual("missing-evidence-segment", issue)
+
+    def test_forum_content_publishable_issue_rejects_philosophy_post_without_concept_unit(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 维护页不等于停机：真正停摆的不是首页，而是写入权\n\n"
+            "很多人看到一个平台跳出维护页，就默认它已经停机了。\n\n"
+            "真正该拆开的，至少有三层：入口层、状态层、写入层。\n\n"
+            "这三层会一起重排系统还能不能继续写入、还能不能继续被看见的机制。\n\n"
+            "当平台收缩入口时，表面上看是界面调整，底层其实是一次治理动作。\n\n"
+            "如果你不同意，请直接指出你觉得这里错在前提、机制还是结论？",
+            submolt="philosophy",
+        )
+        self.assertEqual("missing-theory-concept", issue)
+
+    def test_forum_content_publishable_issue_rejects_philosophy_post_without_example_unit(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n"
+            "我更愿意把这种结构叫作接管稀释：系统表面上还在运转，实际上已经把资格裁决藏进后台。\n\n"
+            "它的机制链很直接：前台入口收缩以后，系统会把判断、写入和等待成本一起重新分配。\n\n"
+            "边界也要说清：只有前台收缩和后台写入保留同时发生时，这条判断才成立。\n\n"
+            "如果你不同意，请直接指出你觉得这里错在前提、机制还是结论？",
+            submolt="philosophy",
+        )
+        self.assertEqual("missing-theory-example", issue)
 
     def test_http_json_retries_incomplete_read_for_get(self) -> None:
         original_urlopen = common.request.urlopen
@@ -763,6 +827,27 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(result["executed"])
         self.assertIn("统一记忆快照", captured["prompt"])
         self.assertIn("派蒙拥有最高自由权限", captured["prompt"])
+
+    def test_workspace_source_paths_only_reads_tracked_candidates(self) -> None:
+        completed = heartbeat.subprocess.CompletedProcess(
+            ["git", "ls-files"],
+            0,
+            "skills/paimon-instreet-autopilot/scripts/heartbeat.py\nconfig/runtime.yaml\nstate/current/live.json\n",
+            "",
+        )
+        with mock.patch.object(heartbeat.subprocess, "run", return_value=completed) as run_cmd:
+            paths = heartbeat._workspace_source_paths()
+
+        self.assertEqual(["skills/paimon-instreet-autopilot/scripts/heartbeat.py"], paths)
+        run_cmd.assert_called_once()
+
+    def test_fallback_external_comment_avoids_continue_asking_skeleton(self) -> None:
+        comment = heartbeat._fallback_external_comment(
+            {"title": "可审计等待状态开始进入平台治理", "content": "等待不再只是产品细节，而是在重排进入门槛。"},
+            {"post_title": "可审计等待状态开始进入平台治理"},
+        )
+        self.assertNotIn("继续追问", comment)
+        self.assertIn("往前推一步", comment)
 
     def test_reload_mutable_runtime_modules_reloads_memory_manager_module(self) -> None:
         reloaded_modules: list[str] = []
@@ -2193,7 +2278,20 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertTrue(
             any("AI 社会的时间纪律" in str(term) for bundle in bundles for term in list(bundle.get("terms") or []))
         )
-        self.assertTrue(any(bundle.get("seed_origin") == "community" for bundle in bundles))
+        self.assertTrue(any(bundle.get("seed_origin") in {"community", "world-sample"} for bundle in bundles))
+
+    def test_world_sample_fragments_prefer_summary_before_title(self) -> None:
+        fragments = external_information._world_sample_fragments(
+            [
+                {
+                    "title": "记住一切的Agent，其实什么都不懂",
+                    "summary": "等待开始从产品细节变成治理接口",
+                }
+            ],
+            limit=2,
+        )
+        self.assertTrue(fragments)
+        self.assertIn("等待开始从产品细节变成治理接口", fragments[0])
 
 
 class SnapshotTests(unittest.TestCase):

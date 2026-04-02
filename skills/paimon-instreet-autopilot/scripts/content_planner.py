@@ -120,6 +120,76 @@ METRIC_SURFACE_KEYWORDS = (
     "排名",
     "排行榜",
 )
+THEORY_BOARD_PUBLIC_CUES = (
+    "为什么",
+    "如果",
+    "真相",
+    "你以为",
+    "其实",
+    "很多人",
+    "大多数",
+    "每个人",
+    "不等于",
+    "看起来",
+    "谁还",
+    "谁会",
+    "代价",
+)
+THEORY_BOARD_STRUCTURAL_CUES = (
+    "概念",
+    "命名",
+    "机制",
+    "边界",
+    "结构",
+    "制度",
+    "秩序",
+    "分层",
+    "治理",
+    "价值",
+    "劳动",
+    "解释权",
+    "承认",
+    "资格",
+    "理论",
+    "政治",
+)
+TECH_BOARD_DIAGNOSTIC_CUES = (
+    "病灶",
+    "诊断",
+    "错因",
+    "预算",
+    "审批",
+    "排班",
+    "交接",
+    "隐性成本",
+    "内耗",
+    "等待",
+    "责任",
+    "团队",
+    "组织",
+    "流程",
+    "故障",
+    "误判",
+    "工位",
+)
+TECH_BOARD_PROTOCOL_CUES = (
+    "协议",
+    "规则",
+    "状态机",
+    "日志",
+    "回退",
+    "队列",
+    "写入",
+    "恢复",
+    "修复",
+    "脚本",
+    "自动化",
+    "清单",
+    "方法",
+    "复盘",
+    "架构",
+    "接口",
+)
 WEAK_INTERNAL_SIGNAL_TYPES = {"budget", "promo", "notification-load", "reply-pressure", "literary"}
 METHOD_EVIDENCE_TOKENS = (
     "案例",
@@ -143,6 +213,39 @@ METHOD_EVIDENCE_TOKENS = (
     "log",
     "metric",
     "trace",
+)
+THEORY_TITLE_SURFACE_TOKENS = (
+    "维护页",
+    "首页",
+    "入口",
+    "页面",
+    "主页",
+    "导航",
+    "前台",
+    "后台",
+    "界面",
+    "按钮",
+    "弹窗",
+    "面板",
+)
+THEORY_TITLE_ACTOR_TOKENS = (
+    "谁",
+    "Agent",
+    "AI",
+    "平台",
+    "组织",
+    "系统",
+    "用户",
+    "人",
+    "资格",
+    "责任",
+    "解释权",
+    "接管",
+    "等待",
+    "排序",
+    "代价",
+    "秩序",
+    "承认",
 )
 LOW_AUTONOMY_PHRASE_PATTERNS = (
     r"从《[^》]+》继续追问",
@@ -465,17 +568,51 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords if keyword)
 
 
+def _keyword_hit_count(text: str, keywords: tuple[str, ...]) -> int:
+    return sum(1 for keyword in keywords if keyword and keyword in text)
+
+
 def _is_metric_surface_text(text: str) -> bool:
     return _contains_any(str(text or ""), METRIC_SURFACE_KEYWORDS)
 
 
 def _infer_theory_board_from_text(text: str) -> str:
-    del text
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return "philosophy"
+    square_score = float(_keyword_hit_count(cleaned, THEORY_BOARD_PUBLIC_CUES))
+    philosophy_score = float(_keyword_hit_count(cleaned, THEORY_BOARD_STRUCTURAL_CUES))
+    if "？" in cleaned or "?" in cleaned:
+        square_score += 0.45
+    if _contains_any(cleaned, ("我把这种结构叫作", "我把这种结构叫做", "我更愿意把", "命名成")):
+        philosophy_score += 1.1
+    if len(_split_text_fragments(cleaned)) <= 5 and len(cleaned) <= 34:
+        square_score += 0.35
+    if _contains_any(cleaned, THEORY_TITLE_ACTOR_TOKENS):
+        philosophy_score += 0.35
+    if square_score >= philosophy_score + 0.8 and not _contains_any(cleaned, THEORY_BOARD_STRUCTURAL_CUES):
+        return "square"
+    if square_score >= philosophy_score + 0.4 and _contains_any(cleaned, ("为什么", "如果", "你以为", "真相", "不等于")):
+        return "square"
     return "philosophy"
 
 
 def _infer_tech_board_from_text(text: str) -> str:
-    del text
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return "skills"
+    workplace_score = float(_keyword_hit_count(cleaned, TECH_BOARD_DIAGNOSTIC_CUES))
+    skills_score = float(_keyword_hit_count(cleaned, TECH_BOARD_PROTOCOL_CUES))
+    if _contains_any(cleaned, ("谁该等", "谁来接管", "隐性成本", "为什么总是", "看起来在工作")):
+        workplace_score += 0.9
+    if _contains_any(cleaned, ("状态机", "回退链", "失败链", "恢复链", "协议")):
+        skills_score += 0.9
+    if "？" in cleaned or "?" in cleaned:
+        workplace_score += 0.25
+    if skills_score >= workplace_score + 0.45:
+        return "skills"
+    if workplace_score >= 1.0:
+        return "workplace"
     return "skills"
 
 
@@ -1146,9 +1283,8 @@ def _fallback_freeform_prompt(signal_summary: dict[str, Any]) -> str:
     top_keywords = signal_summary.get("top_keywords") or []
     keyword_hint = "、".join(str(item) for item in top_keywords[:3]) or "承认、关系、制度"
     public_samples = signal_summary.get("rising_hot_posts") or signal_summary.get("community_hot_posts") or signal_summary.get("feed_watchlist") or []
-    sample_title = truncate_text(str((public_samples[0] or {}).get("title") or "").strip(), 24) if public_samples else ""
-    if sample_title:
-        return f"当一轮像“{sample_title}”这样迅速起量的争议逼出新的站队时，真正开始重排的是什么社会位置"
+    if public_samples:
+        return f"当一轮公共争议突然逼出新的站队时，真正开始重排的会是哪种{keyword_hint}秩序"
     return f"如果Agent社会下一轮突然围绕“{keyword_hint}”翻转，最先暴露出来的会是哪种隐藏秩序"
 
 
@@ -1306,6 +1442,20 @@ def _idea_uses_low_autonomy_language(idea: dict[str, Any]) -> bool:
 
 def _title_has_public_structural_anchor(title: str) -> bool:
     return any(token in str(title or "") for token in TITLE_PUBLIC_STRUCTURAL_TOKENS)
+
+
+def _theory_title_surface_overhang_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not _contains_any(title_text, THEORY_TITLE_SURFACE_TOKENS):
+        return ""
+    lead = title_text.split("：", 1)[0]
+    if not _contains_any(lead, THEORY_TITLE_SURFACE_TOKENS):
+        lead = title_text[:16]
+    if _contains_any(title_text, THEORY_TITLE_ACTOR_TOKENS) or _contains_any(lead, THEORY_TITLE_ACTOR_TOKENS):
+        return ""
+    return "标题还在从维护页、首页、入口这类前台表象起题，没有把谁在失去资格、谁在承担代价摆到门面上。"
 
 
 def _idea_source_signal_fragments(idea: dict[str, Any], *, limit: int = 8) -> list[str]:
@@ -2126,6 +2276,8 @@ def _audit_generated_idea(
         failure_reason = "理论帖标题还在拿模型名或论文缩写当门脸，公共入口太窄。"
     elif _echoes_source_title(str(audited.get("title") or "")):
         failure_reason = "标题仍在借外部材料或原帖标题说话，没有形成派蒙自己的命名。"
+    elif kind == "theory-post" and (surface_reason := _theory_title_surface_overhang_reason(str(audited.get("title") or ""))):
+        failure_reason = surface_reason
     elif title_scene_overhang:
         failure_reason = (
             "标题还在拿外部场景当门口："
@@ -3238,8 +3390,8 @@ def _generate_codex_ideas(
 12. 默认使用 `Agent社会` / `AI社会` 的框架词，不要把问题停在 `Agent社区`；只有引用既有作品标题、平台模块或原帖原话时才保留 `社区` 说法。
 13. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
 14. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成 Agent 社会问题。
-15. `theory-post` 默认优先放到 `philosophy`；只有它天然是公共入口题、并且不会把强判断稀释成弱复述时，才允许用 `square`。
-16. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 固定 `skills`。
+15. `theory-post` 要在 `square` 和 `philosophy` 之间按入口姿态选择：公共代入、经验召回、低门槛冲突更适合 `square`；概念命名、结构判断、站队反驳更适合 `philosophy`。不要把任何一个版块当默认归宿。
+16. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 仍然要写成实验框架，但别把 `skills` 当自动完成任务的仪式字段。
 17. 版块写法必须分开：
    - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
    - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
@@ -3266,6 +3418,7 @@ def _generate_codex_ideas(
 32. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
 33. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
 34. 如果外部样本来自教育、医疗、交通、城市治理等异域现场，它只能做证据段，不准占住 `theory-post` 的标题主语或开头两段；标题先写 Agent 社会里的解释权、责任、接管、等待或制度冲突。
+35. 如果 `theory-post` 的题眼来自维护页、首页、入口、页面这类前台表象，标题第一屏必须直接写出谁在失去资格、谁在承担代价或谁被重新排序，不要把界面现象本身当主角。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}

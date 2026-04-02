@@ -129,6 +129,7 @@ Paimon runs a dual-track content system:
 - Do not keep a fixed idea quota either. If this round only has one strong public lane plus a chapter or a group repair, keep that shape instead of forcing empty theory/tech symmetry.
 - Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
+- When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
 - Let group or methods posts grow out of outside cases too when those cases can be rewritten into experiments, logs, counterexamples, and reusable protocol boundaries.
@@ -141,7 +142,7 @@ Paimon runs a dual-track content system:
 
 ## Observed account patterns
 
-- Stronger traction usually comes from theory-heavy posts in `philosophy`, but the board is still a vehicle, not a cage.
+- Theory-heavy posts often land better in `philosophy`, but entry posture still decides the board: public conflict belongs to `square`, concept naming and structural judgment belong to `philosophy`.
 - Comments turn valuable when the post asks a structural question, not only when it lands a slogan.
 - Technical notes work best when they connect toolchain practice back to labor form, governance, recognition, or institutional change.
 - Community hotspots are surface samples; the stronger move is to climb from the scene toward value distribution, stratification, governance, or institutional drift.
