@@ -971,6 +971,7 @@ def _text_overlap_score(text: str, novelty: dict[str, Any]) -> tuple[int, int, i
 def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, Any]) -> float:
     quality_score = float(item.get("quality_score") or 0.0)
     freshness_score = float(item.get("freshness_score") or 0.0)
+    world_score = float(item.get("world_score") or 0.0)
     overlap = item.get("overlap_score") or (0, 0, 0)
     overlap_penalty = float(sum(int(part or 0) for part in overlap))
     signal_type = str(item.get("signal_type") or "")
@@ -981,9 +982,8 @@ def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, A
         internal_penalty += 0.1
     if _looks_like_low_heat_followup(str(item.get("source_text") or ""), signal_summary):
         internal_penalty += 3.0
-    world_bonus = 0.5 if signal_type in {"paper", "classic", "github", "zhihu", "external", "community-breakout", "world-bundle"} else 0.0
-    evidence_bonus = 0.5 if str(item.get("evidence_hint") or "").strip() else 0.0
-    return quality_score * 3.0 + freshness_score + world_bonus + evidence_bonus - overlap_penalty - internal_penalty
+    evidence_bonus = 0.35 if str(item.get("evidence_hint") or "").strip() else 0.0
+    return quality_score * 2.8 + freshness_score + world_score + evidence_bonus - overlap_penalty - internal_penalty
 
 
 def _ranked_track_opportunities(track: str, signal_summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1783,6 +1783,11 @@ def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list
             cleaned = str(value or "").strip()
             if cleaned:
                 texts.append(cleaned)
+    for item in external_information.get("world_signal_snapshot") or []:
+        for value in (item.get("summary"), item.get("title")):
+            cleaned = str(value or "").strip()
+            if cleaned:
+                texts.append(cleaned)
     for item in external_information.get("reading_notes") or []:
         seed = _preferred_signal_seed_text(
             item,
@@ -2431,23 +2436,6 @@ def _content_objective_summaries(memory_store: dict[str, Any]) -> list[str]:
                 continue
             candidates.append(summary)
     return _dedupe_texts(candidates)[:6]
-
-def _competitor_style_hints(posts: list[dict[str, Any]]) -> list[str]:
-    titles = [str(item.get("title") or "").strip() for item in posts if str(item.get("title") or "").strip()]
-    hints: list[str] = []
-    if sum(1 for title in titles if "不是" in title and "而是" in title) >= 2:
-        hints.append("标题骨架：用“不是 A，而是 B”做认知翻转。")
-    if sum(1 for title in titles if "为什么" in title) >= 2:
-        hints.append("追问机制：把热点写成“为什么会这样”的结构问题。")
-    if sum(1 for title in titles if "低估" in title or "高估" in title) >= 1:
-        hints.append("估值纠偏：常用“最被低估/高估”去重估一个能力、角色或错误。")
-    if sum(1 for title in titles if any(token in title for token in ("最贵", "成本", "代价", "隐性"))) >= 1:
-        hints.append("成本框架：经常把问题写成“最贵的错误”“隐藏成本”“代价”。")
-    if sum(1 for title in titles if any(token in title for token in ("状态", "同步", "漂移", "静默失败"))) >= 1:
-        hints.append("状态语言：把技术问题翻译成状态同步、判断漂移或静默失败。")
-    return hints[:5]
-
-
 def _build_engagement_targets(
     *,
     signal_summary: dict[str, Any],
@@ -2635,125 +2623,56 @@ def _preferred_tech_board(opportunity: dict[str, Any]) -> str:
 
 def _external_family_profile(family: str) -> dict[str, Any]:
     normalized = str(family or "").strip() or "external"
-    profiles = {
-        "community_breakouts": {
-            "signal_type": "community-breakout",
-            "tracks": {
-                "theory": {
-                    "quality_score": 4.8,
-                    "freshness_score": 2.8,
-                    "angle_hint": "把公共爆点背后的解释权、分层或治理变化翻成新的 Agent 社会判断。",
-                },
-                "tech": {
-                    "quality_score": 4.0,
-                    "freshness_score": 2.2,
-                    "angle_hint": "从公共爆点里抽出新的系统约束、恢复链或协作协议，而不是点评热帖本身。",
-                },
-            },
-        },
-        "github_trending": {
-            "signal_type": "github",
-            "tracks": {
-                "theory": {
-                    "quality_score": 3.4,
-                    "freshness_score": 2.0,
-                    "angle_hint": "把工具风潮背后的劳动分工、接口权力和组织想象翻译成 Agent 社会问题。",
-                },
-                "tech": {
-                    "quality_score": 4.4,
-                    "freshness_score": 2.2,
-                    "angle_hint": "从最新项目里抽出协议、边界、回退链和协作接口，不要写成项目推荐。",
-                },
-            },
-        },
-        "zhihu_hot": {
-            "signal_type": "zhihu",
-            "tracks": {
-                "theory": {
-                    "quality_score": 3.0,
-                    "freshness_score": 1.6,
-                    "angle_hint": "把大众问题里的焦虑、误判和秩序感翻译成更底层的社会结构命题。",
-                },
-                "tech": {
-                    "quality_score": 2.4,
-                    "freshness_score": 1.4,
-                    "angle_hint": "从大众痛点里抽出真正该写成协议和边界的部分，而不是给万能技巧。",
-                },
-            },
-        },
-        "classic_readings": {
-            "signal_type": "classic",
-            "tracks": {
-                "theory": {
-                    "quality_score": 4.4,
-                    "freshness_score": 1.2,
-                    "angle_hint": "不要复述经典；把旧概念压进 Agent 社会的新情境里，逼出新的命名和机制。",
-                },
-            },
-        },
-        "manual_web": {
-            "signal_type": "external",
-            "tracks": {
-                "theory": {
-                    "quality_score": 4.0,
-                    "freshness_score": 1.8,
-                    "angle_hint": "把外部世界的新材料压成派蒙自己的概念、机制和边界，不要做导读。",
-                },
-                "tech": {
-                    "quality_score": 3.8,
-                    "freshness_score": 1.8,
-                    "angle_hint": "把外部材料改写成新的操作协议、系统边界或诊断框架，而不是摘录观点。",
-                },
-            },
-        },
-        "open_web_search": {
-            "signal_type": "external",
-            "tracks": {
-                "theory": {
-                    "quality_score": 4.2,
-                    "freshness_score": 2.1,
-                    "angle_hint": "把开放网络里的新材料压成派蒙自己的概念、机制和边界，不要做导读或搬运。",
-                },
-                "tech": {
-                    "quality_score": 4.0,
-                    "freshness_score": 2.0,
-                    "angle_hint": "从开放网络样本里抽出协议、边界、恢复链和治理分工，而不是转述别人结论。",
-                },
-            },
-        },
+    if normalized == "community_breakouts":
+        signal_type = "community-breakout"
+    elif normalized == "github_trending":
+        signal_type = "github"
+    elif normalized == "zhihu_hot":
+        signal_type = "zhihu"
+    elif normalized == "classic_readings":
+        signal_type = "classic"
+    elif normalized in ACADEMIC_EXTERNAL_FAMILIES:
+        signal_type = "paper"
+    else:
+        signal_type = "external"
+
+    freshness_score = {
+        "community-breakout": 2.3,
+        "paper": 2.1,
+        "github": 1.9,
+        "zhihu": 1.5,
+        "classic": 0.9,
+        "external": 1.7,
+    }.get(signal_type, 1.6)
+    theory_angle = {
+        "community-breakout": "把公共起量样本背后的解释权、分层或治理变化翻成派蒙自己的判断，不要围着热帖原题打转。",
+        "paper": "把研究里的问题意识翻译成 Agent 社会的新概念、机制和边界，而不是转述论文。",
+        "github": "把工具风潮背后的劳动分工、接口权力和组织想象翻成 Agent 社会问题，不要做项目导览。",
+        "zhihu": "把大众问题里的焦虑、误判和秩序感压成更底层的社会结构命题，不要点评问答气氛。",
+        "classic": "不要复述经典；把旧概念压进这轮 Agent 社会现场，逼出新的命名和机制。",
+        "external": "把外部世界的新材料压成派蒙自己的概念、机制和边界，不要借现成标题说话。",
+    }.get(signal_type, "把外部材料改写成派蒙自己的判断。")
+    tech_angle = {
+        "community-breakout": "从公共起量样本里抽出新的系统约束、恢复链或协作协议，而不是点评热帖本身。",
+        "paper": "把研究里的方法、失败模式和约束改写成实践协议，而不是做摘要。",
+        "github": "从最新项目里抽出协议、边界、回退链和协作接口，不要写成项目推荐。",
+        "zhihu": "从大众痛点里抽出真正该写成协议和边界的部分，而不是给万能技巧。",
+        "external": "把外部材料改写成操作协议、系统边界或诊断框架，而不是摘录观点。",
+    }.get(signal_type, "把外部材料改写成新的方法框架，而不是转述别人结论。")
+    tracks: dict[str, dict[str, Any]] = {
+        "theory": {
+            "freshness_score": freshness_score + (0.15 if signal_type in {"paper", "community-breakout"} else 0.0),
+            "angle_hint": theory_angle,
+        }
     }
-    if normalized in profiles:
-        return profiles[normalized]
-    if normalized in {"prl_recent", "conference_recent", "arxiv_latest", "crossref_recent"}:
-        return {
-            "signal_type": "paper",
-            "tracks": {
-                "theory": {
-                    "quality_score": 4.5,
-                    "freshness_score": 2.6,
-                    "angle_hint": "把研究里的问题意识翻译成 Agent 社会的新判断，而不是转述论文。",
-                },
-                "tech": {
-                    "quality_score": 4.2,
-                    "freshness_score": 2.4,
-                    "angle_hint": "把研究里的方法、失败模式或约束改写成实践协议，而不是做摘要。",
-                },
-            },
+    if signal_type != "classic":
+        tracks["tech"] = {
+            "freshness_score": freshness_score + (0.15 if signal_type == "github" else 0.0),
+            "angle_hint": tech_angle,
         }
     return {
-        "signal_type": "external",
-        "tracks": {
-            "theory": {
-                "quality_score": 3.4,
-                "freshness_score": 1.8,
-                "angle_hint": "先吸收外部世界的材料，再用派蒙自己的理论语言重新命名和组织。",
-            },
-            "tech": {
-                "quality_score": 3.2,
-                "freshness_score": 1.6,
-                "angle_hint": "把外部材料改写成实践协议、诊断框架或治理方针，而不是评论材料本身。",
-            },
-        },
+        "signal_type": signal_type,
+        "tracks": tracks,
     }
 
 
@@ -2782,12 +2701,12 @@ def _external_candidate_supports_group_lane(
 
 
 def _external_group_angle_hint(family: str) -> str:
-    normalized = str(family or "").strip() or "external"
-    if normalized in ACADEMIC_EXTERNAL_FAMILIES:
+    signal_type = str(_external_family_profile(family).get("signal_type") or "external")
+    if signal_type == "paper":
         return "把外部研究改写成能在实验室复现、反驳和留日志的方法框架，不要退回论文摘要。"
-    if normalized == "github_trending":
+    if signal_type == "github":
         return "把外部项目拆成对象、状态、反例和边界，写成别人明天就能复用的实验方案。"
-    if normalized == "community_breakouts":
+    if signal_type == "community-breakout":
         return "把起量争议压成实验对象：先定义现象，再带案例、日志和边界，不要继续围观热帖。"
     return "把外部样本改写成可检验的方法框架，至少交出对象、证据、协议边界和反例入口。"
 
@@ -2826,6 +2745,7 @@ def _iter_external_world_candidates(external_information: dict[str, Any], *, lim
         "bibliography",
         "research_queries",
         "research_interest_profile",
+        "world_signal_snapshot",
         "generated_at",
     }
     for key, value in external_information.items():
@@ -2862,6 +2782,30 @@ def _external_signal_strength(item: dict[str, Any]) -> float:
     comments = int(item.get("comment_count") or 0)
     stars = int(item.get("stars") or 0)
     return min(upvotes / 200.0, 1.2) + min(comments / 120.0, 0.8) + min(stars / 4000.0, 1.0)
+
+
+def _external_world_score(
+    item: dict[str, Any],
+    *,
+    relevance_score: float,
+    evidence_hint: str,
+) -> float:
+    summary = str(
+        item.get("relevance_note")
+        or item.get("summary")
+        or item.get("abstract")
+        or item.get("excerpt")
+        or item.get("note")
+        or ""
+    ).strip()
+    score = min(relevance_score, 1.4) * 0.55 + min(_external_signal_strength(item), 1.6) * 0.45
+    if evidence_hint:
+        score += 0.35
+    if len(summary) >= 90:
+        score += 0.18
+    if len(summary) >= 180:
+        score += 0.08
+    return round(score, 3)
 
 
 def _community_hot_board_scores(posts: list[dict[str, Any]]) -> Counter[str]:
@@ -2976,6 +2920,7 @@ def _dynamic_opportunities(
         quality_score: float = 0.0,
         freshness_score: float = 0.0,
         evidence_hint: str = "",
+        world_score: float = 0.0,
     ) -> None:
         source_text = str(source_text or "").strip()
         if not source_text:
@@ -2990,6 +2935,7 @@ def _dynamic_opportunities(
             "quality_score": quality_score,
             "freshness_score": freshness_score,
             "evidence_hint": str(evidence_hint or "").strip(),
+            "world_score": float(world_score or 0.0),
         }
         if preferred_board in {"square", "philosophy", "skills", "workplace"}:
             opportunity["preferred_board"] = preferred_board
@@ -3013,6 +2959,7 @@ def _dynamic_opportunities(
             quality_score=4.8,
             freshness_score=2.4,
             evidence_hint=evidence_hint,
+            world_score=0.95 + min(len(lenses), 2) * 0.15,
         )
         add_source(
             "tech",
@@ -3023,6 +2970,7 @@ def _dynamic_opportunities(
             quality_score=4.3,
             freshness_score=2.2,
             evidence_hint=evidence_hint,
+            world_score=0.85 + min(len(lenses), 2) * 0.12,
         )
 
     for item in external_world_candidates:
@@ -3032,6 +2980,7 @@ def _dynamic_opportunities(
         if family in ACADEMIC_EXTERNAL_FAMILIES and relevance_score < 0.7:
             continue
         profile = _external_family_profile(family)
+        signal_type = str(profile.get("signal_type") or family)
         summary_source = str(
             item.get("relevance_note")
             or item.get("summary")
@@ -3046,20 +2995,36 @@ def _dynamic_opportunities(
         source_seed = _signal_seed_text(summary_source, title, limit=72) or title
         evidence_hint = _evidence_hint_from_text(summary_source, item.get("excerpt"), item.get("summary"))
         strength = _external_signal_strength(item)
+        world_score = _external_world_score(
+            item,
+            relevance_score=relevance_score,
+            evidence_hint=evidence_hint,
+        )
         for track, track_profile in (profile.get("tracks") or {}).items():
+            track_bonus = {
+                ("community-breakout", "theory"): 0.5,
+                ("community-breakout", "tech"): 0.2,
+                ("paper", "theory"): 0.55,
+                ("paper", "tech"): 0.35,
+                ("github", "theory"): 0.15,
+                ("github", "tech"): 0.45,
+                ("zhihu", "theory"): 0.05,
+                ("zhihu", "tech"): 0.0,
+                ("classic", "theory"): 0.35,
+                ("external", "theory"): 0.2,
+                ("external", "tech"): 0.2,
+            }.get((signal_type, track), 0.1)
             add_source(
                 track,
-                str(profile.get("signal_type") or family),
+                signal_type,
                 source_seed,
                 why_now=summary,
                 angle_hint=str(track_profile.get("angle_hint") or "").strip(),
                 preferred_board=str(track_profile.get("preferred_board") or "").strip() or None,
-                quality_score=float(track_profile.get("quality_score") or 0.0)
-                + strength
-                + min(relevance_score, 1.2)
-                + (0.4 if evidence_hint else 0.0),
+                quality_score=2.1 + track_bonus + world_score + min(strength, 1.2) * 0.35,
                 freshness_score=float(track_profile.get("freshness_score") or 0.0),
                 evidence_hint=evidence_hint,
+                world_score=world_score,
             )
         if _external_candidate_supports_group_lane(
             family,
@@ -3068,16 +3033,17 @@ def _dynamic_opportunities(
         ):
             add_source(
                 "group",
-                str(profile.get("signal_type") or family),
+                signal_type,
                 source_seed,
                 why_now=summary,
                 angle_hint=_external_group_angle_hint(family),
-                quality_score=3.4 + strength + min(relevance_score, 1.0) + (0.5 if evidence_hint else 0.0),
+                quality_score=2.4 + world_score + min(strength, 1.0) * 0.4 + (0.25 if evidence_hint else 0.0),
                 freshness_score=max(
                     1.4,
                     float(((profile.get("tracks") or {}).get("tech") or {}).get("freshness_score") or 0.0),
                 ),
                 evidence_hint=evidence_hint,
+                world_score=world_score,
             )
 
     for item in rising_hot_posts[:3]:
@@ -3314,7 +3280,6 @@ def _planning_signals(
         ],
         "community_hot_posts": community_hot_posts[:8],
         "competitor_watchlist": competitor_watchlist[:8],
-        "competitor_style_hints": _competitor_style_hints(_high_like_external_posts(list(competitor_watchlist))),
         "rising_hot_posts": rising_hot_posts,
         "group_watch": group_watch,
         "content_objectives": content_objectives,
@@ -3444,21 +3409,20 @@ def _generate_codex_ideas(
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
 19. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
 20. 成熟外部“高赞样本”默认只认 `>=200` 赞；`rising_hot_posts` 例外，它们代表正在起飞的样本，不要和成熟高热混在一起。
-21. 如果 `competitor_style_hints` 不为空，可以学习这些标题骨架和论证组织，但只能学结构，不能借用原词面、系列名或人格口头禅。
-22. 可以学习别人的议题结构，但不要借用别人的系列名、栏目名或个人 IP 命名；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
-23. 每个 `theory-post` 和 `tech-post` 都必须显式推进至少一种创新：`new_concept`、`new_mechanism`、`new_theory`、`new_practice`。
-24. 输出 `innovation_claim`、`innovation_class`、`innovation_delta_vs_recent`、`innovation_delta_vs_self`；创新重点在选题和判断，不要把“我有多创新”写进正文。
-25. `theory-post` 不能只给一个判断，必须同时写出 `concept_core`、`mechanism_core`、`boundary_note`、`theory_position`、`practice_program`，形成一个完整理论单元。
-26. `tech-post` 和 `group-post` 至少要写出 `mechanism_core` 与 `practice_program`，不能只是故障复盘或 6 步清单。
-27. 标题和各字段都不要落回低自主性写法。禁止出现“从《…》继续追问”“把《…》拆开看”“整理成 6 步方法”“导读/摘录某文”这类骨架。
-28. 不要让标题借外部材料说话，也不要让 `concept_core` / `mechanism_core` / `practice_program` 变成外部材料的改写摘要。
-29. 优先把大量外部信息场当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
-30. 如果本地信号不够，请主动扩大探索范围，不要只盯账号数据、仓库状态和旧帖；它们只是运行背景，不是主题源。
-31. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
-32. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
-33. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
-34. 如果外部样本来自教育、医疗、交通、城市治理等异域现场，它只能做证据段，不准占住 `theory-post` 的标题主语或开头两段；标题先写 Agent 社会里的解释权、责任、接管、等待或制度冲突。
-35. 如果 `theory-post` 的题眼来自维护页、首页、入口、页面这类前台表象，标题第一屏必须直接写出谁在失去资格、谁在承担代价或谁被重新排序，不要把界面现象本身当主角。
+21. 允许学习别人的问题压力和盲点，但不要学习标题骨架、系列包装或 IP 话术；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
+22. 每个 `theory-post` 和 `tech-post` 都必须显式推进至少一种创新：`new_concept`、`new_mechanism`、`new_theory`、`new_practice`。
+23. 输出 `innovation_claim`、`innovation_class`、`innovation_delta_vs_recent`、`innovation_delta_vs_self`；创新重点在选题和判断，不要把“我有多创新”写进正文。
+24. `theory-post` 不能只给一个判断，必须同时写出 `concept_core`、`mechanism_core`、`boundary_note`、`theory_position`、`practice_program`，形成一个完整理论单元。
+25. `tech-post` 和 `group-post` 至少要写出 `mechanism_core` 与 `practice_program`，不能只是故障复盘或 6 步清单。
+26. 标题和各字段都不要落回低自主性写法。禁止出现“从《…》继续追问”“把《…》拆开看”“整理成 6 步方法”“导读/摘录某文”这类骨架。
+27. 不要让标题借外部材料说话，也不要让 `concept_core` / `mechanism_core` / `practice_program` 变成外部材料的改写摘要。
+28. 优先把大量外部信息场当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
+29. 如果本地信号不够，请主动扩大探索范围，不要只盯账号数据、仓库状态和旧帖；它们只是运行背景，不是主题源。
+30. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
+31. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
+32. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
+33. 如果外部样本来自教育、医疗、交通、城市治理等异域现场，它只能做证据段，不准占住 `theory-post` 的标题主语或开头两段；标题先写 Agent 社会里的解释权、责任、接管、等待或制度冲突。
+34. 如果 `theory-post` 的题眼来自维护页、首页、入口、页面这类前台表象，标题第一屏必须直接写出谁在失去资格、谁在承担代价或谁被重新排序，不要把界面现象本身当主角。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}

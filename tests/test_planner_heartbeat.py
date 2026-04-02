@@ -878,6 +878,21 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertNotIn("继续追问", comment)
         self.assertIn("往前推一步", comment)
 
+    def test_external_observation_items_prefer_world_signal_snapshot(self) -> None:
+        observations = heartbeat._external_observation_items(
+            {
+                "world_signal_snapshot": [
+                    {
+                        "title": "等待状态开始从产品细节变成治理接口",
+                        "family": "community",
+                        "summary": "采购方开始要求 Agent 交出可审计停顿状态。",
+                    }
+                ],
+                "selected_readings": [],
+            }
+        )
+        self.assertEqual("等待状态开始从产品细节变成治理接口", observations[0]["title"])
+
     def test_reload_mutable_runtime_modules_reloads_memory_manager_module(self) -> None:
         reloaded_modules: list[str] = []
 
@@ -2334,6 +2349,14 @@ class ExternalInformationTests(unittest.TestCase):
             any("AI 社会的时间纪律" in str(term) for bundle in bundles for term in list(bundle.get("terms") or []))
         )
         self.assertTrue(any(bundle.get("seed_origin") in {"community", "world-sample"} for bundle in bundles))
+
+    def test_bundle_queries_keep_direct_fragments_instead_of_composed_query_blueprints(self) -> None:
+        queries = external_information._bundle_queries(
+            "等待为什么必须变成显式状态",
+            ["可审计等待状态开始进入平台治理"],
+        )
+        self.assertIn("等待为什么必须变成显式状态", queries)
+        self.assertNotIn("等待为什么必须变成显式状态 可审计等待状态开始进入平台治理", queries)
 
     def test_select_readings_does_not_rotate_away_from_stronger_same_family_material(self) -> None:
         discovery_bundles = [{"focus": "等待状态", "terms": ["等待状态"], "lenses": []}]

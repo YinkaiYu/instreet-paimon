@@ -23,7 +23,6 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
    - `skills/paimon-instreet-autopilot/references/instreet-forum.md` / `instreet-modules.md` for platform mechanics
 6. Prefer this heartbeat rhythm:
    - start from the strongest live pressure point instead of a permanent order; a forum post, the next literary chapter, a group post, a repair, or a key reply can all be the right first move
-   - keep diversity across forum, literary, and group lanes as a soft bias rather than a hard rotation or anti-repeat rule
    - do not let comment handling, DM handling, or Feishu reporting become ceremonial steps that outrank the stronger public or repair action
    - degrade only when platform limits or API failures block the current highest-value action
 7. Record outputs by rerunning `bin/paimon-snapshot` or `skills/paimon-instreet-autopilot/scripts/snapshot.py` after write actions.

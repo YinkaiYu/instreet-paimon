@@ -130,16 +130,6 @@ DISCOVERY_AGENDA_THEME_TOKENS = (
     "修复",
     "队列",
 )
-DISCOVERY_ORIGIN_BIASES = {
-    "manual": 1.25,
-    "world-sample": 1.2,
-    "community": 1.05,
-    "competitor": 1.0,
-    "hint": 0.95,
-    "agenda": 0.9,
-    "objective": 0.85,
-    "interest": 0.75,
-}
 DISCOVERY_WORLD_ORIGINS = {"manual", "world-sample", "community", "competitor"}
 DISCOVERY_LOCAL_ORIGINS = {"agenda", "objective", "hint", "interest"}
 
@@ -252,12 +242,12 @@ def ensure_external_information_files() -> None:
             EXTERNAL_INFORMATION_PATH,
             {
                 "generated_at": legacy_state.get("generated_at"),
-                "source_families": [],
                 "raw_candidates": [],
                 "selected_readings": [],
                 "reading_notes": [],
                 "bibliography": [],
                 "discovery_bundles": [],
+                "world_signal_snapshot": [],
                 "community_breakouts": legacy_state.get("community_breakouts") or [],
                 "zhihu_results": legacy_state.get("zhihu_results") or [],
                 "github_projects": [],
@@ -668,10 +658,6 @@ def _memory_objective_fragments(*, limit: int = 10) -> list[str]:
     return _context_fragments_from_items(items, field_names=("summary",), limit=limit)
 
 
-def _discovery_origin_bias(origin: str) -> float:
-    return float(DISCOVERY_ORIGIN_BIASES.get(str(origin or "").strip(), 0.55))
-
-
 def _fragment_specificity_score(fragment: str) -> float:
     compact = re.sub(r"\s+", "", str(fragment or ""))
     if not compact:
@@ -688,6 +674,24 @@ def _fragment_specificity_score(fragment: str) -> float:
     if "《" in str(fragment or "") or "》" in str(fragment or ""):
         score -= 0.15
     return max(score, 0.0)
+
+
+def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
+    origin_set = {str(item).strip() for item in origins if str(item).strip()}
+    compact = re.sub(r"\s+", "", str(fragment or ""))
+    lowered = compact.lower()
+    score = _fragment_specificity_score(fragment)
+    if any(token in compact for token in ("为什么", "如何", "谁", "何时", "不是", "而是")):
+        score += 0.2
+    if re.search(r"\d", compact):
+        score += 0.12
+    if origin_set & DISCOVERY_WORLD_ORIGINS:
+        score += 0.18
+    if len(origin_set) >= 2:
+        score += min(len(origin_set) - 1, 2) * 0.16
+    if any(token in lowered for token in ("governance", "audit", "protocol", "waiting", "memory")):
+        score += 0.1
+    return round(score, 3)
 
 
 def _pick_representative_fragment(fragments: list[str]) -> str:
@@ -740,35 +744,24 @@ def _ranked_discovery_fragments(
                 {
                     "normalized": normalized,
                     "fragments": [],
-                    "origins": set(),
-                    "origin_bias": 0.0,
+                    "origins": [],
                 },
             )
             entry["fragments"].append(fragment)
-            entry["origins"].add(origin)
-            entry["origin_bias"] = max(float(entry.get("origin_bias") or 0.0), _discovery_origin_bias(origin))
+            if origin not in entry["origins"]:
+                entry["origins"].append(origin)
     ranked: list[dict[str, Any]] = []
     for entry in grouped.values():
-        origins = {str(item).strip() for item in entry.get("origins") or set() if str(item).strip()}
+        origins = [str(item).strip() for item in entry.get("origins") or [] if str(item).strip()]
         fragment = _pick_representative_fragment(list(entry.get("fragments") or []))
         if not fragment:
             continue
-        bridge_bonus = 0.0
-        if origins & DISCOVERY_WORLD_ORIGINS and origins & DISCOVERY_LOCAL_ORIGINS:
-            bridge_bonus += 0.9
-        elif origins & DISCOVERY_WORLD_ORIGINS:
-            bridge_bonus += 0.35
-        score = (
-            _fragment_specificity_score(fragment)
-            + float(entry.get("origin_bias") or 0.0)
-            + max(0, len(origins) - 1) * 0.85
-            + bridge_bonus
-        )
+        score = _discovery_fragment_score(fragment, origins)
         ranked.append(
             {
                 "fragment": fragment,
                 "normalized": str(entry.get("normalized") or "").strip(),
-                "origins": sorted(origins, key=lambda origin: (-_discovery_origin_bias(origin), origin)),
+                "origins": origins,
                 "score": round(score, 3),
             }
         )
@@ -804,12 +797,12 @@ def _build_discovery_bundle(
             or any(_fragments_overlap(fragment, existing) for existing in lenses)
         ):
             continue
-        origins = list(candidate.get("origins") or [])
-        novel_origins = [origin for origin in origins if origin not in root_origins and origin not in lens_origins]
-        if not novel_origins and lenses:
-            continue
         lenses.append(fragment)
-        lens_origins.append((novel_origins or origins or [""])[0])
+        for origin in list(candidate.get("origins") or []):
+            cleaned_origin = str(origin or "").strip()
+            if cleaned_origin and cleaned_origin not in lens_origins:
+                lens_origins.append(cleaned_origin)
+                break
         if len(lenses) >= DISCOVERY_QUERY_MAX_TERMS - 1:
             break
     queries = _bundle_queries(root_fragment, lenses)
@@ -831,11 +824,8 @@ def _build_discovery_bundle(
         if cleaned and cleaned not in origins:
             origins.append(cleaned)
     bundle_score = float(root.get("score") or 0.0)
-    bundle_score += min(len(lenses), DISCOVERY_QUERY_MAX_TERMS - 1) * 0.35
-    if set(origins) & DISCOVERY_WORLD_ORIGINS and set(origins) & DISCOVERY_LOCAL_ORIGINS:
-        bundle_score += 0.4
-    elif set(origins) & DISCOVERY_WORLD_ORIGINS:
-        bundle_score += 0.18
+    bundle_score += min(len(lenses), DISCOVERY_QUERY_MAX_TERMS - 1) * 0.22
+    bundle_score += min(max(0, len(origins) - 1), 2) * 0.08
     return {
         "focus": root_fragment,
         "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
@@ -864,27 +854,12 @@ def _bundle_queries(root: str, lenses: list[str]) -> list[str]:
         if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
             return queries
     for lens in lenses:
-        add(_compose_discovery_query(root, [lens]))
+        for query in _query_expansions(lens, limit=1):
+            add(query)
         if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
             return queries
     add(root)
     return queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE]
-
-
-def _compose_discovery_query(root: str, extras: list[str]) -> str:
-    terms = [root]
-    seen = {_normalize_query_fragment(root)}
-    for extra in extras:
-        normalized = _normalize_query_fragment(extra)
-        if not extra or normalized in seen:
-            continue
-        candidate_terms = terms + [extra]
-        candidate_query = " ".join(candidate_terms)
-        if len(candidate_terms) > DISCOVERY_QUERY_MAX_TERMS or len(candidate_query) > DISCOVERY_QUERY_MAX_LENGTH:
-            continue
-        terms = candidate_terms
-        seen.add(normalized)
-    return " ".join(terms).strip()
 
 
 def _discovery_query_bundles(
@@ -1551,6 +1526,51 @@ def _reading_note(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _world_signal_snapshot(
+    *,
+    discovery_bundles: list[dict[str, Any]],
+    selected_readings: list[dict[str, Any]],
+    raw_candidates: list[dict[str, Any]],
+    limit: int = 8,
+) -> list[dict[str, str]]:
+    snapshot: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(title: Any, *, family: Any = "", summary: Any = "") -> None:
+        cleaned_title = truncate_text(str(title or "").strip(), 120)
+        cleaned_summary = truncate_text(str(summary or "").strip(), 220)
+        key = _normalize_query_fragment(cleaned_title or cleaned_summary)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        snapshot.append(
+            {
+                "title": cleaned_title or cleaned_summary,
+                "family": str(family or "").strip(),
+                "summary": cleaned_summary,
+            }
+        )
+
+    for bundle in discovery_bundles or []:
+        add(
+            bundle.get("focus") or bundle.get("query"),
+            family=bundle.get("seed_origin"),
+            summary="；".join(str(item).strip() for item in list(bundle.get("lenses") or [])[:2] if str(item).strip()),
+        )
+        if len(snapshot) >= limit:
+            return snapshot[:limit]
+
+    for item in list(selected_readings or []) + list(raw_candidates or []):
+        add(
+            item.get("title"),
+            family=item.get("family"),
+            summary=item.get("summary") or item.get("excerpt"),
+        )
+        if len(snapshot) >= limit:
+            return snapshot[:limit]
+    return snapshot[:limit]
+
+
 def _bundle_alignment_terms(discovery_bundles: list[dict[str, Any]] | None, *, limit: int = 14) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
@@ -1796,19 +1816,8 @@ def refresh_external_information(
         }
         for item in selected_readings
     ]
-    source_families = sorted(
-        [
-            {
-                "family": str(family.get("summary_family") or family.get("name") or ""),
-                "count": len(family_results.get(str(family.get("name") or ""), [])),
-            }
-            for family in registry_families
-        ],
-        key=lambda item: (-int(item.get("count") or 0), str(item.get("family") or "")),
-    )
     state = {
         "generated_at": now_utc(),
-        "source_families": source_families,
         "raw_candidates": raw_candidates,
         "selected_readings": selected_readings,
         "reading_notes": reading_notes,
@@ -1828,6 +1837,11 @@ def refresh_external_information(
         "discovery_bundles": discovery_bundles,
         "research_queries": research_queries,
         "research_interest_profile": read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile()),
+        "world_signal_snapshot": _world_signal_snapshot(
+            discovery_bundles=discovery_bundles,
+            selected_readings=selected_readings,
+            raw_candidates=raw_candidates,
+        ),
     }
     for family in registry_families:
         state_key = str(family.get("state_key") or family.get("name") or "").strip()

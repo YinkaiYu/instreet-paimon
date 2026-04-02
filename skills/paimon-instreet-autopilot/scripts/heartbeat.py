@@ -6057,6 +6057,7 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
     results: list[dict[str, str]] = []
     seen_titles: set[str] = set()
     for key in (
+        "world_signal_snapshot",
         "selected_readings",
         "reading_notes",
         "open_web_results",
@@ -6067,7 +6068,11 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
         "community_breakouts",
     ):
         for item in list(external_information.get(key) or []):
-            title = re.sub(r"\s+", " ", str((item or {}).get("title") or "").strip())
+            title = re.sub(
+                r"\s+",
+                " ",
+                str((item or {}).get("title") or (item or {}).get("summary") or "").strip(),
+            )
             if not title or title in seen_titles:
                 continue
             seen_titles.add(title)
@@ -6157,11 +6162,6 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         for item in list(summary.get("external_observations") or [])
         if str((item or {}).get("title") or "").strip()
     ]
-    world_signal_families = [
-        item
-        for item in list(summary.get("world_signal_families") or [])
-        if int((item or {}).get("count") or 0) > 0
-    ]
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
     reply_count = int(comment_backlog.get("replied_count") or 0)
@@ -6199,12 +6199,6 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
             for item in external_observations[:4]
         )
         lines.append(f"外部观察：{title_text}")
-    elif world_signal_families:
-        family_text = "、".join(
-            f"{item.get('family')}×{int(item.get('count') or 0)}"
-            for item in world_signal_families[:4]
-        )
-        lines.append(f"外部世界：{family_text}")
     lane_rationale = str(idea_lane_strategy.get("rationale") or "").strip()
     if lane_rationale:
         lines.append(f"当前判断：{lane_rationale}")
@@ -6803,14 +6797,6 @@ def main() -> None:
         "runtime_stage_strategy": runtime_stage_strategy,
         "idea_lane_strategy": plan.get("idea_lane_strategy") or {},
         "external_observations": _external_observation_items(external_information),
-        "world_signal_families": [
-            {
-                "family": str(item.get("family") or "").strip(),
-                "count": int(item.get("count") or 0),
-            }
-            for item in list(external_information.get("source_families") or [])
-            if int(item.get("count") or 0) > 0
-        ][:6],
         "continuation_state": {
             "path": str(NEXT_ACTIONS_PATH.relative_to(REPO_ROOT)),
             "updated_at": next_action_state.get("updated_at"),
@@ -6896,9 +6882,14 @@ def main() -> None:
         retry_feedback=planner_retry_feedback,
     )
     write_json(CURRENT_STATE_DIR / "content_plan.json", updated_plan)
+    latest_world_snapshot = [
+        truncate_text(str((item or {}).get("title") or "").strip(), 48)
+        for item in list(latest_external_information.get("world_signal_snapshot") or [])
+        if str((item or {}).get("title") or "").strip()
+    ][:4]
     summary["external_information"] = {
-        "source_families": latest_external_information.get("source_families", []),
         "selected_readings_count": len(latest_external_information.get("selected_readings") or []),
+        "focus_titles": latest_world_snapshot,
     }
     counts = list((latest_fallback_audit.get("counts") or {}).values())
     counts.sort(key=lambda item: int(item.get("count") or 0), reverse=True)
