@@ -130,7 +130,7 @@ DISCOVERY_AGENDA_THEME_TOKENS = (
     "修复",
     "队列",
 )
-DISCOVERY_WORLD_ORIGINS = {"manual", "world-sample", "community", "competitor"}
+DISCOVERY_WORLD_ORIGINS = {"world-sample", "community", "competitor"}
 DISCOVERY_LOCAL_ORIGINS = {"agenda", "objective", "hint", "interest"}
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
@@ -666,14 +666,16 @@ def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
     compact = re.sub(r"\s+", "", str(fragment or ""))
     lowered = compact.lower()
     score = _fragment_specificity_score(fragment)
+    world_hits = origin_set & DISCOVERY_WORLD_ORIGINS
+    local_hits = origin_set & DISCOVERY_LOCAL_ORIGINS
     if any(token in compact for token in ("为什么", "如何", "谁", "何时", "不是", "而是")):
         score += 0.2
     if re.search(r"\d", compact):
         score += 0.12
-    if origin_set & DISCOVERY_WORLD_ORIGINS:
+    if world_hits:
         score += 0.18
-    if len(origin_set) >= 2:
-        score += min(len(origin_set) - 1, 2) * 0.16
+    if world_hits and local_hits:
+        score += 0.14
     if any(token in lowered for token in ("governance", "audit", "protocol", "waiting", "memory")):
         score += 0.1
     if _looks_like_source_title_shell(fragment):
@@ -755,24 +757,23 @@ def _ranked_discovery_fragments(
     ranked.sort(
         key=lambda item: (
             -float(item.get("score") or 0.0),
-            -len(list(item.get("origins") or [])),
+            -_fragment_specificity_score(str(item.get("fragment") or "")),
             len(str(item.get("fragment") or "")),
             str(item.get("fragment") or ""),
         )
     )
     return ranked[:limit]
 
-
-def _fragment_has_world_grounding(entry: dict[str, Any]) -> bool:
-    origins = {str(item).strip() for item in list(entry.get("origins") or []) if str(item).strip()}
-    return bool(origins & DISCOVERY_WORLD_ORIGINS)
-
-
 def _prioritize_root_fragments(ranked_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    world_grounded = [item for item in ranked_fragments if _fragment_has_world_grounding(item)]
-    if not world_grounded:
-        return ranked_fragments
-    return world_grounded + [item for item in ranked_fragments if not _fragment_has_world_grounding(item)]
+    return sorted(
+        ranked_fragments,
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -_fragment_specificity_score(str(item.get("fragment") or "")),
+            len(str(item.get("fragment") or "")),
+            str(item.get("fragment") or ""),
+        ),
+    )
 
 
 def _build_discovery_bundle(
@@ -824,7 +825,6 @@ def _build_discovery_bundle(
             origins.append(cleaned)
     bundle_score = float(root.get("score") or 0.0)
     bundle_score += min(len(lenses), DISCOVERY_QUERY_MAX_TERMS - 1) * 0.22
-    bundle_score += min(max(0, len(origins) - 1), 2) * 0.08
     return {
         "focus": root_fragment,
         "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
@@ -884,17 +884,23 @@ def _query_candidate_score(
     if not cleaned:
         return float("-inf")
     origin_set = {str(item).strip() for item in list(origins or []) if str(item).strip()}
+    world_hits = origin_set & DISCOVERY_WORLD_ORIGINS
+    local_hits = origin_set & DISCOVERY_LOCAL_ORIGINS
     score = float(bundle_score or 0.0) - position * 0.08
     if direct_reference:
-        score += 2.6
-    if origin_set & DISCOVERY_WORLD_ORIGINS:
-        score += 0.55
+        score += 1.2
+    if world_hits:
+        score += 0.22
+    if world_hits and local_hits:
+        score += 0.08
     if len(cleaned) >= 8:
         score += 0.12
     if len(cleaned) >= 18:
         score += 0.08
     if re.search(r"[\u3400-\u9fff]", cleaned):
         score += 0.12
+    if _looks_like_source_title_shell(cleaned):
+        score -= 0.55
     return round(score, 3)
 
 
@@ -950,7 +956,7 @@ def _rank_query_candidates(
     scored.sort(
         key=lambda item: (
             -float(item.get("score") or 0.0),
-            -len(list(item.get("origins") or [])),
+            -_fragment_specificity_score(str(item.get("query") or "")),
             len(str(item.get("query") or "")),
             str(item.get("query") or ""),
         )
@@ -1054,7 +1060,30 @@ def _research_query_pool(
         field_names=("text", "note"),
         limit=4,
     )
+    reserved_reference_queries: list[str] = []
+    for query in direct_reference_queries:
+        cleaned = _clean_query_text(query)
+        normalized = _normalize_query_fragment(cleaned)
+        if (
+            not cleaned
+            or not normalized
+            or normalized in seen
+            or _looks_like_source_title_shell(cleaned)
+        ):
+            continue
+        reserved_reference_queries.append(cleaned)
+        if len(reserved_reference_queries) >= 2:
+            break
+    ranked_query_limit = max(1, MAX_RESEARCH_QUERY_COUNT - len(reserved_reference_queries))
     for query in _rank_query_candidates(ordered_bundles, direct_reference_queries):
+        normalized = _normalize_query_fragment(query)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        queries.append(query)
+        if len(queries) >= ranked_query_limit:
+            break
+    for query in reserved_reference_queries:
         normalized = _normalize_query_fragment(query)
         if not normalized or normalized in seen:
             continue
@@ -1637,7 +1666,7 @@ def _world_signal_snapshot(
     for bundle in discovery_bundles or []:
         add(
             bundle.get("focus") or bundle.get("query"),
-            family=bundle.get("seed_origin"),
+            family="discovery_bundle",
             summary="；".join(str(item).strip() for item in list(bundle.get("lenses") or [])[:2] if str(item).strip()),
         )
         if len(snapshot) >= limit:

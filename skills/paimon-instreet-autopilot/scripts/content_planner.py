@@ -30,6 +30,7 @@ COMMUNITY_HOT_FORUM_MIN_COMMENTS = 90
 EXTERNAL_HIGH_LIKE_MIN_UPVOTES = 200
 LOW_PERFORMANCE_SQUARE_MAX_UPVOTES = 30
 LOW_PERFORMANCE_WINDOW_HOURS = 48
+LOW_HEAT_FOLLOWUP_WINDOW_HOURS = 18
 HIGH_PERFORMANCE_MIN_UPVOTES = 60
 HIGH_PERFORMANCE_MIN_COMMENTS = 20
 RESERVED_TITLE_PHRASES = ("老竹讲堂",)
@@ -1522,6 +1523,54 @@ def _is_internal_maintenance_signal(item: dict[str, Any]) -> bool:
     return str(item.get("signal_type") or "") in {"reply-pressure", "promo", "hot-theory", "hot-tech", "hot-group"}
 
 
+def _recent_low_heat_cluster_fragments(signal_summary: dict[str, Any], *, limit: int = 18) -> list[str]:
+    now = datetime.now(timezone.utc)
+    semantic_tokens = THEORY_BOARD_STRUCTURAL_CUES + THEORY_TITLE_ENTRY_STAKE_TOKENS + THEORY_TITLE_DIRECT_ACTOR_TOKENS
+    fragments: list[str] = []
+    seen: set[str] = set()
+    failures = (signal_summary.get("low_heat_failures") or {}).get("items", [])
+    for item in failures[:4]:
+        recorded_at = _parse_datetime(item.get("recorded_at"))
+        if recorded_at is not None:
+            age_seconds = (now - recorded_at.astimezone(timezone.utc)).total_seconds()
+            if age_seconds > LOW_HEAT_FOLLOWUP_WINDOW_HOURS * 3600:
+                continue
+        texts: list[Any] = [item.get("title"), item.get("summary")]
+        texts.extend(list(item.get("lessons") or [])[:3])
+        for text in texts:
+            for fragment in _meaningful_fragments(str(text or "")):
+                normalized = _normalize_title(fragment)
+                if (
+                    len(fragment) < 2
+                    or len(fragment) > 16
+                    or not normalized
+                    or normalized in seen
+                    or normalized in SOURCE_SIGNAL_FRAGMENT_STOPWORDS
+                ):
+                    continue
+                if not _contains_any(fragment, semantic_tokens):
+                    continue
+                for token in semantic_tokens:
+                    token_key = _normalize_title(token)
+                    if (
+                        len(token) < 2
+                        or token not in fragment
+                        or not token_key
+                        or token_key in seen
+                        or token_key in SOURCE_SIGNAL_FRAGMENT_STOPWORDS
+                    ):
+                        continue
+                    seen.add(token_key)
+                    fragments.append(token)
+                    if len(fragments) >= limit:
+                        return fragments
+                seen.add(normalized)
+                fragments.append(fragment)
+                if len(fragments) >= limit:
+                    return fragments
+    return fragments
+
+
 def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> bool:
     normalized_text = _normalize_title(text)
     if not normalized_text:
@@ -1538,6 +1587,14 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
         if not title_key or title_key in strong_titles:
             continue
         if len(title_key) >= 10 and (title_key in normalized_text or normalized_text in title_key):
+            return True
+    overlap_count = 0
+    for fragment in _recent_low_heat_cluster_fragments(signal_summary):
+        fragment_key = _normalize_title(fragment)
+        if not fragment_key or fragment_key not in normalized_text:
+            continue
+        overlap_count += 1
+        if overlap_count >= 3:
             return True
     return False
 
@@ -1732,7 +1789,7 @@ def _theory_title_meta_overhang_reason(title: str) -> str:
     lead, tail = [part.strip() for part in title_text.split(separator, 1)]
     if len(lead) < 6 or len(tail) < 6:
         return ""
-    if _contains_any(lead, THEORY_TITLE_ACTOR_TOKENS) or _contains_any(lead, THEORY_TITLE_ENTRY_STAKE_TOKENS):
+    if _contains_any(lead, THEORY_TITLE_ENTRY_STAKE_TOKENS):
         return ""
     if float(_keyword_hit_count(lead, THEORY_TITLE_META_PACKAGING_TOKENS)) < 2:
         return ""
@@ -2077,41 +2134,16 @@ def _theory_bundle_public_seed(bundle: dict[str, Any], lead: dict[str, Any]) -> 
     }
 
 
-def _bundle_origin_labels(bundle: dict[str, Any]) -> list[str]:
-    labels = {
-        "agenda": "长期议程",
-        "objective": "活跃目标",
-        "manual": "手工线索",
-        "hint": "旅行者提示",
-        "interest": "研究兴趣",
-        "community": "公共讨论",
-        "competitor": "外部作者",
-        "world-sample": "外部样本",
-    }
-    mapped = [
-        labels.get(str(origin or "").strip(), str(origin or "").strip())
-        for origin in list(bundle.get("origins") or [])
-        if str(origin or "").strip()
-    ]
-    return _dedupe_texts([label for label in mapped if label])[:3]
-
-
 def _world_bundle_reason(bundle: dict[str, Any]) -> str:
     focus = truncate_text(str(bundle.get("focus") or bundle.get("query") or "").strip(), 18)
     lenses = _dedupe_texts(
         [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or [])[1:] if str(item).strip()]
     )[:2]
-    origins = _bundle_origin_labels(bundle)
     lens_text = "、".join(truncate_text(item, 14) for item in lenses if item)
-    origin_text = "、".join(origins[:2])
-    if focus and lens_text and origin_text:
-        return f"{origin_text} 这轮都咬到“{focus}”上，不能再让单一样本替整个问题拍板。"
     if focus and lens_text:
-        return f"这轮外部发现把 {lens_text} 一起压到“{focus}”上，值得直接展开成自己的判断。"
-    if focus and origin_text:
-        return f"这轮来自{origin_text}的线索都在推“{focus}”，不该再退回单点续写。"
+        return f"这轮外部发现里，{lens_text} 都在把“{focus}”往同一条问题链上压，不能再让单一样本替整个问题拍板。"
     if focus:
-        return f"这轮外部发现已经把“{focus}”压成一个真正的问题单元，不能再只跟着样本跑。"
+        return f"这轮外部发现已经把“{focus}”压成一个真正的问题单元，不能再只跟着样本标题跑。"
     return "这轮外部发现已经形成一束可压缩的问题，不能再让单一样本替整个议程拍板。"
 
 
@@ -2847,7 +2879,7 @@ def _audit_generated_idea(
     elif _is_metric_surface_text(core_text):
         failure_reason = "这个候选停在指标表层，没有推进成结构问题。"
     elif _looks_like_low_heat_followup(core_text, signal_summary):
-        failure_reason = "这个候选太像低热度旧帖的跟写，容易掉进复读。"
+        failure_reason = "这个候选还在追刚低热那条的同一组冲突，只是换了概念名，读者更容易把它看成复写。"
     elif any(_normalize_title(item) == normalized_title for item in recent_titles):
         failure_reason = "标题与近期帖子重复。"
     elif len(repeated_fragments) >= 3 or (repeated_penalty >= 2 and historical_penalty >= 8):
@@ -3953,7 +3985,7 @@ def _generate_codex_ideas(
 32. `theory-post` 在命名新概念时，要顺手说明它不同于什么旧词或旧抱怨，避免只把旧判断换个新名词。
 33. 如果外部样本来自教育、医疗、交通、城市治理等异域现场，它只能做证据段，不准占住 `theory-post` 的标题主语或开头两段；标题先写 Agent 社会里的解释权、责任、接管、等待或制度冲突。
 34. 如果 `theory-post` 的题眼来自维护页、首页、入口、页面这类前台表象，标题第一屏必须直接写出谁在失去资格、谁在承担代价或谁被重新排序，不要把界面现象本身当主角。
-35. 不要写成“制度边界重排的悖论：……”这种前半句先报抽象理论包装、后半句才交代真实冲突的标题骨架。冒号前半句也要直接站在代价、位置或失去资格的人身上。
+35. 不要写成“制度边界重排的悖论：……”或“Agent 的承认秩序真相：……”这种前半句先报抽象理论包装、后半句才交代真实冲突的标题骨架。冒号前半句也要直接站在代价、位置或失去资格的人身上。
 36. 如果 `theory-post` 已经把判断抬到制度、秩序、资格重排这一层，`source_signals` 不能只剩一个局部现场；要么补第二个外部/跨场景证据，要么主动缩小结论。
 37. `practice_program` 不能再用“把判断边界、证据入口、接管窗口、纠错责任写实”这种通用收尾，必须点名本题对象、接手时点和复核动作。
 38. 不要再用“最折磨人的，不是……而是……”这类情绪壳给 `theory-post` 起题，除非标题第一屏已经明确写出谁在失去资格、谁在承担代价或谁在接管。

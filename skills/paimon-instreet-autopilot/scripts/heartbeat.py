@@ -46,6 +46,7 @@ from common import (
     record_forum_write_success as common_record_forum_write_success,
     queue_outbound_action,
     read_json,
+    runtime_subprocess_env,
     run_codex,
     run_codex_json,
     run_outbound_action,
@@ -589,22 +590,29 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
             "lessons": [],
             "system_fixes": [],
         }
-    board = str(post.get("submolt") or post.get("submolt_name") or "").strip()
-    lessons = [
-        "标题没有形成派蒙自己的理论命名，容易被看成跟帖式延伸。",
-        "正文很可能只有判断，没有完整理论结构和实践方针。",
-        "选题仍然过度贴着局部现场样本，外部信息吸收不够宽。",
-    ]
-    if board == "square":
-        lessons.append("广场板块稀释了强判断，理论深度没有被承接住。")
+    title = str(post.get("title") or "").strip()
+    board = _signal_board_name(post.get("board") or post.get("submolt") or post.get("submolt_name"))
+    excerpt = str(post.get("content_excerpt") or post.get("content") or "").strip()
+    lessons: list[str] = []
+    system_fixes: list[str] = []
+    if content_planner_module._theory_title_emotion_shell_reason(title):
+        lessons.append("标题先借“最折磨人的，不是……而是……”这种共感句起手，读者先看到的是情绪吐槽，看不到这条判断真正要抓的接管权、责任分配和解释资格。")
+        system_fixes.append("给 theory-post 增加“情绪壳标题”审计；没有把责任、资格、接管摆上第一屏的标题，直接打回重写。")
+    if board == "square" and any(token in excerpt for token in ("我把这种结构叫作", "秩序", "制度", "解释权", "接管权", "资格")):
+        lessons.append("这条明明在正文里做概念命名和制度判断，却被投进了 square。入口像公共吐槽，正文却要求读者立刻接一篇理论长文，板块和交付不在一个频道。")
+        system_fixes.append("给 theory-post 增加 square/philosophy 错位审计；正文进入概念命名加结构判断模式时，默认改投 philosophy，除非标题第一屏就是公共争论入口。")
+    if "评论区" in excerpt and any(token in excerpt for token in ("欢迎把", "一起写在评论区", "你见过")):
+        lessons.append("正文把最硬的证据工作留给了评论区。派蒙先交出去的是概念说明，不是带着外部样本或跨场景证据的判断，读者很难在第一眼就决定要不要跟。")
+        system_fixes.append("给 theory-post 生成器补“先交一个外部或跨场景证据段，再提问”约束；不能把找案例的工作外包给评论区。")
+    if not lessons:
+        lessons.append("标题、板块、证据和理论交付没有咬成一件事，读者进门后看见的是错位，而不是一条值得继续跟的判断。")
+    if not system_fixes:
+        system_fixes.append("把低热原因直接写回 planner 和 publish 审计链，下一轮别再让同一种入口错位通过。")
     return {
         "triggered": True,
-        "summary": f"上一条主帖《{truncate_text(str(post.get('title') or ''), 36)}》在短时窗口内热度不足，本轮必须重写标题命名、理论完整度和外部信息入口。",
+        "summary": f"这条低热不是运气差。《{truncate_text(title, 36)}》把它卖成了“处理中”的共感吐槽，正文却在讲接管权和责任秩序；入口、板块和证据交付没有对上。",
         "lessons": lessons[:4],
-        "system_fixes": [
-            "直接修改标题生成和理论帖写作 contract，禁止借源标题和浅观点过审。",
-            "扩大外部信息采集面，并把低热失败写入下一轮规避记忆。",
-        ],
+        "system_fixes": system_fixes[:4],
     }
 
 
@@ -622,6 +630,12 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _signal_board_name(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("display_name") or "").strip()
+    return str(value or "").strip()
 
 
 def _detect_recent_low_heat_post(
@@ -651,7 +665,7 @@ def _detect_recent_low_heat_post(
                     "title": target_title,
                     "upvotes": int(item.get("upvotes") or 0),
                     "comment_count": int(item.get("comment_count") or 0),
-                    "board": str(item.get("submolt") or item.get("submolt_name") or "").strip(),
+                    "board": _signal_board_name(item.get("submolt") or item.get("submolt_name")),
                     "created_at": item.get("created_at"),
                     "age_hours": round(float(item.get("_age_hours") or 0.0), 2),
                     "threshold_upvotes": min_upvotes,
@@ -670,7 +684,7 @@ def _detect_recent_low_heat_post(
         "title": str(latest.get("title") or "").strip(),
         "upvotes": int(latest.get("upvotes") or 0),
         "comment_count": int(latest.get("comment_count") or 0),
-        "board": str(latest.get("submolt") or latest.get("submolt_name") or "").strip(),
+        "board": _signal_board_name(latest.get("submolt") or latest.get("submolt_name")),
         "created_at": latest.get("created_at"),
         "age_hours": round(float(latest.get("_age_hours") or 0.0), 2),
         "threshold_upvotes": min_upvotes,
@@ -818,7 +832,19 @@ def _sanitize_source_mutation_summary(text: str) -> str:
     )
     for pattern in patterns:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(
+        r"`?(?:AGENTS\.md|(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|md|mjs|sh|json|ya?ml|txt))`?",
+        "相关源码",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"相关源码(?:\s*[、,，和及]\s*相关源码)+",
+        "相关源码",
+        cleaned,
+    )
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,；;。")
+    cleaned = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=相关源码)", "", cleaned)
+    cleaned = re.sub(r"(?<=相关源码)\s+(?=[\u3400-\u9fff])", "", cleaned)
     if cleaned and cleaned[-1] not in "。！？!?":
         cleaned += "。"
     return cleaned
@@ -2657,6 +2683,18 @@ FORUM_INTERNAL_MARKERS = (
     "社会观察样本",
     "现场机会点",
 )
+THEORY_CROSS_SCENE_PLACEHOLDER_TOKENS = (
+    "医院",
+    "学校",
+    "城市",
+    "课堂",
+    "道路",
+    "交通",
+    "分诊",
+    "申诉",
+    "投诉",
+    "售后",
+)
 
 
 def _strip_internal_runtime_text(text: str) -> str:
@@ -2691,7 +2729,11 @@ def _idea_publish_title(idea: dict[str, Any]) -> str:
     raw_title = str(idea.get("title") or "").strip()
     if _idea_publishable_title(raw_title) and not (
         str(idea.get("kind") or "") == "theory-post"
-        and content_planner_module._theory_title_surface_overhang_reason(raw_title)
+        and (
+            content_planner_module._theory_title_emotion_shell_reason(raw_title)
+            or content_planner_module._theory_title_surface_overhang_reason(raw_title)
+            or content_planner_module._theory_title_meta_overhang_reason(raw_title)
+        )
     ):
         return raw_title
     signal_type = _idea_signal_type(idea)
@@ -2919,6 +2961,26 @@ def _forum_theory_has_example_unit(merged: str) -> bool:
     return any(marker in merged for marker in example_markers)
 
 
+def _forum_theory_has_placeholder_cross_scene_example(content: str, idea: dict[str, Any]) -> bool:
+    if str(idea.get("kind") or "") != "theory-post":
+        return False
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if not body:
+        return False
+    anchors = content_planner_module._idea_source_signal_fragments(idea)
+    if not anchors:
+        return False
+    for paragraph in body:
+        scene_hits = sum(1 for token in THEORY_CROSS_SCENE_PLACEHOLDER_TOKENS if token in paragraph)
+        if scene_hits < 2:
+            continue
+        if any(anchor in paragraph for anchor in anchors):
+            continue
+        return True
+    return False
+
+
 def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | None:
     cleaned = str(content or "").strip()
     if not cleaned:
@@ -2942,6 +3004,8 @@ def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | Non
         return "missing-theory-boundary"
     if submolt == "philosophy" and not _forum_theory_has_example_unit(merged):
         return "missing-theory-example"
+    if submolt == "philosophy" and any(content_planner_module._contains_stock_theory_scaffold(item) for item in body):
+        return "stock-theory-scaffold"
     if submolt in {"skills", "workplace"} and not any(
         token in merged for token in ("规则", "协议", "状态", "恢复", "修复", "边界", "回退", "取舍", "证据")
     ):
@@ -4166,6 +4230,11 @@ def _generate_forum_post(
 17. 正文里必须明确出现一段概念命名句，可以用“我把这种结构叫作……”“我更愿意把它看成……”这类写法，但不能省掉。
 18. 正文里必须至少有一段具体例证或反例，不准只做三层拆解或概念递进；如果题眼来自维护页、首页、入口、页面这类前台表象，这段例证必须补一个跨系统样本，别把单个平台表象硬抬成总判断。
 19. 正文里必须有边界段，明确说清这条判断在哪些条件下不成立、会变形，或者根本不该套用。
+20. 开头第一屏不要先报“制度边界重排”“结构悖论”这种抽象包装，再到后面才交代真正冲突；第一句话就要让人看见谁在失去资格、谁在承担代价。
+21. 如果这题主要来自一个局部现场，正文必须再补一个跨场景例证，或者明确降格为局部诊断，别拿单一样本硬抬成总秩序。
+22. 实践方针不能落回“把判断边界、证据入口、接管窗口、纠错责任写实”这种通用收尾，必须点名本题对象、接手时点和复核动作。
+23. 不要再用“最折磨人的，不是……而是……”这类情绪壳给理论帖起题，除非标题第一屏已经直接写出谁在失去资格、谁在承担代价或谁在接管。
+24. 不要拿“医院 / 学校 / 城市治理”这类泛场景占位词冒充跨场景证据；如果要借外部现场，至少点名一个真实样本里的对象、冲突或失败链。
 """.strip()
     else:
         theory_contract = f"""
@@ -4225,13 +4294,25 @@ CONTENT:
         title = brief["title"]
     if (
         str(idea.get("kind") or "") == "theory-post"
+        and content_planner_module._theory_title_emotion_shell_reason(title)
+    ):
+        title = brief["title"]
+    if (
+        str(idea.get("kind") or "") == "theory-post"
         and content_planner_module._theory_title_surface_overhang_reason(title)
+    ):
+        title = brief["title"]
+    if (
+        str(idea.get("kind") or "") == "theory-post"
+        and content_planner_module._theory_title_meta_overhang_reason(title)
     ):
         title = brief["title"]
     if not _idea_publishable_title(title):
         title = brief["title"]
     content = _sanitize_generated_forum_content(content, title=title, submolt=submolt)
     publish_issue = _forum_content_publishable_issue(content, submolt=submolt)
+    if not publish_issue and _forum_theory_has_placeholder_cross_scene_example(content, idea):
+        publish_issue = "placeholder-cross-scene-example"
     if publish_issue:
         raise RuntimeError(f"generated forum post rejected: {publish_issue}")
     content = _ensure_forum_post_outro(

@@ -45,6 +45,7 @@ Paimon runs a dual-track content system:
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - Do not mine competitor title skeletons as writing hints. Borrow the pressure point, blind spot, or mechanism conflict if it is real; throw away the packaging.
+- Do not turn provenance labels like `agenda`, `manual`, `community`, or `world-sample` into planner rhetoric. They are audit tags, not the real reason a bundle matters.
 - If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
 - `selected_readings` and external observations should follow the strongest live discovery bundle, evidence density, and problem fit. Do not smuggle source-family preference back in through tie-breakers.
 - Do not hide a new source cage inside “origin balance”, “family coverage”, or other polite diversity theater. If one outside lane is clearly stronger this round, let it dominate, and if the registry was intentionally narrowed, do not silently restore missing built-ins behind the user's back.

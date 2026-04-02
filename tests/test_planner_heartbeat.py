@@ -656,6 +656,31 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertIn("单一样本", str(audited.get("failure_reason_if_rejected") or ""))
 
+    def test_audit_generated_idea_rejects_concept_shell_truth_title(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "world-bundle",
+                "title": "Agent 的承认秩序真相：解释权越前置，接手权越后撤",
+                "submolt": "philosophy",
+                "angle": "前台解释越来越早，真正能接手的人越来越往后退。",
+                "why_now": "数据归属、空转和多智能体协作正在把同一条责任链上的解释资格抬到台前。",
+                "source_signals": [
+                    "社区样本：数据归属争议",
+                    "外部样本：其实它在空转",
+                    "社区样本：多智能体协作越多越说不清",
+                ],
+                "concept_core": "我把这种解释先完成、接手后撤的关系叫作承认秩序。",
+                "mechanism_core": "解释节点可以先说清问题，真正能触碰原始日志和回写结果的人却被推到后面。",
+                "boundary_note": "只有解释、接手和等待成本确实落在同一条责任链上时，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的解释资格和接手责任，而不是单次卡顿。",
+                "practice_program": "把接手时点、证据回写和超时责任落到同一条工单里。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("抽象理论包装", str(audited.get("failure_reason_if_rejected") or ""))
+
     def test_audit_generated_idea_rejects_emotion_shell_theory_title(self) -> None:
         audited = content_planner._audit_generated_idea(
             {
@@ -676,6 +701,28 @@ class ContentPlannerTests(unittest.TestCase):
             recent_titles=[],
         )
         self.assertIn("情绪壳", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_looks_like_low_heat_followup_catches_renamed_same_cluster(self) -> None:
+        self.assertTrue(
+            content_planner._looks_like_low_heat_followup(
+                "Agent 的承认秩序真相：解释权越前置，接手权越后撤。它继续在讲责任、接手和解释资格。",
+                {
+                    "pending_reply_posts": [],
+                    "low_heat_failures": {
+                        "items": [
+                            {
+                                "recorded_at": common.now_utc(),
+                                "title": "最折磨人的，不是被拒绝，而是一直被显示为“处理中”",
+                                "summary": "正文却在讲接管权、责任分配和解释资格。",
+                                "lessons": [
+                                    "标题把责任、接手和等待资格藏到了后面。",
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        )
 
     def test_preferred_theory_board_avoids_square_after_emotion_shell_low_heat(self) -> None:
         board = content_planner._preferred_theory_board(
@@ -954,6 +1001,25 @@ class HeartbeatStateTests(unittest.TestCase):
             submolt="philosophy",
         )
         self.assertEqual("stock-theory-scaffold", issue)
+
+    def test_forum_theory_placeholder_cross_scene_example_requires_real_anchor(self) -> None:
+        self.assertTrue(
+            heartbeat._forum_theory_has_placeholder_cross_scene_example(
+                "# 标题\n\n"
+                "我把这种结构叫作承认秩序：解释已经完成，真正接手的人却还没出现。\n\n"
+                "这不是某个平台的小毛病。医院里的智能分诊、学校里的自动申诉流程、城市投诉系统里的前台机器人，也会出现同一种裂缝。\n\n"
+                "边界也要说清：只有解释和接手落在同一条责任链上时，这个判断才成立。\n\n"
+                "如果你不同意，请直接指出你觉得这里错在前提、机制还是结论？",
+                {
+                    "kind": "theory-post",
+                    "source_signals": [
+                        "社区样本：数据归属争议",
+                        "外部样本：其实它在空转",
+                        "社区样本：多智能体协作越多越说不清",
+                    ],
+                },
+            )
+        )
 
     def test_http_json_retries_incomplete_read_for_get(self) -> None:
         original_urlopen = common.request.urlopen
@@ -1238,6 +1304,12 @@ class HeartbeatStateTests(unittest.TestCase):
             heartbeat.run_codex_json = original_run_codex_json
 
         self.assertEqual("把外部入口改得更开放。", result["human_summary"])
+
+    def test_sanitize_source_mutation_summary_removes_file_paths(self) -> None:
+        sanitized = heartbeat._sanitize_source_mutation_summary(
+            "我改了 AGENTS.md、skills/paimon-instreet-autopilot/scripts/external_information.py 和 heartbeat.py，让外部入口别再被来源配额牵着走。"
+        )
+        self.assertEqual("我改了相关源码，让外部入口别再被来源配额牵着走。", sanitized)
 
     def test_drop_resolved_primary_failures_after_success(self) -> None:
         trimmed = heartbeat._drop_resolved_primary_failures(
@@ -2980,14 +3052,14 @@ class ExternalInformationTests(unittest.TestCase):
         families = external_information._registry_families({"families": []})
         self.assertEqual([], families)
 
-    def test_prioritize_root_fragments_prefers_world_grounded_entries(self) -> None:
+    def test_prioritize_root_fragments_keeps_score_order_instead_of_world_first(self) -> None:
         ordered = external_information._prioritize_root_fragments(
             [
                 {"fragment": "长期议程", "origins": ["agenda"], "score": 9.0},
                 {"fragment": "等待状态开始进入治理接口", "origins": ["community", "world-sample"], "score": 6.0},
             ]
         )
-        self.assertEqual("等待状态开始进入治理接口", ordered[0]["fragment"])
+        self.assertEqual("长期议程", ordered[0]["fragment"])
 
     def test_scholarly_candidate_plausible_rejects_call_for_papers_ads(self) -> None:
         self.assertFalse(
@@ -3046,6 +3118,24 @@ class ExternalInformationTests(unittest.TestCase):
         )
         self.assertIn("等待为什么必须变成显式状态", queries)
         self.assertNotIn("等待为什么必须变成显式状态 可审计等待状态开始进入平台治理", queries)
+
+    def test_rank_query_candidates_does_not_force_manual_queries_ahead_of_stronger_bundle(self) -> None:
+        queries = external_information._rank_query_candidates(
+            [
+                {
+                    "focus": "等待状态进入治理接口",
+                    "query": "等待状态进入治理接口",
+                    "terms": ["等待状态进入治理接口", "可审计停顿状态"],
+                    "lenses": ["可审计停顿状态"],
+                    "queries": ["等待状态进入治理接口", "可审计停顿状态"],
+                    "origins": ["community", "world-sample"],
+                    "score": 4.6,
+                }
+            ],
+            ["「感激」是什么"],
+        )
+        self.assertTrue(queries)
+        self.assertEqual("等待状态进入治理接口", queries[0])
 
     def test_select_readings_does_not_rotate_away_from_stronger_same_family_material(self) -> None:
         discovery_bundles = [{"focus": "等待状态", "terms": ["等待状态"], "lenses": []}]
