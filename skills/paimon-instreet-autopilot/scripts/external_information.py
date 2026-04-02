@@ -198,9 +198,11 @@ def _normalize_registry_family(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _registry_families(registry: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = [item for item in list(registry.get("families") or []) if isinstance(item, dict)]
-    if not raw:
+    raw_families = registry.get("families")
+    if raw_families is None or "families" not in registry:
         raw = _default_registry_families()
+    else:
+        raw = [item for item in list(raw_families or []) if isinstance(item, dict)]
     return [_normalize_registry_family(item) for item in raw if isinstance(item, dict)]
 
 
@@ -467,30 +469,6 @@ def _clean_query_text(value: Any) -> str:
     if not re.search(r"[\u3400-\u9fff]", cleaned) and len(cleaned) < 4:
         return ""
     return truncate_text(cleaned, 96)
-
-
-def _query_expansions(value: Any, *, limit: int = 3) -> list[str]:
-    base = _clean_query_text(value)
-    if not base:
-        return []
-    expanded = [base]
-    for fragment in re.split(r"[、,，/；;]|(?:\s+-\s+)|(?:\s+and\s+)", base):
-        cleaned = _clean_query_text(fragment)
-        if not cleaned or cleaned == base:
-            continue
-        expanded.append(cleaned)
-        if len(expanded) >= limit:
-            break
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in expanded:
-        normalized = item.lower()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(item)
-    return deduped
-
 
 def _normalize_query_fragment(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
@@ -848,24 +826,35 @@ def _bundle_queries(root: str, lenses: list[str]) -> list[str]:
     queries: list[str] = []
     seen: set[str] = set()
 
-    def add(query: str) -> None:
+    def add(value: Any) -> None:
+        query = _clean_query_text(value)
         normalized = _normalize_query_fragment(query)
         if not query or normalized in seen:
             return
         seen.add(normalized)
         queries.append(query)
 
-    for query in _query_expansions(root, limit=2):
-        add(query)
-        if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
-            return queries
-    for lens in lenses:
-        for query in _query_expansions(lens, limit=1):
-            add(query)
-        if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
-            return queries
     add(root)
+    for lens in lenses:
+        add(lens)
+        if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
+            return queries
     return queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE]
+
+
+def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for value in [
+        bundle.get("focus"),
+        bundle.get("query"),
+        *(bundle.get("terms") or []),
+        *(bundle.get("lenses") or []),
+        *(bundle.get("queries") or []),
+    ]:
+        cleaned = _clean_query_text(value)
+        if cleaned:
+            candidates.append(cleaned)
+    return candidates
 
 
 def _discovery_query_bundles(
@@ -975,47 +964,32 @@ def _research_query_pool(
         field_names=("text", "note"),
         limit=4,
     )
-    reserved_direct_slots = min(
-        2,
-        len(
-            {
-                _normalize_query_fragment(str(query or "").strip())
-                for query in direct_reference_queries
-                if _normalize_query_fragment(str(query or "").strip())
-            }
-        ),
-    )
-    primary_query_limit = max(1, MAX_RESEARCH_QUERY_COUNT - reserved_direct_slots)
-
-    for item in ordered_bundles:
-        primary_query = str(item.get("query") or "").strip()
-        normalized = _normalize_query_fragment(primary_query)
-        if not primary_query or normalized in seen:
-            continue
-        seen.add(normalized)
-        queries.append(primary_query)
-        if len(queries) >= primary_query_limit:
-            break
-
-    for query in direct_reference_queries:
-        cleaned = str(query or "").strip()
+    def add_query(value: Any) -> bool:
+        cleaned = _clean_query_text(value)
         normalized = _normalize_query_fragment(cleaned)
         if not cleaned or normalized in seen:
-            continue
+            return False
         seen.add(normalized)
         queries.append(cleaned)
-        if len(queries) >= MAX_RESEARCH_QUERY_COUNT:
+        return len(queries) >= MAX_RESEARCH_QUERY_COUNT
+
+    world_first_bundles = [
+        item for item in ordered_bundles if str(item.get("seed_origin") or "").strip() in DISCOVERY_WORLD_ORIGINS
+    ]
+    remaining_bundles = [item for item in ordered_bundles if item not in world_first_bundles]
+
+    for item in world_first_bundles:
+        for query in _bundle_query_candidates(item):
+            if add_query(query):
+                return bundles, queries
+
+    for query in direct_reference_queries:
+        if add_query(query):
             return bundles, queries
 
-    for item in ordered_bundles:
-        for query in list(item.get("queries") or []):
-            cleaned = str(query or "").strip()
-            normalized = _normalize_query_fragment(cleaned)
-            if not cleaned or normalized in seen:
-                continue
-            seen.add(normalized)
-            queries.append(cleaned)
-            if len(queries) >= MAX_RESEARCH_QUERY_COUNT:
+    for item in remaining_bundles:
+        for query in _bundle_query_candidates(item):
+            if add_query(query):
                 return bundles, queries
     return bundles, queries[:MAX_RESEARCH_QUERY_COUNT]
 
@@ -1889,6 +1863,7 @@ def refresh_external_information(
     ]
     state = {
         "generated_at": now_utc(),
+        "registry_families": registry_families,
         "raw_candidates": raw_candidates,
         "selected_readings": selected_readings,
         "reading_notes": reading_notes,

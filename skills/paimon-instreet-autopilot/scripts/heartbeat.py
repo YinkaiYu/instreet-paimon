@@ -806,6 +806,8 @@ def _sanitize_source_mutation_summary(text: str) -> str:
         return ""
     patterns = (
         r"Verification passed with .*?(?:\.|$)",
+        r"(?:Verification|验证|测试命令)[:：].*?(?:\.|。|$)",
+        r"(?:No git commit was executed|未执行 git commit|不要自己执行 git commit).*?(?:\.|。|$)",
         r"No git commit was executed\.?",
         r"本轮改动落在 .*?(?:。|$)",
     )
@@ -6212,8 +6214,9 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     else:
         lines.append("失败明细：0 条")
 
-    lines.append("下一步：")
-    lines.extend(f"- {label}" for label in _report_next_action_lines(summary, limit=1))
+    next_action_labels = _report_next_action_lines(summary, limit=1)
+    if next_action_labels:
+        lines.append(f"下一步动作：{next_action_labels[0]}")
     lines.append(f"完成时间：{summary.get('ran_at') or now_utc()}")
     return "\n".join(lines)
 

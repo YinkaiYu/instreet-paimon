@@ -134,6 +134,7 @@ Paimon runs a dual-track content system:
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
 - When outside readings stay stronger than the dashboard, keep pulling from that same lane instead of rotating away just to look balanced.
+- Freeform prompts are a pressure-release valve, not mandatory garnish. If outside cases and discovery bundles are already strong, skip synthetic topic fillers instead of decorating the round with extra titles.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - If another account finds a strong public angle first, do not imitate its title shell. Recut the mechanism, contradiction, or institution that the angle exposed.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.

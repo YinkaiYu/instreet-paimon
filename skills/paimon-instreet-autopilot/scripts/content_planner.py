@@ -445,24 +445,48 @@ def _recommended_next_action(tasks: list[dict[str, Any]]) -> str:
     comment_count = len(comment_tasks)
     post_count = len({str(item.get("post_id") or "") for item in comment_tasks if item.get("post_id")})
     dm_count = sum(1 for item in tasks if item.get("kind") == "reply-dm")
-    if failure_count and failure_count >= max(2, comment_count):
-        return f"先修复 {failure_count} 个失败入口，再决定本轮公开动作从哪个压力点起手"
-    if comment_count >= 3 or (comment_count >= 2 and post_count >= 2):
-        suffix = f"，并顺手清掉 {dm_count} 条私信" if dm_count else ""
-        if post_count <= 1:
-            return f"继续维护当前活跃讨论，优先回复 {comment_count} 条评论{suffix}"
-        return f"继续维护 {post_count} 个活跃讨论帖，优先回复 {comment_count} 条评论{suffix}"
-    if publish_count:
-        return "优先补发上一轮未完成的主发布"
+    choices: list[dict[str, Any]] = []
+    if failure_count:
+        choices.append(
+            {
+                "name": "failure",
+                "score": failure_count * 2.6 + min(comment_count, 2) * 0.2,
+                "label": f"先收口 {failure_count} 个失败入口，再决定这轮公开动作从哪个压力点起手",
+            }
+        )
     if comment_count:
         suffix = f"，并顺手清掉 {dm_count} 条私信" if dm_count else ""
-        if post_count <= 1:
-            return f"继续维护当前活跃讨论，优先回复 {comment_count} 条评论{suffix}"
-        return f"继续维护 {post_count} 个活跃讨论帖，优先回复 {comment_count} 条评论{suffix}"
-    if failure_count:
-        return f"优先处理上一轮未解决的 {failure_count} 个失败入口"
+        label = (
+            f"继续维护当前活跃讨论，优先回复 {comment_count} 条评论{suffix}"
+            if post_count <= 1
+            else f"继续维护 {post_count} 个活跃讨论帖，优先回复 {comment_count} 条评论{suffix}"
+        )
+        choices.append(
+            {
+                "name": "comments",
+                "score": comment_count * 1.4 + post_count * 1.1 + min(dm_count, 2) * 0.15,
+                "label": label,
+            }
+        )
+    if publish_count:
+        choices.append(
+            {
+                "name": "publish",
+                "score": publish_count * 2.2 + (0.35 if not comment_count else 0.0),
+                "label": "把上一轮挂住的公开主动作补完",
+            }
+        )
     if dm_count:
-        return f"先打开新的公开动作，再回复 {dm_count} 条私信"
+        choices.append(
+            {
+                "name": "dm",
+                "score": dm_count * 1.0 + (0.3 if not any((failure_count, comment_count, publish_count)) else 0.0),
+                "label": f"把 {dm_count} 条高价值私信线程收口，别让对话重新掉回队列",
+            }
+        )
+    if choices:
+        choices.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("name") or "")))
+        return str(choices[0].get("label") or "").strip()
     return "从当前最有压力的公开入口起手：主帖、章节、小组帖或关键回复都可以"
 
 
@@ -2711,6 +2735,26 @@ def _external_group_angle_hint(family: str) -> str:
     return "把外部样本改写成可检验的方法框架，至少交出对象、证据、协议边界和反例入口。"
 
 
+def _has_strong_world_pressure(signal_summary: dict[str, Any]) -> bool:
+    external_information = signal_summary.get("external_information") or {}
+    if list(external_information.get("discovery_bundles") or []):
+        return True
+    candidates = _iter_external_world_candidates(external_information, limit=4)
+    if len(candidates) >= 2:
+        return True
+    if not candidates:
+        return False
+    candidate = candidates[0]
+    summary = str(
+        candidate.get("summary")
+        or candidate.get("excerpt")
+        or candidate.get("abstract")
+        or candidate.get("relevance_note")
+        or ""
+    ).strip()
+    return len(summary) >= 60
+
+
 def _iter_external_world_candidates(external_information: dict[str, Any], *, limit: int = 24) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -3085,8 +3129,9 @@ def _dynamic_opportunities(
             quality_score=2.0,
             freshness_score=1.0,
         )
-    for prompt in _generate_freeform_prompts(signal_summary):
-        add_source("theory", "freeform", prompt, quality_score=1.5, freshness_score=1.0)
+    if not _has_strong_world_pressure(signal_summary):
+        for prompt in _generate_freeform_prompts(signal_summary):
+            add_source("theory", "freeform", prompt, quality_score=1.5, freshness_score=1.0)
     for hint in signal_summary.get("user_topic_hints", [])[:4]:
         hint_text = str(hint.get("text") or "").strip()
         if not hint_text:

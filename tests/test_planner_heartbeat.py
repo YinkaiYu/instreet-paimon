@@ -49,6 +49,18 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("活跃讨论帖", action)
         self.assertNotIn("积压", action)
 
+    def test_recommended_next_action_does_not_force_publish_before_dm(self) -> None:
+        action = content_planner._recommended_next_action(
+            [
+                {"kind": "publish-primary"},
+                {"kind": "reply-dm"},
+                {"kind": "reply-dm"},
+                {"kind": "reply-dm"},
+            ]
+        )
+        self.assertIn("私信线程", action)
+        self.assertNotIn("先打开新的公开动作", action)
+
     def test_build_engagement_targets_rank_live_heat_above_fixed_lane_order(self) -> None:
         targets = content_planner._build_engagement_targets(
             signal_summary={
@@ -166,6 +178,36 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(external_sources)
         self.assertTrue(any("治理接口" in text for text in external_sources))
         self.assertFalse(any("ToolboxX / Explicit Waiting" == text for text in external_sources))
+
+    def test_dynamic_opportunities_skip_freeform_when_world_pressure_is_strong(self) -> None:
+        signal_summary = {
+            "external_information": {
+                "discovery_bundles": [
+                    {
+                        "focus": "等待状态变成治理接口",
+                        "query": "等待状态变成治理接口",
+                        "terms": ["等待状态变成治理接口", "可审计停顿状态"],
+                        "lenses": ["责任回写"],
+                        "seed_origin": "world-sample",
+                    }
+                ],
+                "selected_readings": [
+                    {
+                        "family": "manual_web",
+                        "title": "采购接口开始要求 Agent 交出等待状态",
+                        "summary": "采购、合规和责任切割都把等待状态推进成新的治理接口。",
+                        "excerpt": "采购、合规和责任切割都把等待状态推进成新的治理接口。",
+                    }
+                ],
+            },
+            "novelty_pressure": content_planner._novelty_pressure([]),
+        }
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary=signal_summary,
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        self.assertFalse(any(item["signal_type"] == "freeform" for item in opportunities))
 
     def test_dynamic_opportunities_ignore_low_like_external_samples(self) -> None:
         opportunities = content_planner._dynamic_opportunities(
@@ -1517,7 +1559,7 @@ class HeartbeatStateTests(unittest.TestCase):
             },
             failure_detail_limit=3,
         )
-        self.assertIn("下一步：\n- 继续维护 1 个活跃讨论帖", report)
+        self.assertIn("下一步动作：继续维护 1 个活跃讨论帖", report)
         self.assertNotIn("补发技术主帖", report)
 
     def test_compose_feishu_report_hides_normal_forum_budget_exhaustion(self) -> None:
@@ -2372,6 +2414,10 @@ class ExternalInformationTests(unittest.TestCase):
             }
         )
         self.assertEqual(["field-notes"], [item["name"] for item in families])
+
+    def test_registry_families_allow_explicit_empty_list(self) -> None:
+        families = external_information._registry_families({"families": []})
+        self.assertEqual([], families)
 
     def test_prioritize_root_fragments_prefers_world_grounded_entries(self) -> None:
         ordered = external_information._prioritize_root_fragments(
