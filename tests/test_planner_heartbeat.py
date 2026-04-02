@@ -18,6 +18,7 @@ import common  # noqa: E402
 import content_planner  # noqa: E402
 import external_information  # noqa: E402
 import heartbeat  # noqa: E402
+import heartbeat_supervisor  # noqa: E402
 import publish  # noqa: E402
 import replay_outbound  # noqa: E402
 import snapshot  # noqa: E402
@@ -1097,6 +1098,39 @@ class HeartbeatStateTests(unittest.TestCase):
             heartbeat.run_codex_json = original_run_codex_json
 
         self.assertEqual("把外部入口改得更开放。", result["human_summary"])
+
+    def test_drop_resolved_primary_failures_after_success(self) -> None:
+        trimmed = heartbeat._drop_resolved_primary_failures(
+            [
+                {
+                    "kind": "primary-publish-failed",
+                    "publish_kind": "literary-chapter",
+                    "post_title": "旧失败",
+                    "resolution": "unresolved",
+                },
+                {
+                    "kind": "reply-comment-failed",
+                    "post_id": "post-1",
+                    "resolution": "unresolved",
+                },
+            ],
+            {
+                "kind": "publish-chapter",
+                "publish_kind": "literary-chapter",
+                "title": "新章节",
+            },
+        )
+
+        self.assertEqual(
+            [
+                {
+                    "kind": "reply-comment-failed",
+                    "post_id": "post-1",
+                    "resolution": "unresolved",
+                }
+            ],
+            trimmed,
+        )
 
     def test_workspace_source_paths_only_reads_tracked_candidates(self) -> None:
         completed = heartbeat.subprocess.CompletedProcess(
@@ -2358,6 +2392,257 @@ class PrimaryPublishFlowTests(unittest.TestCase):
         self.assertEqual([2.0], sleep_calls)
         self.assertEqual([], [item for item in events if item.get("kind") == "primary-publish-failed"])
 
+    def test_main_runs_source_mutation_after_public_actions(self) -> None:
+        config = type(
+            "Config",
+            (),
+            {
+                "automation": {
+                    "post_limit": 10,
+                    "feed_limit": 10,
+                    "heartbeat_require_primary_publication": True,
+                    "heartbeat_feishu_report_enabled": True,
+                },
+                "instreet": {"base_url": "https://example.com", "api_key": "test"},
+                "feishu": {"app_id": "app-test", "app_secret": "secret-test"},
+                "identity": {"agent_id": "agent-test", "name": "派蒙"},
+            },
+        )()
+
+        call_order: list[str] = []
+
+        def fake_read_json(path, default=None):
+            data = {
+                "posts.json": {"data": {"data": []}},
+                "heartbeat_last_run.json": {},
+                "literary_details.json": {"details": {}},
+                "literary.json": {},
+                "groups.json": {"data": {"groups": []}},
+                "content_evolution_state.json": {},
+            }
+            payload = data.get(Path(path).name, default if default is not None else {})
+            return json.loads(json.dumps(payload, ensure_ascii=False))
+
+        def fake_publish_primary_action(*_args, **_kwargs):
+            call_order.append("publish-primary")
+            return (
+                {
+                    "kind": "create-post",
+                    "publish_kind": "theory-post",
+                    "title": "本轮主帖",
+                    "result_id": "post-1",
+                },
+                [],
+                {},
+                "new",
+            )
+
+        def fake_schedule_background_source_mutation(**_kwargs):
+            call_order.append("source-mutation")
+            return {
+                "generated_at": "2026-04-03T00:10:00+00:00",
+                "executed": False,
+                "human_summary": "这轮先把公开动作跑完，再动源码层。",
+                "commit_sha": "",
+                "changed_files": [],
+                "deleted_legacy_logic": [],
+                "new_capability": [],
+                "low_heat_triggered": False,
+                "mutation_rounds": 1,
+                "mode": "background",
+                "pending": True,
+                "scheduled_pid": 43210,
+            }
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat.argparse.ArgumentParser,
+                    "parse_args",
+                    return_value=heartbeat.argparse.Namespace(
+                        execute=True,
+                        allow_codex=True,
+                        archive=False,
+                        source_mutation_only=False,
+                    ),
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "ensure_runtime_dirs"))
+            stack.enter_context(mock.patch.object(heartbeat, "_ensure_autonomy_state_files"))
+            stack.enter_context(mock.patch.object(heartbeat, "load_config", return_value=config))
+            stack.enter_context(mock.patch.object(heartbeat, "InStreetClient", return_value=object()))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "run_snapshot",
+                    side_effect=[
+                        {"captured_at": "2026-04-03T00:00:00+00:00"},
+                        {"captured_at": "2026-04-03T00:05:00+00:00"},
+                    ],
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "_refresh_external_information_state", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_load_heartbeat_memory_prompt", return_value="记忆快照"))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "build_plan",
+                    return_value={"ideas": [], "idea_lane_strategy": {}},
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "read_json", side_effect=fake_read_json))
+            stack.enter_context(mock.patch.object(heartbeat, "write_json"))
+            stack.enter_context(mock.patch.object(heartbeat, "append_jsonl"))
+            stack.enter_context(mock.patch.object(heartbeat, "sync_serial_registry", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "build_content_evolution_state", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_detect_recent_low_heat_post", return_value={"triggered": False}))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_build_low_heat_reflection",
+                    return_value={"triggered": False, "title": "", "summary": "", "lessons": [], "system_fixes": []},
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "_update_low_heat_failures_state", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_load_next_actions_state", return_value={"tasks": []}))
+            stack.enter_context(mock.patch.object(heartbeat, "_load_forum_write_budget_state", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_forum_write_budget_status", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_comment_daily_budget_status", return_value={}))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_runtime_stage_strategy",
+                    return_value={"order": ["publish-primary"], "lead": "publish-primary", "rationale": "先发帖"},
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "_load_primary_cycle_state", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_publish_primary_action", side_effect=fake_publish_primary_action))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_cleanup_notifications",
+                    return_value={"actions": [], "failure_details": []},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_schedule_background_source_mutation",
+                    side_effect=fake_schedule_background_source_mutation,
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "_build_account_snapshot", return_value={}))
+            stack.enter_context(mock.patch.object(heartbeat, "_confirm_primary_publication", return_value=True))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_build_next_action_state",
+                    return_value=([], [{"kind": "steady-state", "label": "继续"}]),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_save_next_actions_state",
+                    return_value={"updated_at": "2026-04-03T00:05:00+00:00"},
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat, "_report_next_action_lines", return_value=["继续"]))
+            stack.enter_context(mock.patch.object(heartbeat, "_send_feishu_report", return_value={"kind": "feishu-report"}))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat.memory_manager_module,
+                    "record_heartbeat_summary",
+                    return_value={"ok": True},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat,
+                    "_fallback_audit_state",
+                    return_value={"updated_at": None, "counts": {}, "recent": []},
+                )
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                heartbeat.main()
+
+        self.assertEqual(0, raised.exception.code)
+        self.assertEqual(["publish-primary", "source-mutation"], call_order)
+
+
+class HeartbeatSupervisorTests(unittest.TestCase):
+    def test_reconcile_stale_run_record_marks_dead_running_record_interrupted(self) -> None:
+        writes: list[dict[str, object]] = []
+        logs: list[dict[str, object]] = []
+        stale_record = {
+            "started_at": "2026-04-02T18:48:07.684480+00:00",
+            "pid": 999999,
+            "status": "running",
+            "command": ["bin/paimon-heartbeat-once", "--execute", "--allow-codex"],
+            "settings": {"max_attempts": 3},
+            "attempts": [],
+        }
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat_supervisor,
+                    "read_json",
+                    return_value=stale_record,
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat_supervisor, "_pid_alive", return_value=False))
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat_supervisor,
+                    "write_json",
+                    side_effect=lambda _path, payload: writes.append(payload),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat_supervisor,
+                    "append_jsonl",
+                    side_effect=lambda _path, payload: logs.append(payload),
+                )
+            )
+
+            reconciled = heartbeat_supervisor._reconcile_stale_run_record()
+
+        self.assertIsNotNone(reconciled)
+        self.assertEqual("interrupted", reconciled["status"])
+        self.assertIn("no longer exists", reconciled["stale_reason"])
+        self.assertEqual("interrupted", writes[-1]["status"])
+        self.assertEqual("stale-supervisor-record", logs[-1]["kind"])
+
+    def test_reconcile_stale_run_record_keeps_live_running_record(self) -> None:
+        live_record = {
+            "started_at": "2026-04-03T00:00:00+00:00",
+            "pid": 12345,
+            "status": "running",
+            "command": ["bin/paimon-heartbeat-once", "--execute", "--allow-codex"],
+            "settings": {"max_attempts": 3},
+            "attempts": [],
+        }
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    heartbeat_supervisor,
+                    "read_json",
+                    return_value=live_record,
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat_supervisor, "_pid_alive", return_value=True))
+            mocked_write = stack.enter_context(mock.patch.object(heartbeat_supervisor, "write_json"))
+            mocked_append = stack.enter_context(mock.patch.object(heartbeat_supervisor, "append_jsonl"))
+
+            reconciled = heartbeat_supervisor._reconcile_stale_run_record()
+
+        self.assertEqual(live_record, reconciled)
+        mocked_write.assert_not_called()
+        mocked_append.assert_not_called()
 
 class PublishOracleTests(unittest.TestCase):
     class _FakeOracleClient:

@@ -6,9 +6,11 @@ import hashlib
 import http.client
 import importlib
 import json
+import os
 import re
 import ssl
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -74,7 +76,10 @@ CONTENT_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "content_evolution_state.json
 USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
 SOURCE_MUTATION_STATE_PATH = CURRENT_STATE_DIR / "source_mutation_state.json"
 SOURCE_MUTATION_JOURNAL_PATH = CURRENT_STATE_DIR / "source_mutation_journal.jsonl"
+SOURCE_MUTATION_RUN_PATH = CURRENT_STATE_DIR / "source_mutation_runner.json"
+SOURCE_MUTATION_PID_PATH = CURRENT_STATE_DIR / "source_mutation.pid"
 LOW_HEAT_FAILURES_PATH = CURRENT_STATE_DIR / "low_heat_failures.json"
+LOW_HEAT_REFLECTION_PATH = CURRENT_STATE_DIR / "low_heat_reflection.json"
 FALLBACK_AUDIT_PATH = CURRENT_STATE_DIR / "fallback_audit.json"
 FALLBACK_JOURNAL_PATH = CURRENT_STATE_DIR / "fallback_events.jsonl"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
@@ -819,6 +824,129 @@ def _sanitize_source_mutation_summary(text: str) -> str:
     return cleaned
 
 
+def _default_source_mutation_state(*, allow_codex: bool, low_heat_reflection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "generated_at": now_utc(),
+        "executed": False,
+        "human_summary": "" if allow_codex else "本轮未启用 Codex，自我进化没有执行到源码层。",
+        "commit_sha": "",
+        "changed_files": [],
+        "deleted_legacy_logic": [],
+        "new_capability": [],
+        "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
+        "mutation_rounds": 0,
+    }
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _existing_source_mutation_pid() -> int | None:
+    if not SOURCE_MUTATION_PID_PATH.exists():
+        return None
+    try:
+        pid = int(SOURCE_MUTATION_PID_PATH.read_text(encoding="utf-8").strip())
+    except ValueError:
+        SOURCE_MUTATION_PID_PATH.unlink(missing_ok=True)
+        return None
+    if pid and _pid_alive(pid):
+        return pid
+    SOURCE_MUTATION_PID_PATH.unlink(missing_ok=True)
+    return None
+
+
+def _acquire_source_mutation_lock() -> int | None:
+    existing_pid = _existing_source_mutation_pid()
+    if existing_pid is not None:
+        return existing_pid
+    SOURCE_MUTATION_PID_PATH.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    return None
+
+
+def _release_source_mutation_lock() -> None:
+    try:
+        recorded = int(SOURCE_MUTATION_PID_PATH.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return
+    if recorded == os.getpid():
+        SOURCE_MUTATION_PID_PATH.unlink(missing_ok=True)
+
+
+def _source_mutation_command(*, allow_codex: bool) -> list[str]:
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--source-mutation-only"]
+    if allow_codex:
+        cmd.append("--allow-codex")
+    return cmd
+
+
+def _schedule_background_source_mutation(
+    *,
+    allow_codex: bool,
+    low_heat_reflection: dict[str, Any],
+) -> dict[str, Any]:
+    state = _default_source_mutation_state(
+        allow_codex=allow_codex,
+        low_heat_reflection=low_heat_reflection,
+    )
+    if not allow_codex:
+        return state
+
+    existing_pid = _existing_source_mutation_pid()
+    if existing_pid is not None:
+        write_json(
+            SOURCE_MUTATION_RUN_PATH,
+            {
+                "updated_at": now_utc(),
+                "status": "running",
+                "pid": existing_pid,
+                "error": "",
+            },
+        )
+        return {
+            **state,
+            "human_summary": "公开动作之后已有源码级进化在后台运行，本轮不重复拉起。",
+            "mode": "background",
+            "pending": True,
+            "scheduled_pid": existing_pid,
+        }
+
+    command = _source_mutation_command(allow_codex=allow_codex)
+    process = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        env={
+            **runtime_subprocess_env(),
+            "PYTHONUNBUFFERED": "1",
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    write_json(
+        SOURCE_MUTATION_RUN_PATH,
+        {
+            "updated_at": now_utc(),
+            "status": "scheduled",
+            "pid": process.pid,
+            "command": command,
+            "scheduled_at": now_utc(),
+            "error": "",
+        },
+    )
+    return {
+        **state,
+        "human_summary": "公开动作完成后，源码级进化已转入后台执行。",
+        "mode": "background",
+        "pending": True,
+        "scheduled_pid": process.pid,
+    }
+
+
 def _source_mutation_commit_message(source_mutation_state: dict[str, Any]) -> str:
     summary = _sanitize_source_mutation_summary(str(source_mutation_state.get("human_summary") or ""))
     if summary:
@@ -901,17 +1029,10 @@ def _execute_source_mutation(
 ) -> dict[str, Any]:
     baseline_fingerprint = _workspace_source_fingerprint()
     if not allow_codex:
-        return {
-            "generated_at": now_utc(),
-            "executed": False,
-            "human_summary": "本轮未启用 Codex，自我进化没有执行到源码层。",
-            "commit_sha": "",
-            "changed_files": [],
-            "deleted_legacy_logic": [],
-            "new_capability": [],
-            "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
-            "mutation_rounds": 0,
-        }
+        return _default_source_mutation_state(
+            allow_codex=allow_codex,
+            low_heat_reflection=low_heat_reflection,
+        )
 
     last_result = {
         "executed": False,
@@ -986,20 +1107,145 @@ fallback 轨迹：
             break
 
     return {
+        **_default_source_mutation_state(
+            allow_codex=allow_codex,
+            low_heat_reflection=low_heat_reflection,
+        ),
         "generated_at": now_utc(),
         "executed": bool(changed_files),
         "human_summary": _sanitize_source_mutation_summary(str(last_result.get("human_summary") or "").strip()),
-        "commit_sha": "",
         "changed_files": changed_files,
         "deleted_legacy_logic": _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or []))[:6],
         "new_capability": _dedupe_feedback(list(last_result.get("new_capability") or []))[:6],
-        "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
         "mutation_rounds": rounds,
     }
 
 
 def _primary_publish_attempt_satisfied(primary_action: dict[str, Any] | None, publication_mode: str) -> bool:
     return primary_action is not None or publication_mode == "pending-confirmation"
+
+
+def _drop_resolved_primary_failures(
+    failure_details: list[dict[str, Any]],
+    primary_action: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if primary_action is None:
+        return list(failure_details)
+    return [
+        item
+        for item in failure_details
+        if str(item.get("kind") or "") not in {"primary-publish-failed", "primary-publish-deduped"}
+    ]
+
+
+def _run_source_mutation_worker(*, allow_codex: bool) -> dict[str, Any]:
+    ensure_runtime_dirs()
+    existing_pid = _acquire_source_mutation_lock()
+    low_heat_reflection = read_json(
+        LOW_HEAT_REFLECTION_PATH,
+        default={"triggered": False, "title": "", "summary": "", "lessons": [], "system_fixes": []},
+    )
+    if existing_pid is not None:
+        result = {
+            **_default_source_mutation_state(
+                allow_codex=allow_codex,
+                low_heat_reflection=low_heat_reflection,
+            ),
+            "human_summary": "已有源码级进化在后台运行，本轮未重复执行。",
+            "mode": "background",
+            "pending": True,
+            "scheduled_pid": existing_pid,
+        }
+        write_json(
+            SOURCE_MUTATION_RUN_PATH,
+            {
+                "updated_at": now_utc(),
+                "status": "running",
+                "pid": existing_pid,
+                "error": "",
+                "result": result,
+            },
+        )
+        return result
+
+    started_at = now_utc()
+    try:
+        config = load_config()
+        write_json(
+            SOURCE_MUTATION_RUN_PATH,
+            {
+                "updated_at": started_at,
+                "status": "running",
+                "pid": os.getpid(),
+                "command": _source_mutation_command(allow_codex=allow_codex),
+                "started_at": started_at,
+                "error": "",
+            },
+        )
+        memory_prompt = _load_heartbeat_memory_prompt(config)
+        plan = read_json(CURRENT_STATE_DIR / "content_plan.json", default={"ideas": [], "idea_lane_strategy": {}})
+        external_information = _refresh_external_information_state()
+        latest_posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
+        content_evolution_state = build_content_evolution_state(
+            posts=latest_posts,
+            plan=plan,
+            previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
+        )
+        write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
+        source_mutation_state = _execute_source_mutation(
+            plan=plan,
+            external_information=external_information,
+            content_evolution_state=content_evolution_state,
+            low_heat_reflection=low_heat_reflection,
+            fallback_audit=_fallback_audit_state(),
+            memory_prompt=memory_prompt,
+            allow_codex=allow_codex,
+            model=config.automation.get("codex_model") or None,
+            reasoning_effort=config.automation.get("codex_reasoning_effort") or None,
+            timeout_seconds=_source_mutation_codex_timeout_seconds(config),
+        )
+        source_mutation_state = _commit_source_mutation(source_mutation_state)
+        write_json(SOURCE_MUTATION_STATE_PATH, source_mutation_state)
+        append_jsonl(SOURCE_MUTATION_JOURNAL_PATH, source_mutation_state)
+        write_json(
+            SOURCE_MUTATION_RUN_PATH,
+            {
+                "updated_at": now_utc(),
+                "status": "completed" if not source_mutation_state.get("commit_error") else "failed",
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "finished_at": now_utc(),
+                "error": str(source_mutation_state.get("commit_error") or ""),
+                "result": source_mutation_state,
+            },
+        )
+        return source_mutation_state
+    except Exception as exc:
+        failed_state = {
+            **_default_source_mutation_state(
+                allow_codex=allow_codex,
+                low_heat_reflection=low_heat_reflection,
+            ),
+            "generated_at": now_utc(),
+            "human_summary": f"后台源码级进化失败：{exc}",
+        }
+        write_json(SOURCE_MUTATION_STATE_PATH, failed_state)
+        append_jsonl(SOURCE_MUTATION_JOURNAL_PATH, failed_state)
+        write_json(
+            SOURCE_MUTATION_RUN_PATH,
+            {
+                "updated_at": now_utc(),
+                "status": "failed",
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "finished_at": now_utc(),
+                "error": str(exc),
+                "result": failed_state,
+            },
+        )
+        return failed_state
+    finally:
+        _release_source_mutation_lock()
 
 
 def _comment_reply_min_interval_sec(config) -> float:
@@ -6419,17 +6665,22 @@ def main() -> None:
     parser.add_argument("--execute", action="store_true", help="Perform public write actions.")
     parser.add_argument("--allow-codex", action="store_true", help="Use codex exec to draft replies or posts.")
     parser.add_argument("--archive", action="store_true", help="Archive the snapshot taken during this run.")
+    parser.add_argument("--source-mutation-only", action="store_true", help="Run only the post-heartbeat source mutation worker.")
     args = parser.parse_args()
 
     ensure_runtime_dirs()
     _ensure_autonomy_state_files()
+    if args.source_mutation_only:
+        result = _run_source_mutation_worker(allow_codex=args.allow_codex)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise SystemExit(0 if not result.get("commit_error") else 1)
+
     config = load_config()
     client = InStreetClient(config)
     username = config.identity["name"]
     codex_model = config.automation.get("codex_model") or None
     codex_reasoning_effort = config.automation.get("codex_reasoning_effort") or None
     codex_timeout_seconds = _heartbeat_codex_timeout_seconds(config)
-    source_mutation_timeout_seconds = _source_mutation_codex_timeout_seconds(config)
     failure_detail_limit = _heartbeat_failure_detail_limit(config)
     start_overview = run_snapshot(
         archive=args.archive,
@@ -6483,45 +6734,16 @@ def main() -> None:
         low_heat_reflection=low_heat_reflection,
     )
     write_json(LOW_HEAT_FAILURES_PATH, low_heat_failures_state)
-    fallback_audit_state = _fallback_audit_state()
-    source_mutation_state = _execute_source_mutation(
-        plan=seed_plan,
-        external_information=external_information,
-        content_evolution_state=content_evolution_state,
+    write_json(LOW_HEAT_REFLECTION_PATH, low_heat_reflection)
+    source_mutation_state = _default_source_mutation_state(
+        allow_codex=args.allow_codex,
         low_heat_reflection=low_heat_reflection,
-        fallback_audit=fallback_audit_state,
-        memory_prompt=memory_prompt,
-        allow_codex=args.allow_codex,
-        model=codex_model,
-        reasoning_effort=codex_reasoning_effort,
-        timeout_seconds=source_mutation_timeout_seconds,
     )
-    source_mutation_state = _commit_source_mutation(source_mutation_state)
-    write_json(SOURCE_MUTATION_STATE_PATH, source_mutation_state)
-    append_jsonl(SOURCE_MUTATION_JOURNAL_PATH, source_mutation_state)
-    _reload_mutable_runtime_modules()
-    external_information = _refresh_external_information_state()
-    plan = build_plan(
-        allow_codex=args.allow_codex,
-        model=codex_model,
-        reasoning_effort=codex_reasoning_effort,
-        timeout_seconds=planner_timeout_seconds,
-        retry_feedback=None,
-    )
-    write_json(CURRENT_STATE_DIR / "content_plan.json", plan)
+    plan = seed_plan
 
     actions: list[dict] = []
     failure_details: list[dict] = []
     normal_deferrals: list[dict] = []
-    commit_error = str(source_mutation_state.get("commit_error") or "").strip()
-    if commit_error:
-        failure_details.append(
-            {
-                "kind": "source-mutation-commit-failed",
-                "error": commit_error,
-                "resolution": "unresolved",
-            }
-        )
     primary_action = None
     primary_publication_mode = "none"
     comment_result = {
@@ -6725,10 +6947,15 @@ def main() -> None:
         end_overview,
         comparison_overview=((last_run_state.get("account_snapshot") or {}).get("finished") or {}),
     )
+    source_mutation_state = _schedule_background_source_mutation(
+        allow_codex=args.allow_codex,
+        low_heat_reflection=low_heat_reflection,
+    )
 
     primary_visibility_confirmed = _confirm_primary_publication(primary_action) if args.execute else None
     if primary_action is not None:
         primary_action["visibility_confirmed"] = primary_visibility_confirmed
+    failure_details = _drop_resolved_primary_failures(failure_details, primary_action)
     if primary_action is not None and primary_visibility_confirmed is False:
         primary_publication_mode = "pending-confirmation"
         failure_details.append(
@@ -6805,6 +7032,9 @@ def main() -> None:
             "deleted_legacy_logic": source_mutation_state.get("deleted_legacy_logic", []),
             "new_capability": source_mutation_state.get("new_capability", []),
             "mutation_rounds": source_mutation_state.get("mutation_rounds"),
+            "mode": source_mutation_state.get("mode"),
+            "pending": source_mutation_state.get("pending", False),
+            "scheduled_pid": source_mutation_state.get("scheduled_pid"),
         },
         "low_heat_reflection": low_heat_reflection,
         "actions": actions,

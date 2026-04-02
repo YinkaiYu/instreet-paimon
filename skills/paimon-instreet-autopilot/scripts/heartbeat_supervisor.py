@@ -90,6 +90,43 @@ def _release_lock() -> None:
         SUPERVISOR_PID_PATH.unlink(missing_ok=True)
 
 
+def _reconcile_stale_run_record() -> dict[str, Any] | None:
+    previous = read_json(SUPERVISOR_LAST_RUN_PATH, default={})
+    if not isinstance(previous, dict):
+        return None
+    if str(previous.get("status") or "").strip() != "running":
+        return None
+    try:
+        recorded_pid = int(previous.get("pid") or 0)
+    except (TypeError, ValueError):
+        recorded_pid = 0
+    if recorded_pid and _pid_alive(recorded_pid):
+        return previous
+    stale_reason = (
+        f"supervisor pid {recorded_pid} no longer exists"
+        if recorded_pid
+        else "running record had no live supervisor pid"
+    )
+    reconciled = {
+        **previous,
+        "status": "interrupted",
+        "completed_at": now_utc(),
+        "stale_reason": stale_reason,
+    }
+    write_json(SUPERVISOR_LAST_RUN_PATH, reconciled)
+    append_jsonl(
+        SUPERVISOR_LOG_PATH,
+        {
+            "timestamp": now_utc(),
+            "kind": "stale-supervisor-record",
+            "started_at": previous.get("started_at"),
+            "pid": recorded_pid or None,
+            "reason": stale_reason,
+        },
+    )
+    return reconciled
+
+
 def _heartbeat_command(args: argparse.Namespace) -> list[str]:
     return [
         str(HEARTBEAT_ONCE_BIN),
@@ -522,11 +559,17 @@ def main() -> None:
         print(f"Heartbeat supervisor already running with PID {existing_pid}")
         return
 
+    reconciled_record = _reconcile_stale_run_record()
+    if reconciled_record is not None and str(reconciled_record.get("status") or "").strip() == "running":
+        _release_lock()
+        print(f"Heartbeat supervisor already running with PID {reconciled_record.get('pid')}")
+        return
     config = load_config()
     settings = _supervisor_settings(config)
     command = _heartbeat_command(args)
     run_record: dict[str, Any] = {
         "started_at": now_utc(),
+        "pid": os.getpid(),
         "status": "running",
         "command": command,
         "settings": settings,
