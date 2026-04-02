@@ -473,6 +473,41 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertNotIn("热讨论帖子数", merged)
         self.assertIn("判断依据", merged)
 
+    def test_fallback_theory_idea_rescues_world_bundle_title_from_source_scene(self) -> None:
+        idea = content_planner._fallback_theory_idea(
+            {
+                "dynamic_topics": [
+                    {
+                        "track": "theory",
+                        "signal_type": "world-bundle",
+                        "source_text": "「感激」是什么",
+                        "why_now": "公共讨论和外部样本正在把同一处承认冲突往台面上推。",
+                        "angle_hint": "把现场样本压成结构判断，而不是把样本标题原样搬进公开标题。",
+                        "evidence_hint": "其实它在空转",
+                        "overlap_score": (0, 0, 0),
+                    },
+                    {
+                        "track": "theory",
+                        "signal_type": "world-bundle",
+                        "source_text": "你以为它在工作",
+                        "why_now": "外部作者也在逼近同一条责任切割问题。",
+                        "angle_hint": "继续压成结构判断。",
+                        "evidence_hint": "其实它在空转",
+                        "overlap_score": (0, 0, 0),
+                    },
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            [],
+        )
+        audited = content_planner._audit_generated_idea(
+            idea,
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertNotIn("「感激」是什么", idea["title"])
+        self.assertIsNone(audited.get("failure_reason_if_rejected"))
+
     def test_audit_generated_idea_rejects_generic_theory_placeholder_unit(self) -> None:
         audited = content_planner._audit_generated_idea(
             {
@@ -591,6 +626,70 @@ class ContentPlannerTests(unittest.TestCase):
             content_planner._generate_codex_ideas = original_generate_codex_ideas
 
         self.assertEqual(["theory-post"], [item["kind"] for item in ideas])
+
+    def test_build_dynamic_ideas_tries_other_public_fallbacks_before_giving_up(self) -> None:
+        original_lane_strategy = content_planner._dynamic_idea_lane_strategy
+        original_fallback_theory_idea = content_planner._fallback_theory_idea
+        original_fallback_tech_idea = content_planner._fallback_tech_idea
+        try:
+            content_planner._dynamic_idea_lane_strategy = lambda *_args, **_kwargs: {
+                "selected_kinds": ["theory-post"],
+                "focus_kind": "theory-post",
+                "backup_kinds": [],
+                "lane_scores": [
+                    {"kind": "theory-post", "score": 18.0},
+                    {"kind": "tech-post", "score": 17.6},
+                ],
+                "rationale": "理论主打。",
+            }
+            content_planner._fallback_theory_idea = lambda *_args, **_kwargs: {
+                "kind": "theory-post",
+                "signal_type": "world-bundle",
+                "title": "「感激」是什么：感激",
+                "submolt": "philosophy",
+                "angle": "把样本标题直接搬进理论入口。",
+                "why_now": "这会被理论审计打回。",
+                "source_signals": ["世界线索束：「感激」是什么"],
+                "concept_core": "还是在重复样本标题。",
+                "mechanism_core": "还是在重复样本标题。",
+                "boundary_note": "还是在重复样本标题。",
+                "theory_position": "还是在重复样本标题。",
+                "practice_program": "还是在重复样本标题。",
+                "is_followup": False,
+            }
+            content_planner._fallback_tech_idea = lambda *_args, **_kwargs: {
+                "kind": "tech-post",
+                "signal_type": "failure",
+                "title": "别把故障当偶发：状态分层才是修复入口",
+                "submolt": "skills",
+                "angle": "先把故障分型，再决定重试、回退还是停写修结构。",
+                "why_now": "失败链还没收口，继续把所有异常都叫成偶发故障只会让系统越跑越乱。",
+                "source_signals": ["失败样本：评论抓取反复失手", "日志切面：同一轮里重试和补回互相打架"],
+                "novelty_basis": "把当前失败链改写成状态分层与修复入口问题。",
+                "mechanism_core": "如果没有状态分层，调度器会把限流、漂移和结构失配混成同一种故障。",
+                "practice_program": "先补 discovery/baseline/parser 三段状态，再决定是否继续写入。",
+                "is_followup": False,
+            }
+            ideas, rejections = content_planner._build_dynamic_ideas(
+                {
+                    "dynamic_topics": [],
+                    "novelty_pressure": content_planner._novelty_pressure([]),
+                },
+                [],
+                posts=[],
+                allow_codex=False,
+                group={},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            content_planner._dynamic_idea_lane_strategy = original_lane_strategy
+            content_planner._fallback_theory_idea = original_fallback_theory_idea
+            content_planner._fallback_tech_idea = original_fallback_tech_idea
+
+        self.assertEqual(["tech-post"], [item["kind"] for item in ideas])
+        self.assertTrue(any(item["kind"] == "theory-post" for item in rejections))
 
     def test_public_hot_forum_override_prioritizes_hot_public_board(self) -> None:
         override = content_planner._public_hot_forum_override(

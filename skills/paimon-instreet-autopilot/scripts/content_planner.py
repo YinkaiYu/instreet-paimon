@@ -1450,6 +1450,28 @@ def _fallback_dynamic_title(track: str, signal_type: str, source_text: str) -> s
     return _ensure_title_anchor(title, anchor)
 
 
+def _structural_fallback_title(track: str, signal_type: str, source_text: str) -> str:
+    anchor = _fallback_track_anchor(track, signal_type, source_text)
+    index = _stable_pattern_index(track, signal_type, source_text, modulo=4)
+    if track == "theory":
+        options = (
+            f"谁在决定 Agent 的{anchor}",
+            f"当{anchor}开始重排时，谁先承担代价",
+            f"{anchor}不是情绪问题，而是资格分配",
+            f"Agent 的{anchor}，从来不是中性的",
+        )
+        return truncate_text(options[index], 30)
+    if track == "tech":
+        options = (
+            f"别把故障当偶发：{anchor}才是修复入口",
+            f"{anchor}没写清，系统就会越跑越乱",
+            f"修复链总挂空时，先补{anchor}",
+            f"自动化一失真，先看{anchor}",
+        )
+        return truncate_text(options[index], 30)
+    return _fallback_dynamic_title(track, signal_type, source_text)
+
+
 def _echoes_source_title(title: str) -> bool:
     cleaned = str(title or "").strip()
     if not cleaned:
@@ -3493,14 +3515,24 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     lead = bundle.get("lead") or {}
     source_text = str(bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or "").strip()
     board = _preferred_theory_board(lead, signal_summary)
-    title = _compose_dynamic_title("theory", str(bundle.get("signal_type") or lead.get("signal_type") or ""), source_text, board=board)
-    title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = _signal_bundle_source_signals("theory", bundle, signal_summary)
+    signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or "")
+    title = _compose_dynamic_title("theory", signal_type, source_text, board=board)
+    if _title_has_source_scene_overhang(
+        {
+            "kind": "theory-post",
+            "signal_type": signal_type,
+            "title": title,
+            "source_signals": source_signals,
+        }
+    ):
+        title = _structural_fallback_title("theory", signal_type, source_text)
+    title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "理论线需要接住现场变化。")
     theory_fields = _theory_fallback_fields(bundle, lead)
     return {
         "kind": "theory-post",
-        "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
+        "signal_type": signal_type,
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
@@ -3807,6 +3839,17 @@ def _build_dynamic_ideas(
     }
     fallback_order = target_kinds if not ideas else ([focus_kind] if focus_kind and focus_kind not in ideas else [])
     had_generated_ideas = bool(ideas)
+    if not ideas:
+        ranked_public_kinds = [
+            str(item.get("kind") or "").strip()
+            for item in list(lane_strategy.get("lane_scores") or [])
+            if str(item.get("kind") or "").strip() in fallback_builders
+        ]
+        for kind in ranked_public_kinds + ["theory-post", "tech-post", "group-post"]:
+            if kind == "group-post" and not group:
+                continue
+            if kind in fallback_builders and kind not in fallback_order:
+                fallback_order.append(kind)
     for kind in fallback_order:
         builder = fallback_builders.get(kind)
         if builder is None:
@@ -3827,7 +3870,7 @@ def _build_dynamic_ideas(
         if ideas or had_generated_ideas:
             break
 
-    ordered_kinds = target_kinds
+    ordered_kinds = target_kinds + [kind for kind in fallback_order if kind not in target_kinds]
     accepted = [
         _audit_generated_idea(
             _sanitize_generated_idea(ideas[kind], recent_titles=recent_titles, group=group),
