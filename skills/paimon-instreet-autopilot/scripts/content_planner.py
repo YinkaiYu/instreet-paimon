@@ -1093,7 +1093,7 @@ def _track_signal_bundle(track: str, signal_summary: dict[str, Any], *, limit: i
     signal_types = _dedupe_texts([str(item.get("signal_type") or "").strip() for item in items if str(item.get("signal_type") or "").strip()])
     base_score = max(_opportunity_rank_score(item, signal_summary=signal_summary) for item in items)
     bundle_bonus = min(max(0, len(items) - 1), 2) * 0.35 + min(max(0, len(signal_types) - 1), 2) * 0.2
-    return {
+    bundle = {
         "track": track,
         "lead": lead,
         "items": items,
@@ -1110,6 +1110,9 @@ def _track_signal_bundle(track: str, signal_summary: dict[str, Any], *, limit: i
         "preferred_board": str(lead.get("preferred_board") or "").strip(),
         "signal_type": str(lead.get("signal_type") or "").strip(),
     }
+    if track == "theory":
+        bundle.update(_theory_bundle_public_seed(bundle, lead))
+    return bundle
 
 
 def _track_kind(track: str) -> str:
@@ -1136,7 +1139,10 @@ def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[st
         "kind": _track_kind(track),
         "score": round(score, 2),
         "signal_type": str(lead.get("signal_type") or "").strip(),
-        "source_text": truncate_text(str(bundle.get("title_seed") or bundle.get("focus_text") or ""), 48),
+        "source_text": truncate_text(
+            str(bundle.get("public_focus_text") or bundle.get("title_seed") or bundle.get("focus_text") or ""),
+            48,
+        ),
         "bundle_size": len(bundle.get("items") or []),
     }
 
@@ -1674,6 +1680,179 @@ def _signal_bundle_source_signals(
     return _dedupe_texts(merged)[:5]
 
 
+def _source_title_shell(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return False
+    if re.search(r"[「“\"].{1,12}[」”\"](?:是什么|算什么|为什么|如何|怎么办)$", compact):
+        return True
+    return bool(re.search(r"^[「“\"].{1,12}[」”\"]$", compact))
+
+
+def _bundle_structural_support_texts(
+    bundle: dict[str, Any],
+    lead: dict[str, Any],
+    *,
+    limit: int = 4,
+) -> list[str]:
+    raw_values = _dedupe_texts(
+        [
+            str(item).strip()
+            for item in (
+                list(bundle.get("evidence_hints") or [])
+                + list(bundle.get("why_now_parts") or [])
+                + list(bundle.get("angle_hints") or [])
+                + [
+                    str(lead.get("evidence_hint") or "").strip(),
+                    str(lead.get("why_now") or "").strip(),
+                    str(lead.get("angle_hint") or "").strip(),
+                ]
+            )
+            if str(item).strip()
+        ]
+    )
+    picked: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        cleaned = truncate_text(re.sub(r"\s+", " ", value).strip(), 36)
+        normalized = _normalize_title(cleaned)
+        if not cleaned or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        picked.append(cleaned)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _bundle_structural_fragments(*texts: str, limit: int = 6) -> list[str]:
+    phrases = (
+        "承认冲突",
+        "承认秩序",
+        "责任切割",
+        "责任边界",
+        "等待资格",
+        "等待状态",
+        "治理接口",
+        "资格分配",
+        "制度边界",
+        "接管窗口",
+        "写入权",
+        "状态分层",
+        "恢复链",
+        "修复链",
+        "解释权",
+        "责任",
+        "等待",
+        "承认",
+        "资格",
+        "治理",
+        "接管",
+        "制度",
+        "秩序",
+        "排序",
+        "写入",
+        "修复",
+    )
+    picked: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        cleaned = truncate_text(str(value or "").strip(), 18)
+        normalized = _normalize_title(cleaned)
+        if (
+            not cleaned
+            or not normalized
+            or normalized in seen
+            or normalized in ANCHOR_STOPWORDS
+            or _source_title_shell(cleaned)
+        ):
+            return
+        seen.add(normalized)
+        picked.append(cleaned)
+
+    for text in texts:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            continue
+        for phrase in phrases:
+            if phrase in compact:
+                add(phrase)
+                if len(picked) >= limit:
+                    return picked
+
+    for fragment in _runtime_title_fragments(*texts):
+        if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_ACTOR_TOKENS):
+            add(fragment)
+            if len(picked) >= limit:
+                break
+    return picked
+
+
+def _theory_source_text_needs_public_reframe(signal_type: str, source_text: str) -> bool:
+    cleaned = str(source_text or "").strip()
+    signal_type = str(signal_type or "").strip()
+    if not cleaned:
+        return False
+    if _source_title_shell(cleaned):
+        return True
+    if _echoes_source_title(cleaned):
+        return True
+    if _title_leads_with_niche_source_token(cleaned, kind="theory-post", signal_type=signal_type):
+        return True
+    if _theory_title_surface_overhang_reason(cleaned):
+        return True
+    if signal_type in {"paper", "classic", "github", "zhihu", "external", "world-bundle"} and not _title_has_public_structural_anchor(cleaned):
+        return True
+    return False
+
+
+def _theory_bundle_public_seed(bundle: dict[str, Any], lead: dict[str, Any]) -> dict[str, str]:
+    signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or "").strip()
+    source_text = str(bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or "").strip()
+    if not _theory_source_text_needs_public_reframe(signal_type, source_text):
+        return {}
+
+    support_texts = _bundle_structural_support_texts(bundle, lead, limit=4)
+    signal_seed = " ".join(support_texts) or source_text
+    focus = next(
+        (
+            fragment
+            for fragment in _bundle_structural_fragments(*support_texts, source_text, limit=6)
+            if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_ACTOR_TOKENS)
+        ),
+        "",
+    )
+    if not focus:
+        focus = _fallback_track_anchor("theory", signal_type, signal_seed)
+
+    focus_compact = re.sub(r"\s+", "", focus)
+    direct_title_tokens = ("谁", "Agent", "AI", "平台", "组织", "系统", "用户")
+    if _title_has_public_structural_anchor(focus) and (
+        len(focus_compact) >= 6 or _contains_any(focus, direct_title_tokens)
+    ):
+        title_seed = truncate_text(focus, 30)
+    else:
+        options = (
+            f"{focus}不是情绪问题，而是资格分配",
+            f"当{focus}开始重排时，谁在失去资格",
+            f"Agent 的{focus}，从来不是中性的",
+            f"{focus}一旦公开，责任就会重新排序",
+        )
+        title_seed = truncate_text(
+            options[_stable_pattern_index("theory-public-seed", signal_type, focus, modulo=len(options))],
+            30,
+        )
+
+    if _theory_source_text_needs_public_reframe(signal_type, title_seed) or not _title_has_public_structural_anchor(title_seed):
+        title_seed = _structural_fallback_title("theory", signal_type, signal_seed)
+
+    return {
+        "public_focus_text": truncate_text(focus, 18),
+        "public_title_seed": title_seed,
+    }
+
+
 def _bundle_origin_labels(bundle: dict[str, Any]) -> list[str]:
     labels = {
         "agenda": "长期议程",
@@ -1726,7 +1905,13 @@ def _world_bundle_angle(bundle: dict[str, Any], *, track: str) -> str:
 
 def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallback: str) -> str:
     return truncate_text(
-        str(bundle.get("focus_text") or bundle.get("title_seed") or lead.get("source_text") or fallback).strip(),
+        str(
+            bundle.get("public_focus_text")
+            or bundle.get("focus_text")
+            or bundle.get("title_seed")
+            or lead.get("source_text")
+            or fallback
+        ).strip(),
         30,
     )
 
@@ -1903,7 +2088,7 @@ def _fallback_track_bundle(track: str, signal_summary: dict[str, Any], fallback:
     bundle = _track_signal_bundle(track, signal_summary)
     if bundle:
         return bundle
-    return {
+    fallback_bundle = {
         "track": track,
         "lead": fallback,
         "items": [fallback],
@@ -1920,6 +2105,9 @@ def _fallback_track_bundle(track: str, signal_summary: dict[str, Any], fallback:
         "preferred_board": str(fallback.get("preferred_board") or "").strip(),
         "signal_type": str(fallback.get("signal_type") or "").strip(),
     }
+    if track == "theory":
+        fallback_bundle.update(_theory_bundle_public_seed(fallback_bundle, fallback))
+    return fallback_bundle
 
 
 def _reply_task_summary(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3455,7 +3643,7 @@ def _generate_codex_ideas(
 5. 如果是追爆款或续篇，标题必须显式变化，不能与最近标题完全相同；但不要只靠替换“续篇/补篇/之后/下一步”来伪装成新选题。
 6. 每个 idea 的 `source_signals` 必须写成简短字符串列表，说明用了哪些实时依据。
 7. 标题必须中文，适合公开发布，不要输出空泛抽象标题。
-8. 明确避开最近已经过载的母题与热词，优先从 `dynamic_topic_bundles` 里看这轮真正互相咬合的信号，再下潜到 `dynamic_topics`，不要把单个样本当成整轮题目。
+8. 明确避开最近已经过载的母题与热词，优先从 `dynamic_topic_bundles` 里看这轮真正互相咬合的信号，再下潜到 `dynamic_topics`；如果 bundle 里已经给出 `public_title_seed` / `public_focus_text`，优先沿着那个公共题眼起题，不要退回原始 `source_text` 的样本标题壳子。
 9. `content_objectives` 和 `user_topic_hints` 只当灵感源，不是强制命令；可以采纳、改写、反转或忽略。
 10. 如果公共热点够强，至少 1 个候选要正面回应它；但不能停在“社区里最近在聊什么”，必须把热点上抬成 `Agent社会` 的结构问题。
 11. 社区热点只是样本，不是结论。`theory-post` 至少要回答一个问题：这正在形成什么社会关系、制度安排、价值形式、分层机制或治理问题？
@@ -3513,11 +3701,13 @@ def _generate_codex_ideas(
 def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[str]) -> dict[str, Any]:
     bundle = _fallback_track_bundle("theory", signal_summary, _fallback_track_seed("theory", signal_summary))
     lead = bundle.get("lead") or {}
-    source_text = str(bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or "").strip()
+    source_text = str(
+        bundle.get("public_focus_text") or bundle.get("title_seed") or bundle.get("focus_text") or lead.get("source_text") or ""
+    ).strip()
     board = _preferred_theory_board(lead, signal_summary)
     source_signals = _signal_bundle_source_signals("theory", bundle, signal_summary)
     signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or "")
-    title = _compose_dynamic_title("theory", signal_type, source_text, board=board)
+    title = str(bundle.get("public_title_seed") or "").strip() or _compose_dynamic_title("theory", signal_type, source_text, board=board)
     if _title_has_source_scene_overhang(
         {
             "kind": "theory-post",

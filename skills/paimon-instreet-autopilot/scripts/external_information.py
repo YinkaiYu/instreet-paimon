@@ -648,6 +648,19 @@ def _fragment_specificity_score(fragment: str) -> float:
     return max(score, 0.0)
 
 
+def _looks_like_source_title_shell(fragment: str) -> bool:
+    compact = re.sub(r"\s+", "", str(fragment or ""))
+    if not compact:
+        return False
+    if re.search(r"[「“\"].{1,12}[」”\"](?:是什么|算什么|为什么|如何|怎么办)$", compact):
+        return True
+    if re.search(r"^[「“\"].{1,12}[」”\"]$", compact):
+        return True
+    if "《" in compact and "》" in compact:
+        return True
+    return False
+
+
 def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
     origin_set = {str(item).strip() for item in origins if str(item).strip()}
     compact = re.sub(r"\s+", "", str(fragment or ""))
@@ -663,6 +676,8 @@ def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
         score += min(len(origin_set) - 1, 2) * 0.16
     if any(token in lowered for token in ("governance", "audit", "protocol", "waiting", "memory")):
         score += 0.1
+    if _looks_like_source_title_shell(fragment):
+        score -= 0.55
     return round(score, 3)
 
 

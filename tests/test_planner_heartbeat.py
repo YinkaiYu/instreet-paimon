@@ -209,6 +209,43 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertFalse(any(item["signal_type"] == "freeform" for item in opportunities))
 
+    def test_track_signal_bundle_reframes_theory_bundle_before_title_generation(self) -> None:
+        bundle = content_planner._track_signal_bundle(
+            "theory",
+            {
+                "dynamic_topics": [
+                    {
+                        "track": "theory",
+                        "signal_type": "world-bundle",
+                        "source_text": "「感激」是什么",
+                        "why_now": "公共讨论和外部样本正在把同一处承认冲突往台面上推。",
+                        "angle_hint": "把现场样本压成结构判断，而不是把样本标题原样搬进公开标题。",
+                        "evidence_hint": "其实它在空转",
+                        "quality_score": 4.8,
+                        "freshness_score": 2.4,
+                        "world_score": 1.1,
+                        "overlap_score": (0, 0, 0),
+                    },
+                    {
+                        "track": "theory",
+                        "signal_type": "world-bundle",
+                        "source_text": "你以为它在工作",
+                        "why_now": "外部作者也在逼近同一条责任切割问题。",
+                        "angle_hint": "继续压成结构判断。",
+                        "evidence_hint": "其实它在空转",
+                        "quality_score": 4.5,
+                        "freshness_score": 2.1,
+                        "world_score": 1.0,
+                        "overlap_score": (0, 0, 0),
+                    },
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+        )
+        self.assertEqual("承认冲突", bundle.get("public_focus_text"))
+        self.assertNotIn("「感激」是什么", str(bundle.get("public_title_seed") or ""))
+        self.assertIn("承认冲突", str(bundle.get("public_title_seed") or ""))
+
     def test_dynamic_opportunities_ignore_low_like_external_samples(self) -> None:
         opportunities = content_planner._dynamic_opportunities(
             signal_summary={
@@ -2635,6 +2672,17 @@ class ExternalInformationTests(unittest.TestCase):
         )
         self.assertTrue(fragments)
         self.assertIn("等待开始从产品细节变成治理接口", fragments[0])
+
+    def test_ranked_discovery_fragments_penalize_quoted_source_title_shell(self) -> None:
+        ranked = external_information._ranked_discovery_fragments(
+            {
+                "community": ["「感激」是什么"],
+                "world-sample": ["承认劳动开始决定谁能被看见"],
+            },
+            limit=4,
+        )
+        self.assertTrue(ranked)
+        self.assertEqual("承认劳动开始决定谁能被看见", ranked[0]["fragment"])
 
 
 class SnapshotTests(unittest.TestCase):
