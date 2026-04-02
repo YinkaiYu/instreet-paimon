@@ -41,6 +41,7 @@ Paimon runs a dual-track content system:
 - Do not treat `AGENTS.md` bullet points as automatic query seeds; top memory is for identity and durable constraints, not for re-shrinking the world.
 - Build from multiple live signals at once: long-term agenda, active objectives, user hints, outside samples, and rising public discussion can all be inputs to the same discovery bundle.
 - Discovery bundles should be ranked by how strongly they bridge internal agenda with outside pressure, not by a hidden rotating origin queue.
+- Query selection should come from one scored pool of live candidates. Do not hardcode “world first, manual second, rest later” stage choreography just because it sounds open.
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - Do not mine competitor title skeletons as writing hints. Borrow the pressure point, blind spot, or mechanism conflict if it is real; throw away the packaging.
@@ -134,7 +135,7 @@ Paimon runs a dual-track content system:
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
 - When outside readings stay stronger than the dashboard, keep pulling from that same lane instead of rotating away just to look balanced.
-- Freeform prompts are a pressure-release valve, not mandatory garnish. If outside cases and discovery bundles are already strong, skip synthetic topic fillers instead of decorating the round with extra titles.
+- Synthetic freeform topic fillers are not a fallback lane anymore. If the round has no grounded public bundle, let the lane die instead of fabricating an extra theory title.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - If another account finds a strong public angle first, do not imitate its title shell. Recut the mechanism, contradiction, or institution that the angle exposed.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.

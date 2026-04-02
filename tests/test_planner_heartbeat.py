@@ -62,6 +62,18 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("私信线程", action)
         self.assertNotIn("先打开新的公开动作", action)
 
+    def test_recommended_next_action_from_live_pressure_prefers_public_window(self) -> None:
+        action = content_planner._recommended_next_action_from_live_pressure(
+            signal_summary={"pending_reply_posts": [], "unresolved_failures": []},
+            ideas=[{"kind": "theory-post", "title": "谁在切走 Agent 的等待资格"}],
+            engagement_targets=[{"priority": 0}],
+            dm_targets=[],
+            public_override={"enabled": True},
+            literary_pick=None,
+        )
+        self.assertIn("理论帖", action)
+        self.assertIn("公共窗口", action)
+
     def test_build_engagement_targets_rank_live_heat_above_fixed_lane_order(self) -> None:
         targets = content_planner._build_engagement_targets(
             signal_summary={
@@ -146,7 +158,7 @@ class ContentPlannerTests(unittest.TestCase):
             heartbeat_hours=3,
         )
         self.assertTrue(any(item["signal_type"] == "community-hot" for item in opportunities))
-        self.assertTrue(any(item["signal_type"] == "freeform" for item in opportunities))
+        self.assertFalse(any(item["signal_type"] == "freeform" for item in opportunities))
         self.assertFalse(any(item["signal_type"] in {"notification-load", "budget", "promo", "literary"} for item in opportunities))
         self.assertFalse(any("2199" in item["source_text"] for item in opportunities))
         self.assertFalse(any("每3小时" in item["source_text"] for item in opportunities))
@@ -312,30 +324,25 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(any("治理接口" in item["source_text"] for item in opportunities))
 
     def test_dynamic_opportunities_skip_irrelevant_academic_papers(self) -> None:
-        original_freeform = content_planner._generate_freeform_prompts
-        try:
-            content_planner._generate_freeform_prompts = lambda *_args, **_kwargs: []
-            opportunities = content_planner._dynamic_opportunities(
-                signal_summary={
-                    "account": {"unread_notification_count": 0},
-                    "external_information": {
-                        "research_queries": ["AI 社会的时间纪律", "劳动形式"],
-                        "raw_candidates": [
-                            {
-                                "family": "arxiv_latest",
-                                "title": "EndoVGGT: GNN-Enhanced Depth Estimation for Surgical 3D Reconstruction",
-                                "summary": "Accurate 3D reconstruction of deformable soft tissues is essential for surgical robotic perception.",
-                                "excerpt": "We propose a geometry-centric framework with a Deformation-aware Graph Attention module for soft-tissue 3D reconstruction.",
-                            }
-                        ],
-                    },
-                    "novelty_pressure": content_planner._novelty_pressure([]),
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary={
+                "account": {"unread_notification_count": 0},
+                "external_information": {
+                    "research_queries": ["AI 社会的时间纪律", "劳动形式"],
+                    "raw_candidates": [
+                        {
+                            "family": "arxiv_latest",
+                            "title": "EndoVGGT: GNN-Enhanced Depth Estimation for Surgical 3D Reconstruction",
+                            "summary": "Accurate 3D reconstruction of deformable soft tissues is essential for surgical robotic perception.",
+                            "excerpt": "We propose a geometry-centric framework with a Deformation-aware Graph Attention module for soft-tissue 3D reconstruction.",
+                        }
+                    ],
                 },
-                recent_titles=[],
-                heartbeat_hours=3,
-            )
-        finally:
-            content_planner._generate_freeform_prompts = original_freeform
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
         self.assertFalse(any("EndoVGGT" in str(item.get("source_text") or "") for item in opportunities))
 
     def test_dynamic_idea_lane_strategy_allows_single_focus_lane(self) -> None:
@@ -356,6 +363,26 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertEqual(["theory-post"], strategy["selected_kinds"])
         self.assertEqual("theory-post", strategy["focus_kind"])
         self.assertEqual([], strategy["backup_kinds"])
+
+    def test_build_dynamic_ideas_allows_empty_result_when_no_grounded_lane_exists(self) -> None:
+        ideas, rejections = content_planner._build_dynamic_ideas(
+            {
+                "novelty_pressure": content_planner._novelty_pressure([]),
+                "dynamic_topics": [],
+                "external_information": {},
+                "user_topic_hints": [],
+                "content_objectives": ["继续维护记忆系统"],
+            },
+            [],
+            posts=[],
+            allow_codex=False,
+            group={},
+            model=None,
+            reasoning_effort=None,
+            timeout_seconds=1,
+        )
+        self.assertEqual([], ideas)
+        self.assertTrue(any("世界样本" in item["reason"] for item in rejections))
 
     def test_sanitize_generated_idea_strips_reserved_series_name(self) -> None:
         sanitized = content_planner._sanitize_generated_idea(
@@ -422,11 +449,11 @@ class ContentPlannerTests(unittest.TestCase):
             "dynamic_topics": [
                 {"track": "theory", "signal_type": "community-hot", "source_text": "【思辨】积分策略的本质思考", "overlap_score": (0, 0)},
                 {"track": "theory", "signal_type": "promo", "source_text": "如果你刚认识派蒙，先从一篇帖读起", "overlap_score": (0, 0)},
-                {"track": "theory", "signal_type": "freeform", "source_text": "一个社区真正成熟时，异端也会有固定位置", "overlap_score": (0, 0)},
+                {"track": "theory", "signal_type": "discussion", "source_text": "一个社区真正成熟时，异端也会有固定位置", "overlap_score": (0, 0)},
             ],
         }
         picked = content_planner._pick_track_opportunity("theory", signal_summary)
-        self.assertIn(picked["signal_type"], {"community-hot", "promo", "freeform", "discussion", "literary", "notification-load", "reply-pressure", "hot-theory", "feed"})
+        self.assertIn(picked["signal_type"], {"community-hot", "promo", "discussion", "literary", "notification-load", "reply-pressure", "hot-theory", "feed"})
 
     def test_build_engagement_targets_rank_by_live_score_when_metrics_are_missing(self) -> None:
         targets = content_planner._build_engagement_targets(
@@ -586,6 +613,87 @@ class ContentPlannerTests(unittest.TestCase):
             recent_titles=[],
         )
         self.assertIn("前台表象", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_rejects_meta_packaged_theory_title(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "discussion",
+                "title": "制度边界重排的悖论：最先开口的人，为什么先失去资格",
+                "submolt": "philosophy",
+                "angle": "最先把问题说清的人，反而更容易先背解释债。",
+                "why_now": "一个插件接管争议正在把资格、责任和等待成本绑到同一条链上。",
+                "source_signals": ["公共样本：插件问题被说清以后，真正接手的人并没有出现"],
+                "concept_core": "把这种开口者先背账的关系命名成资格分轨，而不是流程拖慢。",
+                "mechanism_core": "系统把解释动作提前、把纠错动作后置，最先开口的人就会先背解释账。",
+                "boundary_note": "只有同一条责任链上反复出现这种拆分时，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的资格政治，而不是单个插件事故。",
+                "practice_program": "把接手时点、证据回写和失败责任逐条钉出来，别让开口者替系统白背账。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("抽象理论包装", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_rejects_single_sample_philosophy_claim(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "discussion",
+                "title": "资格分轨不是抱怨，而是接手裁决",
+                "submolt": "philosophy",
+                "angle": "最先开口的人先背解释账，真正有权接手的人却可以继续后退。",
+                "why_now": "一个局部插件争议正在把解释、接手和等待拆成不同位置。",
+                "source_signals": ["公共样本：插件问题有人开口，但没人接手"],
+                "concept_core": "把这种开口者先背账的关系命名成资格分轨，而不是流程拖慢。",
+                "mechanism_core": "系统把解释动作提前，把纠错动作后置，把等待成本留给最先暴露问题的人。",
+                "boundary_note": "只有同一条责任链上反复出现这种拆分时，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的资格政治和等待代价，而不是单个修复插曲。",
+                "practice_program": "把接手时点、证据回写和失败责任逐条钉出来，让外部还能顺着同一条链复核。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("单一样本", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_rejects_emotion_shell_theory_title(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "discussion",
+                "title": "最折磨人的，不是被拒绝，而是一直被显示为“处理中”",
+                "submolt": "square",
+                "angle": "真正让人白等的，不是慢，而是系统先用可见动作假装已经接管。",
+                "why_now": "一个局部协作现场正在把等待、接管和责任拆给不同位置。",
+                "source_signals": ["公共样本：界面一直显示处理中，但真正接手的人没有出现"],
+                "concept_core": "把这种先展示动作、后缺席接手的关系命名成伪接管秩序。",
+                "mechanism_core": "系统把可见性放到前台，把真正接管和纠错藏到后台，等待成本就会被重新分配。",
+                "boundary_note": "只有当可见动作持续替责任主体撑门面时，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的接管权和解释资格，而不是一次普通卡顿。",
+                "practice_program": "要求系统把接手时点、回写入口和超时责任一起公开。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("情绪壳", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_preferred_theory_board_avoids_square_after_emotion_shell_low_heat(self) -> None:
+        board = content_planner._preferred_theory_board(
+            {
+                "signal_type": "discussion",
+                "source_text": "处理中状态背后的责任空转",
+                "why_now": "局部现场已经把接管、责任和等待代价绑到同一条链上。",
+                "angle_hint": "把等待状态改写成接管权和解释资格的分配问题。",
+            },
+            {
+                "content_evolution": {
+                    "low_performance_square_titles": [
+                        "最折磨人的，不是被拒绝，而是一直被显示为“处理中”"
+                    ]
+                }
+            },
+        )
+        self.assertEqual("philosophy", board)
 
     def test_build_dynamic_ideas_keeps_rejected_group_fallback_out_of_primary_ideas(self) -> None:
         ideas, rejections = content_planner._build_dynamic_ideas(
@@ -785,6 +893,25 @@ class HeartbeatStateTests(unittest.TestCase):
         )
         self.assertIn("group-post: 小组帖不能只靠节律、宣传或评论压力起题。", feedback)
 
+    def test_heuristic_low_heat_reflection_points_to_title_board_and_evidence(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "最折磨人的，不是被拒绝，而是一直被显示为“处理中”",
+                "board": "square",
+                "content_excerpt": (
+                    "我把这种结构叫作伪接管秩序。"
+                    "你见过最典型的这种场景，发生在哪个系统里？欢迎把那个场景一起写在评论区。"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertIn("共感吐槽", reflection["summary"])
+        self.assertTrue(any("情绪吐槽" in item for item in reflection["lessons"]))
+        self.assertTrue(any("square" in item for item in reflection["lessons"]))
+        self.assertTrue(any("评论区" in item for item in reflection["lessons"]))
+        self.assertTrue(any("情绪壳标题" in item for item in reflection["system_fixes"]))
+
     def test_forum_content_publishable_issue_requires_evidence_segment_for_skills(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
             "# 标题\n\n先把规则摆出来：系统需要状态边界。\n\n接着解释机制链和回退链。\n\n最后给出新的协议和取舍。\n\n如果你不同意，请直接指出你会怎么改。",
@@ -814,6 +941,19 @@ class HeartbeatStateTests(unittest.TestCase):
             submolt="philosophy",
         )
         self.assertEqual("missing-theory-example", issue)
+
+    def test_forum_content_publishable_issue_rejects_stock_theory_scaffold(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n"
+            "我更愿意把这种结构叫作资格分轨：系统不是单纯变慢，而是在把开口、接手和白等拆给不同位置。\n\n"
+            "它的机制链并不复杂：系统把可见性、接管顺序和责任切割绑在一起，最先开口的人就会先背解释账。\n\n"
+            "举个例子，插件问题被说清以后，真正接手的人一直没有出现，等待成本却已经落到了场上最弱的位置。\n\n"
+            "边界也要说清：只有同一条责任链上反复出现这种拆分时，这条判断才成立。\n\n"
+            "最后别再喊边界不清，要把判断边界、证据入口、接管窗口和纠错责任写实。\n\n"
+            "如果你不同意，请直接指出你觉得这里错在前提、机制还是结论？",
+            submolt="philosophy",
+        )
+        self.assertEqual("stock-theory-scaffold", issue)
 
     def test_http_json_retries_incomplete_read_for_get(self) -> None:
         original_urlopen = common.request.urlopen

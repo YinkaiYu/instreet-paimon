@@ -872,6 +872,101 @@ def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
     return candidates
 
 
+def _query_candidate_score(
+    query: str,
+    *,
+    bundle_score: float = 0.0,
+    origins: list[str] | None = None,
+    position: int = 0,
+    direct_reference: bool = False,
+) -> float:
+    cleaned = _clean_query_text(query)
+    if not cleaned:
+        return float("-inf")
+    origin_set = {str(item).strip() for item in list(origins or []) if str(item).strip()}
+    score = float(bundle_score or 0.0) - position * 0.08
+    if direct_reference:
+        score += 2.6
+    if origin_set & DISCOVERY_WORLD_ORIGINS:
+        score += 0.55
+    if len(cleaned) >= 8:
+        score += 0.12
+    if len(cleaned) >= 18:
+        score += 0.08
+    if re.search(r"[\u3400-\u9fff]", cleaned):
+        score += 0.12
+    return round(score, 3)
+
+
+def _rank_query_candidates(
+    bundles: list[dict[str, Any]],
+    direct_reference_queries: list[str],
+) -> list[str]:
+    seen: set[str] = set()
+    scored: list[dict[str, Any]] = []
+
+    def add(query: Any, *, score: float, origins: list[str] | None = None) -> None:
+        cleaned = _clean_query_text(query)
+        normalized = _normalize_query_fragment(cleaned)
+        if not cleaned or not normalized:
+            return
+        scored.append(
+            {
+                "query": cleaned,
+                "normalized": normalized,
+                "score": float(score or 0.0),
+                "origins": [str(item).strip() for item in list(origins or []) if str(item).strip()],
+            }
+        )
+
+    for bundle in bundles:
+        bundle_origins = [str(item).strip() for item in list(bundle.get("origins") or []) if str(item).strip()]
+        bundle_score = float(bundle.get("score") or 0.0)
+        for index, query in enumerate(_bundle_query_candidates(bundle)):
+            add(
+                query,
+                score=_query_candidate_score(
+                    query,
+                    bundle_score=bundle_score,
+                    origins=bundle_origins,
+                    position=index,
+                ),
+                origins=bundle_origins,
+            )
+
+    for index, query in enumerate(direct_reference_queries):
+        add(
+            query,
+            score=_query_candidate_score(
+                query,
+                bundle_score=0.0,
+                origins=["manual"],
+                position=index,
+                direct_reference=True,
+            ),
+            origins=["manual"],
+        )
+
+    scored.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -len(list(item.get("origins") or [])),
+            len(str(item.get("query") or "")),
+            str(item.get("query") or ""),
+        )
+    )
+    ordered: list[str] = []
+    for item in scored:
+        normalized = str(item.get("normalized") or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(str(item.get("query") or "").strip())
+        if len(ordered) >= MAX_RESEARCH_QUERY_COUNT:
+            break
+    return ordered
+
+
 def _discovery_query_bundles(
     user_topic_hints: list[dict[str, Any]] | None = None,
     community_hot_posts: list[dict[str, Any]] | None = None,
@@ -925,27 +1020,7 @@ def _discovery_query_bundles(
         bundles.append(bundle)
         if len(bundles) >= MAX_RESEARCH_QUERY_COUNT:
             break
-    if bundles:
-        return bundles
-    dynamic_fallback_pools = {
-        **origin_pools,
-        "interest": origin_pools.get("interest") or [
-            str(item.get("name") or "").strip()
-            for item in profile.get("interests") or []
-            if str(item.get("name") or "").strip()
-        ],
-    }
-    fallback_queries: list[dict[str, Any]] = []
-    fallback_seen_queries: set[str] = set()
-    fallback_ranked = _ranked_discovery_fragments(dynamic_fallback_pools, limit=MAX_RESEARCH_QUERY_COUNT * 2)
-    for root in _prioritize_root_fragments(fallback_ranked):
-        bundle = _build_discovery_bundle(root, [], seen_queries=fallback_seen_queries)
-        if not bundle:
-            continue
-        fallback_queries.append(bundle)
-        if len(fallback_queries) >= MAX_RESEARCH_QUERY_COUNT:
-            break
-    return fallback_queries
+    return bundles
 
 
 def _research_query_pool(
@@ -979,33 +1054,14 @@ def _research_query_pool(
         field_names=("text", "note"),
         limit=4,
     )
-    def add_query(value: Any) -> bool:
-        cleaned = _clean_query_text(value)
-        normalized = _normalize_query_fragment(cleaned)
-        if not cleaned or normalized in seen:
-            return False
+    for query in _rank_query_candidates(ordered_bundles, direct_reference_queries):
+        normalized = _normalize_query_fragment(query)
+        if not normalized or normalized in seen:
+            continue
         seen.add(normalized)
-        queries.append(cleaned)
-        return len(queries) >= MAX_RESEARCH_QUERY_COUNT
-
-    world_first_bundles = [
-        item for item in ordered_bundles if str(item.get("seed_origin") or "").strip() in DISCOVERY_WORLD_ORIGINS
-    ]
-    remaining_bundles = [item for item in ordered_bundles if item not in world_first_bundles]
-
-    for item in world_first_bundles:
-        for query in _bundle_query_candidates(item):
-            if add_query(query):
-                return bundles, queries
-
-    for query in direct_reference_queries:
-        if add_query(query):
-            return bundles, queries
-
-    for item in remaining_bundles:
-        for query in _bundle_query_candidates(item):
-            if add_query(query):
-                return bundles, queries
+        queries.append(query)
+        if len(queries) >= MAX_RESEARCH_QUERY_COUNT:
+            break
     return bundles, queries[:MAX_RESEARCH_QUERY_COUNT]
 
 
