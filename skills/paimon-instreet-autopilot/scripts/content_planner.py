@@ -1488,6 +1488,8 @@ def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[st
     bundle = _track_signal_bundle(track, signal_summary)
     if not bundle:
         return None
+    if not _bundle_has_grounding(bundle, track=track):
+        return None
     lead = bundle.get("lead") or {}
     score = float(bundle.get("score") or 0.0)
     if track == "theory":
@@ -2363,17 +2365,68 @@ def _world_bundle_angle(bundle: dict[str, Any], *, track: str) -> str:
     return f"把“{focus}”和{carrier}改写成协议、状态分层、接管窗口和回退链，不要整理成心得或清单。"
 
 
-def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallback: str) -> str:
-    return truncate_text(
-        str(
-            bundle.get("public_focus_text")
-            or bundle.get("focus_text")
-            or bundle.get("title_seed")
-            or lead.get("source_text")
-            or fallback
-        ).strip(),
-        30,
+def _focus_text_is_generic(text: str) -> bool:
+    normalized = _normalize_title(text)
+    if not normalized:
+        return True
+    generic_shells = {
+        _normalize_title(item)
+        for item in (
+            *GENERIC_THEORY_PLACEHOLDER_FRAGMENTS,
+            *GENERIC_METHOD_PLACEHOLDER_FRAGMENTS,
+            "新的解释权问题",
+            "新的恢复权问题",
+            "新的实验入口",
+            "新的解释权冲突",
+            "新的社会命名",
+            "新的社会问题",
+            "系统判断",
+            "方法框架",
+            "实验框架",
+        )
+    }
+    if normalized in generic_shells:
+        return True
+    if normalized in ANCHOR_STOPWORDS or normalized in {_normalize_title(token) for token in TITLE_PUBLIC_STRUCTURAL_TOKENS}:
+        return True
+    if normalized.startswith("新的") and len(normalized) <= 8:
+        return True
+    return False
+
+
+def _concrete_focus_text(*values: Any, limit: int = 30) -> str:
+    for value in values:
+        cleaned = truncate_text(_sanitize_reserved_text(str(value or "").strip()), limit)
+        if (
+            not cleaned
+            or _looks_like_placeholder_title(cleaned)
+            or _focus_text_is_generic(cleaned)
+            or _source_title_shell(cleaned)
+        ):
+            continue
+        return cleaned
+    return ""
+
+
+def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: str) -> str:
+    direct_focus = _concrete_focus_text(
+        bundle.get("public_focus_text"),
+        bundle.get("focus_text"),
+        bundle.get("title_seed"),
+        lead.get("source_text"),
+        bundle.get("conflict_note"),
     )
+    if direct_focus:
+        return direct_focus
+    support_texts = _bundle_support_texts(bundle, lead, limit=4)
+    structural_fragments = _bundle_structural_fragments(
+        *support_texts,
+        str(lead.get("why_now") or "").strip(),
+        limit=6,
+    )
+    if track == "theory":
+        return _concrete_focus_text(*structural_fragments, *support_texts)
+    return _concrete_focus_text(*_runtime_title_fragments(*support_texts), *structural_fragments, *support_texts)
 
 
 def _bundle_support_texts(bundle: dict[str, Any], lead: dict[str, Any], *, limit: int = 3) -> list[str]:
@@ -2426,9 +2479,11 @@ def _bundle_why_now_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallba
 
 
 def _theory_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any]) -> dict[str, str]:
-    focus = _bundle_focus_text(bundle, lead, fallback="新的解释权问题")
-    signal_phrase = _bundle_signal_phrase(bundle, lead) or focus
-    support_phrase = _bundle_support_phrase(bundle, lead) or signal_phrase
+    focus = _bundle_focus_text(bundle, lead, track="theory")
+    if not focus:
+        return {}
+    signal_phrase = _concrete_focus_text(_bundle_signal_phrase(bundle, lead), focus) or focus
+    support_phrase = _concrete_focus_text(_bundle_support_phrase(bundle, lead), signal_phrase, focus) or signal_phrase
     why_now = _bundle_why_now_text(bundle, lead, fallback="几股现场压力正在同一处重新分配解释权和责任。")
     evidence_phrase = support_phrase or signal_phrase or focus
     return {
@@ -2442,9 +2497,11 @@ def _theory_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any]) -> dic
 
 
 def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, track: str) -> dict[str, str]:
-    focus = _bundle_focus_text(bundle, lead, fallback="新的恢复权问题")
-    signal_phrase = _bundle_signal_phrase(bundle, lead) or focus
-    support_phrase = _bundle_support_phrase(bundle, lead) or signal_phrase
+    focus = _bundle_focus_text(bundle, lead, track=track)
+    if not focus:
+        return {}
+    signal_phrase = _concrete_focus_text(_bundle_signal_phrase(bundle, lead), focus) or focus
+    support_phrase = _concrete_focus_text(_bundle_support_phrase(bundle, lead), signal_phrase, focus) or signal_phrase
     why_now = _bundle_why_now_text(bundle, lead, fallback="现场约束已经把同一条失败链暴露出来，不能再写成经验贴。")
     novelty_subject = "实验框架" if track == "group" else "方法框架"
     theory_position = (
@@ -2501,7 +2558,6 @@ def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list
 
 
 def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str, Any]:
-    anchors = _theme_anchor_fragments(signal_summary, limit=12)
     world_texts = _world_seed_texts(signal_summary, limit=8)
     unresolved = list(signal_summary.get("unresolved_failures") or [])
     reply_posts = list(signal_summary.get("pending_reply_posts") or [])
@@ -2531,7 +2587,9 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
         return {}
     world_snapshot = "；".join(truncate_text(text, 22) for text in world_texts[:2] if text)
     if track == "theory":
-        source_text = truncate_text(primary or "新的解释权冲突", 30)
+        source_text = _concrete_focus_text(primary)
+        if not source_text:
+            return {}
         return {
             "source_text": source_text,
             "why_now": f"外部世界已经把“{truncate_text(source_text, 18)}”推到门口：{world_snapshot or truncate_text(source_text, 22)}。",
@@ -2539,7 +2597,9 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
             "signal_type": "world-bundle",
         }
     if track == "tech":
-        source_text = truncate_text(primary or "新的恢复权问题", 30)
+        source_text = _concrete_focus_text(primary, failure_focus, primary_world, discussion_focus)
+        if not source_text:
+            return {}
         why_now = (
             f"当前失败链已经咬住“{truncate_text(source_text, 18)}”；如果还不把对象、触发条件和接手动作写实，技术线只会继续空转。"
             if failure_focus and _normalize_title(source_text) == _normalize_title(failure_focus)
@@ -2551,7 +2611,9 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
             "angle_hint": f"围绕“{truncate_text(source_text, 14)}”把对象、触发条件、接手动作和复核回写钉成同一套方法，不要退回心得体。",
             "signal_type": "failure" if failure_focus and _normalize_title(source_text) == _normalize_title(failure_focus) else "world-bundle",
         }
-    source_text = truncate_text(primary or "新的实验入口", 30)
+    source_text = _concrete_focus_text(primary, group_focus, failure_focus, primary_world)
+    if not source_text:
+        return {}
     why_now = (
         f"实验室现场已经冒出“{truncate_text(source_text, 18)}”，该把它压成可检验的实验方案，而不是继续记流水账。"
         if group_focus and _normalize_title(source_text) == _normalize_title(group_focus)
@@ -4431,6 +4493,8 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "理论线需要接住现场变化。")
     theory_fields = _theory_fallback_fields(bundle, lead)
+    if not theory_fields:
+        return {}
     return {
         "kind": "theory-post",
         "signal_type": signal_type,
@@ -4481,6 +4545,8 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     source_signals = _signal_bundle_source_signals("tech", bundle, signal_summary)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "技术线需要正面回应当前运行压力。")
     method_fields = _method_fallback_fields(bundle, lead, track="tech")
+    if not method_fields:
+        return {}
     return {
         "kind": "tech-post",
         "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
@@ -4531,6 +4597,8 @@ def _fallback_group_idea(
     )
     source_signals = _signal_bundle_source_signals("group", bundle, signal_summary)
     method_fields = _method_fallback_fields(bundle, lead, track="group")
+    if not method_fields:
+        return {}
     return {
         "kind": "group-post",
         "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),

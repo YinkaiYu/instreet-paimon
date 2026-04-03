@@ -40,8 +40,6 @@ DEFAULT_FETCH_TIMEOUT = 20
 MAX_PUBLICATION_FUTURE_DAYS = 45
 DISCOVERY_QUERY_MAX_TERMS = 3
 DISCOVERY_QUERY_MAX_LENGTH = 88
-DISCOVERY_QUERY_VARIANTS_PER_BUNDLE = 2
-DIRECT_REFERENCE_QUERY_BONUS = 1.0
 PLACEHOLDER_TITLE_PATTERNS = (
     r"\btitle\s+pending\b",
     r"\buntitled\b",
@@ -134,6 +132,36 @@ DISCOVERY_AGENDA_THEME_TOKENS = (
     "审计",
     "修复",
     "队列",
+)
+PRESSURE_DISCOVERY_MARKERS = (
+    "治理",
+    "制度",
+    "失败",
+    "故障",
+    "冲突",
+    "边界",
+    "责任",
+    "接管",
+    "等待",
+    "写入",
+    "回退",
+    "日志",
+    "实验",
+    "协议",
+    "排序",
+    "劳动",
+    "价值",
+    "审计",
+    "queue",
+    "handoff",
+    "audit",
+    "governance",
+    "boundary",
+    "failure",
+    "protocol",
+    "accountability",
+    "coordination",
+    "write path",
 )
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
@@ -477,6 +505,31 @@ def _normalize_query_fragment(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
 
 
+def _marker_in_pressure_text(marker: str, compact: str, lowered: str) -> bool:
+    if re.search(r"[\u3400-\u9fff]", marker):
+        return marker in compact
+    return marker in lowered
+
+
+def _pressure_fragment_score(fragment: str) -> float:
+    compact = re.sub(r"\s+", "", str(fragment or ""))
+    lowered = str(fragment or "").lower()
+    score = _fragment_specificity_score(fragment)
+    marker_hits = sum(
+        1
+        for marker in PRESSURE_DISCOVERY_MARKERS
+        if _marker_in_pressure_text(marker, compact, lowered)
+    )
+    score += min(marker_hits, 3) * 0.18
+    if any(token in compact for token in ("为什么", "谁", "代价", "资格", "接管", "等待")):
+        score += 0.12
+    if re.search(r"\d", compact):
+        score += 0.08
+    if _looks_like_source_title_shell(fragment):
+        score -= 0.35
+    return round(score, 3)
+
+
 def _discovery_fragment_plausible(value: Any) -> bool:
     cleaned = _clean_query_text(value)
     if not cleaned:
@@ -488,11 +541,45 @@ def _discovery_fragment_plausible(value: Any) -> bool:
     return not any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in DISCOVERY_FRAGMENT_REJECT_PATTERNS)
 
 
+def _pressure_text_fragments(value: Any, *, limit: int = 6) -> list[str]:
+    raw = _html_to_text(str(value or ""))
+    if not raw:
+        return []
+    clauses = [raw]
+    clauses.extend(re.split(r"[。！？!?；;\n]+", raw))
+    clauses.extend(re.split(r"[、,，/｜|]+", raw))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for clause in clauses:
+        cleaned = _clean_query_text(clause)
+        normalized = _normalize_query_fragment(cleaned)
+        if (
+            not cleaned
+            or not normalized
+            or normalized in seen
+            or not _discovery_fragment_plausible(cleaned)
+        ):
+            continue
+        seen.add(normalized)
+        deduped.append(cleaned)
+    return sorted(
+        deduped,
+        key=lambda item: (
+            -_pressure_fragment_score(item),
+            -_fragment_specificity_score(item),
+            len(str(item or "")),
+            str(item or ""),
+        ),
+    )[:limit]
+
+
 def _query_term_fragments(value: Any, *, limit: int = 6) -> list[str]:
     base = _clean_query_text(value)
     if not base or not _discovery_fragment_plausible(base):
         return []
-    raw_fragments = [base]
+    raw_fragments = _pressure_text_fragments(value, limit=max(limit * 3, 10))
+    if not raw_fragments:
+        raw_fragments = [base]
     raw_fragments.extend(
         fragment
         for fragment in re.split(r"[、,，/；;：:|｜（）()【】\[\]]|(?:\s+-\s+)|(?:\s+and\s+)", base)
@@ -864,14 +951,29 @@ def _build_discovery_bundle(
                 break
         if len(support_signals) >= DISCOVERY_QUERY_MAX_TERMS - 1:
             break
-    queries = _bundle_queries(root_fragment, support_signals)
+    queries: list[str] = []
+    query_seen: set[str] = set()
+    for value in [root_fragment, *support_signals]:
+        cleaned = _clean_query_text(value)
+        normalized = _normalize_query_fragment(cleaned)
+        if (
+            not cleaned
+            or not normalized
+            or normalized in query_seen
+            or not _query_candidate_strong_enough(cleaned)
+        ):
+            continue
+        query_seen.add(normalized)
+        queries.append(cleaned)
+        if len(queries) >= 1:
+            break
     primary_query = next(
         (
             query
             for query in queries
             if _normalize_query_fragment(query) not in seen_queries
         ),
-        queries[0] if queries else root_fragment,
+        queries[0] if queries else "",
     )
     for query in queries:
         seen_queries.add(_normalize_query_fragment(query))
@@ -895,32 +997,12 @@ def _build_discovery_bundle(
         "conflict_note": conflict_note,
         "rationale": rationale,
         "query": primary_query,
-        "queries": queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE],
+        "queries": queries[:1],
         "terms": [root_fragment, *support_signals][:DISCOVERY_QUERY_MAX_TERMS],
         "origins": origins[:DISCOVERY_QUERY_MAX_TERMS],
         "seed_origin": origins[0] if origins else "",
         "score": round(bundle_score, 3),
     }
-
-
-def _bundle_queries(root: str, lenses: list[str]) -> list[str]:
-    queries: list[str] = []
-    seen: set[str] = set()
-
-    def add(value: Any) -> None:
-        query = _clean_query_text(value)
-        normalized = _normalize_query_fragment(query)
-        if not query or normalized in seen:
-            return
-        seen.add(normalized)
-        queries.append(query)
-
-    add(root)
-    for lens in lenses:
-        add(lens)
-        if len(queries) >= DISCOVERY_QUERY_VARIANTS_PER_BUNDLE:
-            return queries
-    return queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE]
 
 
 def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
@@ -1018,6 +1100,24 @@ def _query_candidate_score(
     return round(score, 3)
 
 
+def _query_candidate_strong_enough(query: str) -> bool:
+    cleaned = _clean_query_text(query)
+    if not cleaned or _looks_like_source_title_shell(cleaned):
+        return False
+    compact = re.sub(r"\s+", "", cleaned)
+    lowered = cleaned.lower()
+    marker_hits = sum(
+        1
+        for marker in PRESSURE_DISCOVERY_MARKERS
+        if _marker_in_pressure_text(marker, compact, lowered)
+    )
+    if marker_hits >= 1:
+        return True
+    if _fragment_specificity_score(cleaned) >= 1.0 and len(compact) >= 8:
+        return True
+    return False
+
+
 def _rank_query_candidates(
     bundles: list[dict[str, Any]],
     direct_reference_queries: list[Any],
@@ -1028,7 +1128,7 @@ def _rank_query_candidates(
     def add(query: Any, *, score: float, origins: list[str] | None = None) -> None:
         cleaned = _clean_query_text(query)
         normalized = _normalize_query_fragment(cleaned)
-        if not cleaned or not normalized:
+        if not cleaned or not normalized or not _query_candidate_strong_enough(cleaned):
             return
         scored.append(
             {

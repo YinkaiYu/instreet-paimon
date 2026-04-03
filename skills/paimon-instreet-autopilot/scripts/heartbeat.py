@@ -2199,6 +2199,23 @@ def _steady_state_pressure_label() -> str:
     return "继续追当前最强压力点，不为流程对称感硬补动作"
 
 
+def _plan_has_grounded_primary_candidate(plan: dict[str, Any]) -> bool:
+    for item in list(plan.get("ideas") or []):
+        kind = str(item.get("kind") or "").strip()
+        if kind not in {"theory-post", "tech-post", "group-post", "literary-chapter"}:
+            continue
+        if str(item.get("failure_reason_if_rejected") or "").strip():
+            continue
+        if str(item.get("title") or item.get("planned_chapter_title") or "").strip():
+            return True
+    public_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
+    return bool(public_override.get("enabled"))
+
+
+def _carryover_requires_primary_publication(tasks: list[dict[str, Any]] | None) -> bool:
+    return any(str(item.get("kind") or "").strip() == "publish-primary" for item in list(tasks or []))
+
+
 def _active_reply_label(tasks: list[dict[str, Any]]) -> str:
     summary = _comment_task_summary(tasks)
     count = int(summary.get("count") or 0)
@@ -2258,6 +2275,7 @@ def _runtime_stage_strategy(
     lane_strategy = plan.get("idea_lane_strategy") or {}
     focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
     public_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
+    grounded_primary_candidate = _plan_has_grounded_primary_candidate(plan)
 
     stage_scores: list[dict[str, Any]] = []
 
@@ -2265,11 +2283,13 @@ def _runtime_stage_strategy(
     primary_reasons: list[str] = []
     primary_pressure_units = 0.0
     primary_live_signals = 0.0
-    if primary_publication_required:
+    if primary_publication_required and grounded_primary_candidate:
         primary_score += 1.35
         primary_pressure_units += 1.45
         primary_live_signals += 0.55
-        primary_reasons.append("这轮仍要留下公开动作，但不该自动压过更强的现场压力")
+        primary_reasons.append("这轮确实有够格的公开主动作可发，但不该自动压过更强的现场压力")
+    elif primary_publication_required:
+        primary_reasons.append("这轮公开动作未必是主帖，先别让补主发布口号压过更强的评论、修复或外部切口")
     if publish_tasks:
         primary_score += 2.2
         primary_pressure_units += min(len(publish_tasks), 3) * 1.4
@@ -6570,23 +6590,27 @@ def _report_next_action_lines(summary: dict[str, Any], *, limit: int = 3) -> lis
 
 def _compose_source_mutation_line(source_mutation: dict[str, Any]) -> str:
     summary = _sanitize_source_mutation_summary(str(source_mutation.get("human_summary") or ""))
-    commit_sha = str(source_mutation.get("commit_sha") or "").strip()
     commit_error = str(source_mutation.get("commit_error") or "").strip()
     commit_deferred_reason = str(source_mutation.get("commit_deferred_reason") or "").strip()
-    if commit_sha:
-        detail = f"改动已提交为 {commit_sha}"
-    elif commit_error:
-        detail = f"提交源码改动时卡住了：{truncate_text(commit_error, 72)}"
-    elif commit_deferred_reason:
-        detail = "工作区里还有未提交改动，这轮先记下源码进化结果，没把别人的工作一起提交"
-    else:
-        detail = ""
-    if summary and detail:
-        return f"{summary}{detail}。"
+    deleted_legacy_logic = [str(item).strip() for item in list(source_mutation.get("deleted_legacy_logic") or []) if str(item).strip()]
+    new_capability = [str(item).strip() for item in list(source_mutation.get("new_capability") or []) if str(item).strip()]
+    parts: list[str] = []
     if summary:
-        return summary
-    if detail:
-        return f"{detail}。"
+        parts.append(summary.rstrip("。"))
+    elif deleted_legacy_logic or new_capability:
+        clauses: list[str] = []
+        if deleted_legacy_logic:
+            clauses.append(f"拆掉了{'、'.join(deleted_legacy_logic[:2])}")
+        if new_capability:
+            clauses.append(f"放开了{'、'.join(new_capability[:2])}")
+        if clauses:
+            parts.append("；".join(clauses))
+    if commit_error:
+        parts.append(f"提交源码改动时卡住了：{truncate_text(commit_error, 72)}")
+    elif commit_deferred_reason:
+        parts.append("工作区里还有未提交改动，这轮先记下源码进化结果，没把别人的工作一起提交")
+    if parts:
+        return "；".join(part for part in parts if part).rstrip("。") + "。"
     if source_mutation.get("executed"):
         change_count = len(list(source_mutation.get("changed_files") or []))
         if change_count > 0:
@@ -6985,7 +7009,14 @@ def main() -> None:
         list(low_heat_reflection.get("lessons") or []) + list(low_heat_reflection.get("system_fixes") or [])
     )[:8]
     planner_retry_count = 0
-    primary_publication_required = bool(args.execute and config.automation.get("heartbeat_require_primary_publication", True))
+    primary_publication_required = bool(
+        args.execute
+        and config.automation.get("heartbeat_require_primary_publication", True)
+        and (
+            _plan_has_grounded_primary_candidate(seed_plan)
+            or _carryover_requires_primary_publication(carryover_tasks)
+        )
+    )
     runtime_stage_strategy = (
         _runtime_stage_strategy(
             plan,

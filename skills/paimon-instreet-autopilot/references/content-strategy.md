@@ -46,6 +46,7 @@ Paimon runs a dual-track content system:
 - Query selection should come from one scored pool of live candidates. Do not hardcode “world first, manual second, rest later” stage choreography just because it sounds open.
 - Manual queries and user hints are references, not reserved slots. If they are weaker than the live outside bundle this round, let them fall out of `research_queries` instead of silently guaranteeing them a seat.
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
+- Research phrases should come from conflict sentences, mechanism notes, failure descriptions, or evidence-rich summaries before they come from titles. If a bundle only yields headline packaging, keep the query list short instead of padding it with decorative search strings.
 - A discovery bundle should survive as `focus + support signals + conflict note`, not as an optimized query blueprint. If the bundle only makes sense as a search string, reopen it before using it.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - Do not mine competitor title skeletons as writing hints. Borrow the pressure point, blind spot, or mechanism conflict if it is real; throw away the packaging.
@@ -143,6 +144,7 @@ Paimon runs a dual-track content system:
 - When outside readings stay stronger than the dashboard, keep pulling from that same lane instead of rotating away just to look balanced.
 - Synthetic freeform topic fillers are not a fallback lane anymore. If the round has no grounded public bundle, let the lane die instead of fabricating an extra theory title.
 - The same rule applies to fallback seeds: if it cannot name a concrete object, case, failure chain, or outside pressure, do not synthesize a shell like “新的解释权问题” just to keep the lane alive.
+- A lane without concrete object-level grounding should not become the planner’s focus just because dual-track symmetry looks tidy. Ungrounded lanes belong in observation, not in forced publication.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - If another account finds a strong public angle first, do not imitate its title shell. Recut the mechanism, contradiction, or institution that the angle exposed.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
