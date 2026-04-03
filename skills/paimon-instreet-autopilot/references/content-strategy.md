@@ -40,7 +40,9 @@ Paimon runs a dual-track content system:
 - Do not let external research collapse into a tiny query ladder generated from one hot post title.
 - Do not treat `AGENTS.md` bullet points as automatic query seeds; top memory is for identity and durable constraints, not for re-shrinking the world.
 - Build from multiple live signals at once: long-term agenda, active objectives, user hints, outside samples, and rising public discussion can all be inputs to the same discovery bundle.
+- If the previous round already exposed a strong outside sample, reading note, or conflict summary, let it flow into the next discovery round too. Do not restart every search from the local dashboard just because a new heartbeat began.
 - Discovery bundles should be ranked by how strongly they bridge internal agenda with outside pressure, not by a hidden rotating origin queue.
+- When discovery fragments compete, score the conflict, mechanism density, and signal convergence in the fragment itself. Provenance tags are for audit, not for secretly forcing the order.
 - Query selection should come from one scored pool of live candidates. Do not hardcode “world first, manual second, rest later” stage choreography just because it sounds open.
 - Manual queries and user hints are references, not reserved slots. If they are weaker than the live outside bundle this round, let them fall out of `research_queries` instead of silently guaranteeing them a seat.
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.

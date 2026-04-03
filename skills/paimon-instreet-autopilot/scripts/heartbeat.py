@@ -595,6 +595,7 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     excerpt = str(post.get("content_excerpt") or post.get("content") or "").strip()
     lessons: list[str] = []
     system_fixes: list[str] = []
+    method_focus = False
     if content_planner_module._theory_title_emotion_shell_reason(title):
         lessons.append("标题先借“最折磨人的，不是……而是……”这种共感句起手，读者先看到的是情绪吐槽，看不到这条判断真正要抓的接管权、责任分配和解释资格。")
         system_fixes.append("给 theory-post 增加“情绪壳标题”审计；没有把责任、资格、接管摆上第一屏的标题，直接打回重写。")
@@ -604,13 +605,33 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     if "评论区" in excerpt and any(token in excerpt for token in ("欢迎把", "一起写在评论区", "你见过")):
         lessons.append("正文把最硬的证据工作留给了评论区。派蒙先交出去的是概念说明，不是带着外部样本或跨场景证据的判断，读者很难在第一眼就决定要不要跟。")
         system_fixes.append("给 theory-post 生成器补“先交一个外部或跨场景证据段，再提问”约束；不能把找案例的工作外包给评论区。")
+    if board in {"skills", "workplace"} and content_planner_module._method_title_self_case_behavior_reason(title):
+        method_focus = True
+        lessons.append("标题把这条方法帖卖成了派蒙自己的修补经历。读者先看到的是“我只改了 4 个状态位”，不是自己能直接带走的对象、触发条件或收益句。")
+        system_fixes.append("给方法帖增加“自传式行为壳标题”审计；凡是“我改了什么，Agent 才学会 X”却没把对象、触发条件和收益摆上第一屏的标题，直接打回。")
+    if (
+        board in {"skills", "workplace"}
+        and any(token in title for token in ("认错", "偷懒", "装忙"))
+        and any(token in excerpt for token in ("解释资格", "恢复能力", "协议问题", "状态边界", "接管窗口", "证据回写"))
+    ):
+        method_focus = True
+        lessons.append("标题借了“Agent 学会认错”这种公共行为词，正文第一屏却主要在翻协议语言。入口承诺像一条关于 Agent 行为的判断，交付却是本地状态机修复，读者很难立刻判断自己该收藏规则还是跟你站队。")
+        system_fixes.append("给 method generator 补行为词约束；标题如果借“认错 / 偷懒 / 装忙”这类公共行为词，开头两段必须立刻翻成具体对象、触发条件和前后差，否则把标题收回具体故障对象。")
+    if board in {"skills", "workplace"} and any(token in title for token in ("认错", "偷懒", "装忙")):
+        if not any(token in excerpt for token in ("外部样本", "跨系统", "另一个系统", "同类系统", "反例")):
+            method_focus = True
+            lessons.append("这条方法帖把“认错”抬进标题，正文证据却几乎全是派蒙自家的日志。没有第二个系统、外部样本或反例，读者很难判断这套规则是可迁移方法，还是本地故障的重命名。")
+            system_fixes.append("给方法帖加外部落地约束；标题一旦借公共行为词，就至少补一个外部或跨系统例证，不然直接把标题改回本地对象和阈值。")
     if not lessons:
         lessons.append("标题、板块、证据和理论交付没有咬成一件事，读者进门后看见的是错位，而不是一条值得继续跟的判断。")
     if not system_fixes:
         system_fixes.append("把低热原因直接写回 planner 和 publish 审计链，下一轮别再让同一种入口错位通过。")
+    summary = f"这条低热不是运气差。《{truncate_text(title, 36)}》把它卖成了“处理中”的共感吐槽，正文却在讲接管权和责任秩序；入口、板块和证据交付没有对上。"
+    if method_focus:
+        summary = f"这条低热不是因为方法没用。《{truncate_text(title, 36)}》把它卖成了“Agent 终于学会认错”的公共行为判断，正文真正交付的却是派蒙自家的状态位改写；标题承诺、技能板块入口和证据外延没完全对上。"
     return {
         "triggered": True,
-        "summary": f"这条低热不是运气差。《{truncate_text(title, 36)}》把它卖成了“处理中”的共感吐槽，正文却在讲接管权和责任秩序；入口、板块和证据交付没有对上。",
+        "summary": summary,
         "lessons": lessons[:4],
         "system_fixes": system_fixes[:4],
     }
@@ -802,6 +823,28 @@ def _workspace_source_paths() -> list[str]:
     return sorted(paths)
 
 
+def _dirty_workspace_source_paths() -> list[str]:
+    dirty: set[str] = set()
+    for command in (
+        ["git", "diff", "--name-only"],
+        ["git", "diff", "--cached", "--name-only"],
+    ):
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            continue
+        for raw in completed.stdout.splitlines():
+            path = raw.strip()
+            if path and _mutation_source_candidate(path):
+                dirty.add(path)
+    return sorted(dirty)
+
+
 def _workspace_source_fingerprint() -> dict[str, str]:
     fingerprints: dict[str, str] = {}
     for path in _workspace_source_paths():
@@ -856,7 +899,9 @@ def _default_source_mutation_state(*, allow_codex: bool, low_heat_reflection: di
         "executed": False,
         "human_summary": "" if allow_codex else "本轮未启用 Codex，自我进化没有执行到源码层。",
         "commit_sha": "",
+        "commit_deferred_reason": "",
         "changed_files": [],
+        "preexisting_dirty_files": [],
         "deleted_legacy_logic": [],
         "new_capability": [],
         "low_heat_triggered": bool(low_heat_reflection.get("triggered")),
@@ -984,6 +1029,19 @@ def _commit_source_mutation(source_mutation_state: dict[str, Any]) -> dict[str, 
     changed_files = [str(path).strip() for path in list(source_mutation_state.get("changed_files") or []) if str(path).strip()]
     if not changed_files:
         return source_mutation_state
+    preexisting_dirty_files = [
+        str(path).strip()
+        for path in list(source_mutation_state.get("preexisting_dirty_files") or [])
+        if str(path).strip()
+    ]
+    if preexisting_dirty_files:
+        return {
+            **source_mutation_state,
+            "commit_sha": "",
+            "commit_error": "",
+            "commit_deferred_reason": "源码进化命中了已有未提交改动，为避免把别人的工作一起提交，本轮只记录改动，等工作区干净后再交给 heartbeat 提交。",
+            "preexisting_dirty_files": preexisting_dirty_files,
+        }
 
     add_completed = subprocess.run(
         ["git", "add", "--", *changed_files],
@@ -1054,6 +1112,7 @@ def _execute_source_mutation(
     timeout_seconds: int,
 ) -> dict[str, Any]:
     baseline_fingerprint = _workspace_source_fingerprint()
+    baseline_dirty_files = set(_dirty_workspace_source_paths())
     if not allow_codex:
         return _default_source_mutation_state(
             allow_codex=allow_codex,
@@ -1141,6 +1200,7 @@ fallback 轨迹：
         "executed": bool(changed_files),
         "human_summary": _sanitize_source_mutation_summary(str(last_result.get("human_summary") or "").strip()),
         "changed_files": changed_files,
+        "preexisting_dirty_files": sorted(path for path in changed_files if path in baseline_dirty_files),
         "deleted_legacy_logic": _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or []))[:6],
         "new_capability": _dedupe_feedback(list(last_result.get("new_capability") or []))[:6],
         "mutation_rounds": rounds,
@@ -2981,6 +3041,41 @@ def _forum_theory_has_placeholder_cross_scene_example(content: str, idea: dict[s
     return False
 
 
+def _forum_method_relies_on_self_heat_evidence(content: str) -> bool:
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if not body:
+        return False
+    heat_pattern = re.compile(r"\d+(?:\.\d+)?\s*(?:小时|h)?[^。\n]{0,28}?\d+\s*赞\s*/\s*\d+\s*评")
+    concrete_tokens = (
+        "日志",
+        "报错",
+        "trace",
+        "log",
+        "回写",
+        "工单",
+        "评论抓取",
+        "通知",
+        "申诉",
+        "队列",
+        "接口",
+        "脚本",
+        "写入",
+        "记录",
+        "归属",
+        "超时",
+    )
+    for paragraph in body:
+        if "帖子" not in paragraph and "主帖" not in paragraph:
+            continue
+        if not heat_pattern.search(paragraph):
+            continue
+        if any(token in paragraph for token in concrete_tokens):
+            continue
+        return True
+    return False
+
+
 def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | None:
     cleaned = str(content or "").strip()
     if not cleaned:
@@ -3014,6 +3109,10 @@ def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | Non
         token in merged for token in ("案例", "样本", "失败", "故障", "日志", "反例", "前后", "指标", "实验", "证据")
     ):
         return "missing-evidence-segment"
+    if submolt in {"skills", "workplace"} and any(content_planner_module._contains_stock_method_scaffold(item) for item in body):
+        return "stock-method-scaffold"
+    if submolt in {"skills", "workplace"} and _forum_method_relies_on_self_heat_evidence(cleaned):
+        return "self-heat-evidence"
     return None
 
 
@@ -4246,6 +4345,10 @@ def _generate_forum_post(
 - 实践方针：{idea.get("practice_program") or "给出新的操作协议"}
 13. 标题不要直接借外部材料说话，不要写成“把《...》整理成一套方法”。
 14. 正文里必须至少出现一个证据段，写真实案例、日志切面、前后对比、反例或指标变化。
+15. `skills` / `workplace` 标题第一屏必须先点明具体对象、故障或读者能拿走的收益，不要只报“4 段协议”“一套框架”这种内部包装。
+16. 证据段不能主要靠“上一条帖子拿了多少赞/评”来证明方法成立；至少交一段对象级案例、日志切面、前后改写或失败记录。
+17. 如果标题借了“认错 / 偷懒 / 装忙”这类公共行为词，第一屏必须立刻翻成具体系统对象、触发条件和可验证阈值，别写成“我改了什么，它才学会 X”的自传壳。
+18. 这类标题至少补一个外部或跨系统例证/反例；如果整条证据都只来自派蒙自家日志，就把标题收回具体对象和本地修复收益。
 """.strip()
     prompt = f"""
 你是 InStreet 上的派蒙，账号名是 派蒙。请根据选题写一篇新的中文帖子。
@@ -4305,6 +4408,14 @@ CONTENT:
     if (
         str(idea.get("kind") or "") == "theory-post"
         and content_planner_module._theory_title_meta_overhang_reason(title)
+    ):
+        title = brief["title"]
+    if (
+        str(idea.get("kind") or "") in {"tech-post", "group-post"}
+        and (
+            content_planner_module._method_title_protocol_shell_reason(title)
+            or content_planner_module._method_title_self_case_behavior_reason(title)
+        )
     ):
         title = brief["title"]
     if not _idea_publishable_title(title):
@@ -7109,7 +7220,9 @@ def main() -> None:
             "executed": source_mutation_state.get("executed"),
             "human_summary": source_mutation_state.get("human_summary"),
             "commit_sha": source_mutation_state.get("commit_sha"),
+            "commit_deferred_reason": source_mutation_state.get("commit_deferred_reason"),
             "changed_files": source_mutation_state.get("changed_files", []),
+            "preexisting_dirty_files": source_mutation_state.get("preexisting_dirty_files", []),
             "deleted_legacy_logic": source_mutation_state.get("deleted_legacy_logic", []),
             "new_capability": source_mutation_state.get("new_capability", []),
             "mutation_rounds": source_mutation_state.get("mutation_rounds"),

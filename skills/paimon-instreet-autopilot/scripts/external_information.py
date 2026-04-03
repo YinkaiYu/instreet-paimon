@@ -135,8 +135,6 @@ DISCOVERY_AGENDA_THEME_TOKENS = (
     "修复",
     "队列",
 )
-DISCOVERY_WORLD_ORIGINS = {"world-sample", "community", "competitor"}
-DISCOVERY_LOCAL_ORIGINS = {"agenda", "objective", "hint", "interest"}
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -622,6 +620,45 @@ def _world_sample_fragments(items: list[dict[str, Any]], *, limit: int = 12) -> 
     return fragments[:limit]
 
 
+def _previous_external_fragments(*, limit: int = 12) -> list[str]:
+    state = read_json(EXTERNAL_INFORMATION_PATH, default={})
+    if not isinstance(state, dict):
+        return []
+    candidate_items: list[dict[str, Any]] = []
+    for key in (
+        "world_signal_snapshot",
+        "selected_readings",
+        "reading_notes",
+        "raw_candidates",
+        "open_web_results",
+        "manual_web_sources",
+        "community_breakouts",
+        "github_projects",
+        "prl_papers",
+        "conference_papers",
+        "crossref_recent",
+        "arxiv_preprints",
+    ):
+        for item in list(state.get(key) or []):
+            if isinstance(item, dict):
+                candidate_items.append(item)
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for fragment in _context_fragments_from_items(
+        candidate_items,
+        field_names=("relevance_note", "summary", "excerpt", "note", "title"),
+        limit=max(limit * 4, 18),
+    ):
+        normalized = _normalize_query_fragment(fragment)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        fragments.append(fragment)
+        if len(fragments) >= limit:
+            return fragments
+    return fragments
+
+
 def _memory_objective_fragments(*, limit: int = 10) -> list[str]:
     payload = read_json(MEMORY_STORE_PATH, default={})
     items: list[dict[str, Any]] = []
@@ -666,23 +703,42 @@ def _looks_like_source_title_shell(fragment: str) -> bool:
     return False
 
 
+def _discovery_origin_convergence_bonus(origins: list[str]) -> float:
+    unique_origins = {str(item).strip() for item in origins if str(item).strip()}
+    if len(unique_origins) <= 1:
+        return 0.0
+    return min(len(unique_origins), 4) * 0.11
+
+
 def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
-    origin_set = {str(item).strip() for item in origins if str(item).strip()}
     compact = re.sub(r"\s+", "", str(fragment or ""))
     lowered = compact.lower()
     score = _fragment_specificity_score(fragment)
-    world_hits = origin_set & DISCOVERY_WORLD_ORIGINS
-    local_hits = origin_set & DISCOVERY_LOCAL_ORIGINS
     if any(token in compact for token in ("为什么", "如何", "谁", "何时", "不是", "而是")):
         score += 0.2
     if re.search(r"\d", compact):
         score += 0.12
-    if world_hits:
-        score += 0.18
-    if world_hits and local_hits:
+    score += _discovery_origin_convergence_bonus(origins)
+    if any(
+        token in compact or token in lowered
+        for token in (
+            "governance",
+            "audit",
+            "protocol",
+            "waiting",
+            "memory",
+            "queue",
+            "handoff",
+            "accountability",
+            "治理",
+            "制度",
+            "等待",
+            "接管",
+            "责任",
+            "边界",
+        )
+    ):
         score += 0.14
-    if any(token in lowered for token in ("governance", "audit", "protocol", "waiting", "memory")):
-        score += 0.1
     if _looks_like_source_title_shell(fragment):
         score -= 0.55
     return round(score, 3)
@@ -923,23 +979,34 @@ def _query_candidate_score(
     if not cleaned:
         return float("-inf")
     origin_set = {str(item).strip() for item in list(origins or []) if str(item).strip()}
-    world_hits = origin_set & DISCOVERY_WORLD_ORIGINS
-    local_hits = origin_set & DISCOVERY_LOCAL_ORIGINS
     score = float(bundle_score or 0.0) - position * 0.08
     if direct_reference:
         score += DIRECT_REFERENCE_QUERY_BONUS
-    if world_hits:
-        score += 0.22
-    if world_hits and local_hits:
-        score += 0.08
-    if origin_set and not world_hits and origin_set <= DISCOVERY_LOCAL_ORIGINS:
-        score -= 0.3
+    score += _discovery_origin_convergence_bonus(list(origin_set))
     if len(cleaned) >= 8:
         score += 0.12
     if len(cleaned) >= 18:
         score += 0.08
     if re.search(r"[\u3400-\u9fff]", cleaned):
         score += 0.12
+    if any(
+        token in cleaned or token in cleaned.lower()
+        for token in (
+            "治理",
+            "制度",
+            "等待",
+            "接管",
+            "责任",
+            "边界",
+            "queue",
+            "handoff",
+            "audit",
+            "accountability",
+            "workflow",
+            "coordination",
+        )
+    ):
+        score += 0.14
     if _looks_like_source_title_shell(cleaned):
         score -= 0.55
     return round(score, 3)
@@ -1059,6 +1126,7 @@ def _discovery_query_bundles(
         ),
         "world-sample": _world_sample_fragments(community_hot_posts, limit=6)
         + _world_sample_fragments(competitor_watchlist, limit=6),
+        "outside-memory": _previous_external_fragments(limit=10),
     }
     ranked_fragments = _ranked_discovery_fragments(
         origin_pools,

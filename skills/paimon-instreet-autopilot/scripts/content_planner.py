@@ -519,6 +519,22 @@ METHOD_TITLE_FAILURE_OR_PAYOFF_TOKENS = (
     "更快",
     "更准",
 )
+METHOD_TITLE_BEHAVIOR_TOKENS = (
+    "认错",
+    "偷懒",
+    "装忙",
+    "装死",
+    "撒谎",
+    "道歉",
+)
+METHOD_TITLE_SELF_CASE_TOKENS = (
+    "我只改了",
+    "我改了",
+    "我把",
+    "我才让",
+    "我才把",
+    "我才",
+)
 LEGACY_STATE_ALIASES = {
     "external_information": "high_quality_sources",
     "source_mutation_state": "source_evolution_state",
@@ -1929,6 +1945,21 @@ def _method_title_protocol_shell_reason(title: str) -> str:
     return "方法帖标题还在先报协议壳，没有先点明具体对象、故障或读者能拿走的收益。"
 
 
+def _method_title_self_case_behavior_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not _contains_any(title_text, METHOD_TITLE_BEHAVIOR_TOKENS):
+        return ""
+    if not _contains_any(title_text, METHOD_TITLE_SELF_CASE_TOKENS):
+        return ""
+    if _contains_any(title_text, METHOD_TITLE_CONCRETE_OBJECT_TOKENS):
+        return ""
+    if re.search(r"(阈值|待接管|回写|日志|队列|接口|评论|申诉|缓存|检索|监测|工单|权限|超时)", title_text):
+        return ""
+    return "方法帖标题还在拿派蒙自己的修补经历当门口，读者先看到的是“我改了什么”，不是自己能带走的对象、触发条件或收益。"
+
+
 def _idea_source_signal_fragments(idea: dict[str, Any], *, limit: int = 8) -> list[str]:
     fragments: list[str] = []
     seen: set[str] = set()
@@ -3008,6 +3039,8 @@ def _audit_generated_idea(
         failure_reason = surface_reason
     elif kind in {"tech-post", "group-post"} and (method_title_reason := _method_title_protocol_shell_reason(str(audited.get("title") or ""))):
         failure_reason = method_title_reason
+    elif kind in {"tech-post", "group-post"} and (self_case_reason := _method_title_self_case_behavior_reason(str(audited.get("title") or ""))):
+        failure_reason = self_case_reason
     elif title_scene_overhang:
         failure_reason = (
             "标题还在拿外部场景当门口："
@@ -3512,6 +3545,31 @@ def _external_world_score(
     return round(score, 3)
 
 
+def _external_candidate_can_anchor_world_lane(
+    item: dict[str, Any],
+    *,
+    relevance_score: float,
+    evidence_hint: str,
+    world_score: float,
+) -> bool:
+    if relevance_score >= 0.55 or world_score >= 0.95:
+        return True
+    if evidence_hint:
+        return True
+    summary = str(
+        item.get("relevance_note")
+        or item.get("summary")
+        or item.get("abstract")
+        or item.get("excerpt")
+        or item.get("note")
+        or ""
+    ).strip()
+    structural_hits = sum(1 for token in EXTERNAL_THEME_KEYWORD_FRAGMENTS if token in summary.lower() or token in summary)
+    if structural_hits >= 3 and len(summary) >= 80:
+        return True
+    return _external_signal_strength(item) >= 0.45 and len(summary) >= 120
+
+
 def _community_hot_board_scores(posts: list[dict[str, Any]]) -> Counter[str]:
     scores: Counter[str] = Counter()
     for item in posts[:6]:
@@ -3688,8 +3746,6 @@ def _dynamic_opportunities(
         title = str(item.get("title") or "").strip()
         family = str(item.get("family") or "").strip() or "external"
         relevance_score = _external_candidate_relevance(item, signal_summary)
-        if family in ACADEMIC_EXTERNAL_FAMILIES and relevance_score < 0.7:
-            continue
         profile = _external_family_profile(family)
         signal_type = str(profile.get("signal_type") or family)
         summary_source = str(
@@ -3711,6 +3767,13 @@ def _dynamic_opportunities(
             relevance_score=relevance_score,
             evidence_hint=evidence_hint,
         )
+        if family in ACADEMIC_EXTERNAL_FAMILIES and not _external_candidate_can_anchor_world_lane(
+            item,
+            relevance_score=relevance_score,
+            evidence_hint=evidence_hint,
+            world_score=world_score,
+        ):
+            continue
         for track, track_profile in (profile.get("tracks") or {}).items():
             track_bonus = {
                 ("community-breakout", "theory"): 0.5,
@@ -4136,6 +4199,8 @@ def _generate_codex_ideas(
 36. 如果 `theory-post` 已经把判断抬到制度、秩序、资格重排这一层，`source_signals` 不能只剩一个局部现场；要么补第二个外部/跨场景证据，要么主动缩小结论。
 37. `practice_program` 不能再用“把判断边界、证据入口、接管窗口、纠错责任写实”这种通用收尾，必须点名本题对象、接手时点和复核动作。
 38. 不要再用“最折磨人的，不是……而是……”这类情绪壳给 `theory-post` 起题，除非标题第一屏已经明确写出谁在失去资格、谁在承担代价或谁在接管。
+39. `tech-post` / `group-post` 如果借了“认错 / 偷懒 / 装忙”这类公共行为词，标题第一屏必须先交具体系统对象、触发条件或可测收益；不要再写成“我只改了什么，它才学会 X”的自传式壳子。
+40. 这类行为词标题如果拿不出一个外部或跨系统证据入口，就把标题收回具体故障对象和本地收益，不要让 `Agent` 的笼统人格词占住门面。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}

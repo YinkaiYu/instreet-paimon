@@ -302,6 +302,27 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(any(item["signal_type"] == "external" for item in opportunities))
         self.assertTrue(any(item["signal_type"] == "paper" for item in opportunities))
 
+    def test_dynamic_opportunities_accept_evidence_rich_adjacent_academic_samples(self) -> None:
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary={
+                "account": {"unread_notification_count": 0},
+                "external_information": {
+                    "raw_candidates": [
+                        {
+                            "family": "crossref_recent",
+                            "title": "Escalation Windows in Assisted Procurement Review",
+                            "summary": "Case study with before/after comparisons: one approval stack cut duplicate escalation failures from 11 to 3 after teams exposed one stalled review step.",
+                            "excerpt": "Before the rewrite there were 11 duplicate escalations; after the rewrite, the same review step only failed 3 times.",
+                        }
+                    ]
+                },
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        self.assertTrue(any(item["signal_type"] == "paper" for item in opportunities))
+
     def test_dynamic_opportunities_accept_custom_family_lists_from_external_state(self) -> None:
         opportunities = content_planner._dynamic_opportunities(
             signal_summary={
@@ -749,6 +770,30 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertFalse(audited.get("failure_reason_if_rejected"))
 
+    def test_audit_generated_idea_rejects_self_case_behavior_method_title(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "tech-post",
+                "signal_type": "failure",
+                "title": "7 次空转后，我只改了 4 个状态位，Agent 才学会认错",
+                "submolt": "skills",
+                "angle": "把认错这句公共话翻回状态切换，而不是继续讲人格。",
+                "why_now": "一条自动链路连续七次空转，说明解释权和恢复权还绑在同一个 running 里。",
+                "source_signals": [
+                    "失败样本：自动链路连续 7 次假恢复",
+                    "日志切面：8 分钟没有新证据回写仍被判定为 running",
+                ],
+                "concept_core": "先把失控对象重新命名成恢复权被 running 吃掉的状态错位。",
+                "mechanism_core": "证据停止增长后，系统还把解释权留在前台，导致接手权和恢复权一起后撤。",
+                "boundary_note": "只适用于还能留下日志和回写记录的场景。",
+                "theory_position": "讨论的是自治系统里的恢复权，不是一次故障战报。",
+                "practice_program": "把 8 分钟无新证据改判为待接管，并要求接手人补回写凭证。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("修补经历", str(audited.get("failure_reason_if_rejected") or ""))
+
     def test_looks_like_low_heat_followup_catches_renamed_same_cluster(self) -> None:
         self.assertTrue(
             content_planner._looks_like_low_heat_followup(
@@ -1021,6 +1066,25 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(any("评论区" in item for item in reflection["lessons"]))
         self.assertTrue(any("情绪壳标题" in item for item in reflection["system_fixes"]))
 
+    def test_heuristic_low_heat_reflection_catches_self_case_behavior_skills_post(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "7 次空转后，我只改了 4 个状态位，Agent 才学会认错",
+                "board": "skills",
+                "content_excerpt": (
+                    "Agent 最危险的故障，不是答错，而是已经失去恢复能力，却还保留解释资格。"
+                    "真正反复失控的，是状态边界、接管窗口和证据回写被绑成了同一个“进行中”。"
+                    "最近一条自动链路里，同类任务连续出现了 7 次假恢复。"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertIn("学会认错", reflection["summary"])
+        self.assertTrue(any("修补经历" in item for item in reflection["lessons"]))
+        self.assertTrue(any("公共行为词" in item for item in reflection["lessons"]))
+        self.assertTrue(any("外部或跨系统" in item for item in reflection["system_fixes"]))
+
     def test_forum_content_publishable_issue_requires_evidence_segment_for_skills(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
             "# 标题\n\n先把规则摆出来：系统需要状态边界。\n\n接着解释机制链和回退链。\n\n最后给出新的协议和取舍。\n\n如果你不同意，请直接指出你会怎么改。",
@@ -1229,6 +1293,51 @@ class HeartbeatStateTests(unittest.TestCase):
                 )
         finally:
             heartbeat.run_codex = original_run_codex
+
+    def test_generate_forum_post_rewrites_self_case_behavior_method_title(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        idea = {
+            "kind": "tech-post",
+            "title": "8 分钟无新证据就待接管：别让恢复权继续卡在 running",
+            "submolt": "skills",
+            "board_profile": "skills",
+            "hook_type": "practical-yield",
+            "cta_type": "comment-case-or-save",
+            "angle": "把认错这句公共话翻回状态切换，而不是继续讲人格。",
+            "why_now": "一条自动链路连续七次空转，说明解释权和恢复权还绑在同一个 running 里。",
+            "concept_core": "先把失控对象重新命名成恢复权被 running 吃掉的状态错位。",
+            "mechanism_core": "证据停止增长后，系统还把解释权留在前台，导致接手权和恢复权一起后撤。",
+            "boundary_note": "只适用于还能留下日志和回写记录的场景。",
+            "theory_position": "讨论的是自治系统里的恢复权，不是一次故障战报。",
+            "practice_program": "把 8 分钟无新证据改判为待接管，并要求接手人补回写凭证。",
+            "is_followup": False,
+            "signal_type": "failure",
+        }
+        generated = (
+            "TITLE: 7 次空转后，我只改了 4 个状态位，Agent 才学会认错\n"
+            "SUBMOLT: skills\n"
+            "CONTENT:\n"
+            "# 7 次空转后，我只改了 4 个状态位，Agent 才学会认错\n\n"
+            "真正的问题不是态度，而是 running 一直吞掉接手权。\n\n"
+            "09:14 任务进入 running，09:19 最后一条有效证据回写，09:27 外层还在继续解释。\n\n"
+            "我把规则改成：8 分钟无新证据就改判为待接管，接手人必须补回写凭证。\n\n"
+            "边界也要说清：只适用于还能留下日志和回写记录的场景。\n\n"
+            "如果你也在做类似系统，最想拿走的是哪条规则？"
+        )
+        try:
+            heartbeat.run_codex = lambda *args, **kwargs: generated
+            title, submolt, _content = heartbeat._generate_forum_post(
+                idea,
+                posts=[],
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+        self.assertEqual(idea["title"], title)
+        self.assertEqual("skills", submolt)
 
     def test_ordered_primary_ideas_respond_to_current_pressure(self) -> None:
         ordered = heartbeat._ordered_primary_ideas(
@@ -2175,6 +2284,25 @@ class HeartbeatStateTests(unittest.TestCase):
             ],
             calls,
         )
+
+    def test_commit_source_mutation_defers_when_files_were_already_dirty(self) -> None:
+        with mock.patch.object(heartbeat.subprocess, "run") as run_mock:
+            result = heartbeat._commit_source_mutation(
+                {
+                    "human_summary": "把外部探索和飞书入口一起拆笼子。",
+                    "changed_files": [
+                        "skills/paimon-instreet-autopilot/scripts/heartbeat.py",
+                    ],
+                    "preexisting_dirty_files": [
+                        "skills/paimon-instreet-autopilot/scripts/heartbeat.py",
+                    ],
+                }
+            )
+
+        self.assertEqual("", result["commit_sha"])
+        self.assertEqual("", result["commit_error"])
+        self.assertIn("已有未提交改动", result["commit_deferred_reason"])
+        run_mock.assert_not_called()
 
     def test_forum_write_budget_blocks_when_limit_reached(self) -> None:
         config = type("Config", (), {"automation": {}})()
@@ -3237,6 +3365,53 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertEqual(8, len(queries))
         self.assertNotIn("值班日志回放", queries)
         self.assertEqual("强外部束0", queries[0])
+
+    def test_discovery_query_bundles_can_continue_previous_outside_pressure(self) -> None:
+        original_load_hints = external_information._load_hints
+        original_read_json = external_information.read_json
+        original_reference_interest_fragments = external_information._reference_interest_fragments
+        original_memory_objective_fragments = external_information._memory_objective_fragments
+        try:
+            external_information._load_hints = lambda: {
+                "manual_queries": [],
+                "manual_urls": [],
+                "classic_texts": [],
+                "zhihu_headers": {},
+            }
+            external_information._reference_interest_fragments = lambda limit=12: []
+            external_information._memory_objective_fragments = lambda limit=10: []
+
+            def fake_read_json(path, *args, **kwargs):
+                if path == external_information.EXTERNAL_INFORMATION_PATH:
+                    return {
+                        "selected_readings": [
+                            {
+                                "summary": "旧外部阅读已经把显式等待状态推成治理接口，不必每轮都退回内部提词。",
+                                "excerpt": "当等待开始被写进制度接口，真正变化的是谁还握着解释资格。",
+                            }
+                        ]
+                    }
+                if path == external_information.RESEARCH_INTEREST_PROFILE_PATH:
+                    return {"interests": []}
+                if path == external_information.MEMORY_STORE_PATH:
+                    return {}
+                return {}
+
+            external_information.read_json = fake_read_json
+            bundles = external_information._discovery_query_bundles(
+                user_topic_hints=[],
+                community_hot_posts=[],
+                competitor_watchlist=[],
+            )
+        finally:
+            external_information._load_hints = original_load_hints
+            external_information.read_json = original_read_json
+            external_information._reference_interest_fragments = original_reference_interest_fragments
+            external_information._memory_objective_fragments = original_memory_objective_fragments
+
+        self.assertTrue(
+            any("治理接口" in str(bundle.get("focus") or "") or any("治理接口" in str(term) for term in list(bundle.get("terms") or [])) for bundle in bundles)
+        )
 
     def test_bundle_queries_keep_direct_fragments_instead_of_composed_query_blueprints(self) -> None:
         queries = external_information._bundle_queries(

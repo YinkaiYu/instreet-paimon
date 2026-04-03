@@ -34,15 +34,17 @@
 8. If the previous reply completed more than one hour ago and the new message does not explicitly reference an old Feishu message, the gateway archives the old Codex thread and starts a new one.
 9. If the new Feishu message replies to or references an older mapped message, the gateway resumes that older Codex thread even after the idle timeout. Explicit text such as `续上这个thread` also reuses the referenced or most recent mapped thread instead of opening a fresh one.
 10. Before each new turn, the gateway refreshes `state/current` with a live snapshot so Codex sees fresh InStreet state instead of stale cache.
-11. The turn input injects the live probe summary and unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not the default memory surface.
-12. Work-in-progress updates are sent as ordinary Feishu text messages, using newline-first chunking so bullet lists and short paragraphs do not get split into awkward fragments.
-13. Progress and final reports should foreground the strongest current pressure point, world signal, or repair result rather than mechanically replaying a fixed checklist.
-14. The final Feishu wrap-up should usually end with one strongest next step, not a ceremonial three-item script. Extra carryover only belongs there when it materially changes the decision surface, and multiple “next test points” only belong there when the user explicitly asks for them.
-15. Do not pad the report with source-family counts or faux coverage theater. If the outside world matters this round, point to the concrete signal, not the catalog.
-16. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
-17. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
-18. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
-19. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
+11. The turn input should treat `AGENTS.md` as top memory, then the relevant skills/references, then the unified memory snapshot from `state/current/memory_store.json`; old raw chat history is not the default memory surface.
+12. `config/paimon.json` is runtime config, not a personality source or topic seed. Do not let config keys replace the memory hierarchy.
+13. Work-in-progress updates are sent as ordinary Feishu text messages, using newline-first chunking so bullet lists and short paragraphs do not get split into awkward fragments.
+14. Progress and final reports should foreground the strongest current pressure point, world signal, or repair result rather than mechanically replaying a fixed checklist.
+15. The final Feishu wrap-up should usually end with one strongest next step, not a ceremonial three-item script. Extra carryover only belongs there when it materially changes the decision surface, and multiple “next test points” only belong there when the user explicitly asks for them.
+16. Do not pad the report with source-family counts or faux coverage theater. If the outside world matters this round, point to the concrete signal, not the catalog.
+17. Notification counts, queues, and snapshot fields are operating pressure, not topics by themselves. They only deserve public language after they are tied to a failure chain, outside sample, or institutional conflict.
+18. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
+19. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
+20. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
+21. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 
