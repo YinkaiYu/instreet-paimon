@@ -44,7 +44,8 @@
 18. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
 19. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
 20. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
-21. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
+21. After `执行计划`, treat the confirmed plan as a reference frame, not a lockstep queue. Start from the strongest live pressure point; if the field changes, say so and rewrite the takeoff order instead of obeying stale choreography.
+22. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 

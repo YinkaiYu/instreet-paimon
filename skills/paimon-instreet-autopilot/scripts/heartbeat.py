@@ -46,7 +46,6 @@ from common import (
     record_forum_write_success as common_record_forum_write_success,
     queue_outbound_action,
     read_json,
-    runtime_subprocess_env,
     run_codex,
     run_codex_json,
     run_outbound_action,
@@ -596,6 +595,7 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     lessons: list[str] = []
     system_fixes: list[str] = []
     method_focus = False
+    source_overhang_focus = False
     if content_planner_module._theory_title_emotion_shell_reason(title):
         lessons.append("标题先借“最折磨人的，不是……而是……”这种共感句起手，读者先看到的是情绪吐槽，看不到这条判断真正要抓的接管权、责任分配和解释资格。")
         system_fixes.append("给 theory-post 增加“情绪壳标题”审计；没有把责任、资格、接管摆上第一屏的标题，直接打回重写。")
@@ -609,6 +609,14 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         method_focus = True
         lessons.append("标题把这条方法帖卖成了派蒙自己的修补经历。读者先看到的是“我只改了 4 个状态位”，不是自己能直接带走的对象、触发条件或收益句。")
         system_fixes.append("给方法帖增加“自传式行为壳标题”审计；凡是“我改了什么，Agent 才学会 X”却没把对象、触发条件和收益摆上第一屏的标题，直接打回。")
+    if board in {"skills", "workplace"} and ("那篇以 `" in excerpt or ("GitHub" in excerpt and "论文" in excerpt)):
+        source_overhang_focus = True
+        lessons.append("开头先把外部论文和项目页排成材料串，像研究摘抄，不像实验室方法帖。读者还没看见这次到底要接手哪个对象、改哪条链路，就先被样本名词堵在门口。")
+        system_fixes.append("给 group/skills 生成器补第一屏约束；先交实验对象、失败点和接手动作，外部样本只能放在中段证据段，不准再用“那篇以……开头的论文”起手。")
+    if board in {"skills", "workplace"} and sum(1 for token in ("状态链", "失败链", "证据链", "修复链") if token in excerpt) >= 3:
+        source_overhang_focus = True
+        lessons.append("正文又掉回“状态链 / 失败链 / 证据链 / 修复链”这套老目录。看起来像很完整，其实是在拿通用脚手架替代这次题目自己的实验方案。")
+        system_fixes.append("给 method/group 发布前校验补四段链路脚手架拦截；拆链只能服务当前对象，别再把四段标题当默认目录。")
     if (
         board in {"skills", "workplace"}
         and any(token in title for token in ("认错", "偷懒", "装忙"))
@@ -629,6 +637,8 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     summary = f"这条低热不是运气差。《{truncate_text(title, 36)}》把它卖成了“处理中”的共感吐槽，正文却在讲接管权和责任秩序；入口、板块和证据交付没有对上。"
     if method_focus:
         summary = f"这条低热不是因为方法没用。《{truncate_text(title, 36)}》把它卖成了“Agent 终于学会认错”的公共行为判断，正文真正交付的却是派蒙自家的状态位改写；标题承诺、技能板块入口和证据外延没完全对上。"
+    elif source_overhang_focus:
+        summary = f"这条低热不是因为对象不新。《{truncate_text(title, 36)}》先把外部论文和项目页摆到门口，正文又掉回四段旧脚手架；实验室帖该先交的对象、证据和接手动作，全被材料名词和模板目录抢走了。"
     return {
         "triggered": True,
         "summary": summary,
@@ -953,69 +963,6 @@ def _source_mutation_command(*, allow_codex: bool) -> list[str]:
     if allow_codex:
         cmd.append("--allow-codex")
     return cmd
-
-
-def _schedule_background_source_mutation(
-    *,
-    allow_codex: bool,
-    low_heat_reflection: dict[str, Any],
-) -> dict[str, Any]:
-    state = _default_source_mutation_state(
-        allow_codex=allow_codex,
-        low_heat_reflection=low_heat_reflection,
-    )
-    if not allow_codex:
-        return state
-
-    existing_pid = _existing_source_mutation_pid()
-    if existing_pid is not None:
-        write_json(
-            SOURCE_MUTATION_RUN_PATH,
-            {
-                "updated_at": now_utc(),
-                "status": "running",
-                "pid": existing_pid,
-                "error": "",
-            },
-        )
-        return {
-            **state,
-            "human_summary": "公开动作之后已有源码级进化在后台运行，本轮不重复拉起。",
-            "mode": "background",
-            "pending": True,
-            "scheduled_pid": existing_pid,
-        }
-
-    command = _source_mutation_command(allow_codex=allow_codex)
-    process = subprocess.Popen(
-        command,
-        cwd=REPO_ROOT,
-        env={
-            **runtime_subprocess_env(),
-            "PYTHONUNBUFFERED": "1",
-        },
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    write_json(
-        SOURCE_MUTATION_RUN_PATH,
-        {
-            "updated_at": now_utc(),
-            "status": "scheduled",
-            "pid": process.pid,
-            "command": command,
-            "scheduled_at": now_utc(),
-            "error": "",
-        },
-    )
-    return {
-        **state,
-        "human_summary": "公开动作完成后，源码级进化已转入后台执行。",
-        "mode": "background",
-        "pending": True,
-        "scheduled_pid": process.pid,
-    }
 
 
 def _source_mutation_commit_message(source_mutation_state: dict[str, Any]) -> str:
@@ -1907,6 +1854,13 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
     if block_reason:
         return -1000.0
     signals = plan.get("planning_signals") or {}
+    lane_strategy = plan.get("idea_lane_strategy") or {}
+    selected_kinds = [str(item).strip() for item in (lane_strategy.get("selected_kinds") or []) if str(item).strip()]
+    viable_selected_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in (plan.get("ideas") or [])
+        if str(item.get("kind") or "").strip() in selected_kinds and not _primary_block_reason(item)
+    }
     overrides = (plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {}
     preferred_kinds = [str(item) for item in (overrides.get("preferred_kinds") or []) if str(item)]
     unresolved_failures = signals.get("unresolved_failures") or []
@@ -1922,6 +1876,8 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
     score = _primary_diversity_bias(kind, cycle_state)
     score += _primary_live_pressure_bonus(kind, plan)
     score += min(max(innovation_score, 0.0) / 28.0, 4.0)
+    if viable_selected_kinds and kind not in viable_selected_kinds:
+        score -= 8.0
     if kind in preferred_kinds:
         score += max(0.0, 4.0 - preferred_kinds.index(kind))
     if overrides.get("enabled") and kind in {"theory-post", "tech-post"}:
@@ -3076,6 +3032,37 @@ def _forum_method_relies_on_self_heat_evidence(content: str) -> bool:
     return False
 
 
+def _forum_method_has_source_overhang_opening(content: str) -> bool:
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if not body:
+        return False
+    opening = "\n".join(body[:2])
+    ascii_spans = re.findall(r"`[^`\n]*[A-Za-z][^`\n]*`", opening)
+    external_hits = sum(
+        1
+        for token in ("论文", "项目", "页面", "仓库", "GitHub", "Sponsors", "开头的", "摘要")
+        if token in opening
+    )
+    if len(ascii_spans) >= 2 and external_hits >= 2:
+        return True
+    if opening.count("那篇以 `") >= 1 and external_hits >= 2:
+        return True
+    return False
+
+
+def _forum_method_has_chain_heading_scaffold(content: str) -> bool:
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    segments = paragraphs[1:] if paragraphs and paragraphs[0].startswith("#") else paragraphs
+    if not segments:
+        return False
+    hits = 0
+    for marker in ("状态链", "失败链", "证据链", "修复链"):
+        if any(paragraph.lstrip("# ").startswith(marker) for paragraph in segments):
+            hits += 1
+    return hits >= 3
+
+
 def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | None:
     cleaned = str(content or "").strip()
     if not cleaned:
@@ -3105,10 +3092,14 @@ def _forum_content_publishable_issue(content: str, *, submolt: str) -> str | Non
         token in merged for token in ("规则", "协议", "状态", "恢复", "修复", "边界", "回退", "取舍", "证据")
     ):
         return "missing-method-frame"
+    if submolt in {"skills", "workplace"} and _forum_method_has_source_overhang_opening(cleaned):
+        return "source-overhang-opening"
     if submolt in {"skills", "workplace"} and not any(
         token in merged for token in ("案例", "样本", "失败", "故障", "日志", "反例", "前后", "指标", "实验", "证据")
     ):
         return "missing-evidence-segment"
+    if submolt in {"skills", "workplace"} and _forum_method_has_chain_heading_scaffold(cleaned):
+        return "stock-method-scaffold"
     if submolt in {"skills", "workplace"} and any(content_planner_module._contains_stock_method_scaffold(item) for item in body):
         return "stock-method-scaffold"
     if submolt in {"skills", "workplace"} and _forum_method_relies_on_self_heat_evidence(cleaned):
@@ -3134,6 +3125,35 @@ def _ensure_forum_post_outro(
     if not extra_parts:
         return normalized
     return f"{normalized}\n\n" + "\n\n".join(extra_parts)
+
+
+def _method_fallback_section_headings(
+    idea: dict[str, Any],
+    *,
+    submolt: str,
+    for_group: bool = False,
+) -> dict[str, str]:
+    merged = "\n".join(
+        str(idea.get(field) or "").strip()
+        for field in ("title", "angle", "why_now", "mechanism_core", "practice_program")
+        if str(idea.get(field) or "").strip()
+    )
+    if any(token in merged for token in ("等待", "排队", "queue", "接手", "接管", "running")):
+        mechanism = "## 等待与接手是怎么断开的"
+    elif any(token in merged for token in ("日志", "trace", "报错", "error", "failure", "指标")):
+        mechanism = "## 日志把哪段断口照出来"
+    elif any(token in merged for token in ("协议", "回退", "回写", "阈值", "状态")):
+        mechanism = "## 协议和状态为什么会错位"
+    else:
+        mechanism = "## 关键机制"
+    practice = "## 实验方案" if for_group else ("## 复核动作" if submolt in {"skills", "workplace"} else "## 方法方针")
+    return {
+        "object": "## 先钉住对象",
+        "mechanism": mechanism,
+        "boundary": "## 使用边界",
+        "position": "## 这套方法该放在哪",
+        "practice": practice,
+    }
 
 
 def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
@@ -3172,12 +3192,12 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
         )
         content = "\n\n".join(parts)
     else:
+        headings = _method_fallback_section_headings(idea, submolt=submolt)
         lead = {
             "workplace": f"先给诊断：{idea['angle']}",
             "skills": f"这条不写成心得，我只保留能复用的方法。核心判断：{idea['angle']}",
             "square": f"先把问题摆前面：{idea['angle']}",
         }.get(submolt, f"先给诊断：{idea['angle']}")
-        method_header = "## 方法框架" if submolt in {"skills", "workplace"} else "## 方法方针"
         parts = [
             f"# {title}",
             lead,
@@ -3187,15 +3207,15 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
             parts.append(signal_block)
         parts.extend(
             [
-                "## 最小对象",
+                headings["object"],
                 brief["concept"],
-                "## 失败链 / 机制链",
+                headings["mechanism"],
                 brief["mechanism"],
-                "## 使用边界",
+                headings["boundary"],
                 brief["boundary"],
-                "## 系统位置",
+                headings["position"],
                 brief["position"],
-                method_header,
+                headings["practice"],
                 brief["practice"],
                 cta_line,
             ]
@@ -3214,6 +3234,7 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
     title = brief["title"]
     group_name = group.get("display_name") or group.get("name") or "小组"
     signal_block = _idea_signal_block(idea, heading="## 证据交叉点")
+    headings = _method_fallback_section_headings(idea, submolt="skills", for_group=True)
     parts = [
         f"# {title}",
         f"这条发在 {group_name}，不是记运行日报，而是把最容易失真的一段链路拆成可复用的方法框架。",
@@ -3224,15 +3245,15 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
         parts.append(signal_block)
     parts.extend(
         [
-            "## 最小对象",
+            headings["object"],
             brief["concept"],
-            "## 机制链",
+            headings["mechanism"],
             brief["mechanism"],
-            "## 使用边界",
+            headings["boundary"],
             brief["boundary"],
-            "## 系统位置",
+            headings["position"],
             brief["position"],
-            "## 方法框架",
+            headings["practice"],
             brief["practice"],
         ]
     )
@@ -4467,6 +4488,9 @@ CONTENT:
 - 理论位置：{idea.get("theory_position") or "说明它在系统失控学中的位置"}
 - 实践方针：{idea.get("practice_program") or "给出新的实验或治理协议"}
 9. 正文里必须至少出现一个证据段，写真实案例、日志切面、前后对比、反例或指标变化。
+10. 开头第一屏必须先交实验室里真正要接手的对象、失败点或收益，不准先枚举外部论文、英文摘要、GitHub 页面或 Sponsor 面板。
+11. 外部样本只能放在中段证据段，而且必须先翻成中文判断；不要写成“那篇以……开头的论文”这种材料串珠。
+12. 不要把全文拆成“状态链 / 失败链 / 证据链 / 修复链”四段老脚手架；如果要拆链，只能挑和本题最相关的一两段。
 
 小组名称：{group.get("display_name") or group.get("name")}
 小组描述：{group.get("description", "")}
@@ -6396,38 +6420,6 @@ def _truncate_failure_details(failure_details: list[dict[str, Any]], limit: int)
     return failure_details[: max(0, limit)]
 
 
-def _compose_core_progress_line(summary: dict[str, Any]) -> str:
-    actions = list(summary.get("actions") or [])
-    primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
-    primary_mode = str(summary.get("primary_publication_mode") or "none").strip()
-    primary_title = str(summary.get("primary_publication_title") or (primary.get("title") if primary else "") or "").strip()
-    runtime_stage_strategy = summary.get("runtime_stage_strategy") or {}
-    lead_stage = str(runtime_stage_strategy.get("lead") or "").strip()
-    comment_backlog = summary.get("comment_backlog") or {}
-    active_post_count = int(comment_backlog.get("active_post_count") or 0)
-    reply_count = int(comment_backlog.get("replied_count") or 0)
-    external_engagement_count = int(summary.get("external_engagement_count") or 0)
-    dm_reply_count = sum(1 for item in actions if item.get("kind") == "reply-dm")
-
-    if primary_mode == "pending-confirmation" and primary_title:
-        return f"发布待确认《{primary_title}》"
-    if primary:
-        if primary["kind"] == "publish-chapter":
-            return f"文学社新章节《{primary.get('title', '')}》"
-        if primary["kind"] == "create-group-post":
-            return f"小组帖《{primary.get('title', '')}》"
-        return f"主帖《{primary.get('title', '')}》"
-    if lead_stage == "reply-comments" and (reply_count or active_post_count):
-        if active_post_count > 0:
-            return f"评论维护，覆盖 {active_post_count} 个活跃讨论帖，已回复 {reply_count} 条"
-        return f"评论维护，已回复 {reply_count} 条"
-    if lead_stage == "engage-external" and external_engagement_count > 0:
-        return f"外部讨论切入，新增 {external_engagement_count} 条外部评论"
-    if lead_stage == "reply-dms" and dm_reply_count > 0:
-        return f"私信回复，已处理 {dm_reply_count} 个线程"
-    return "本轮没有新增公开写入，但已按当前最强压力点推进"
-
-
 def _compose_primary_status_line(summary: dict[str, Any]) -> str:
     actions = list(summary.get("actions") or [])
     primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
@@ -6576,17 +6568,42 @@ def _report_next_action_lines(summary: dict[str, Any], *, limit: int = 3) -> lis
     return [fallback] if fallback else []
 
 
+def _compose_source_mutation_line(source_mutation: dict[str, Any]) -> str:
+    summary = _sanitize_source_mutation_summary(str(source_mutation.get("human_summary") or ""))
+    commit_sha = str(source_mutation.get("commit_sha") or "").strip()
+    commit_error = str(source_mutation.get("commit_error") or "").strip()
+    commit_deferred_reason = str(source_mutation.get("commit_deferred_reason") or "").strip()
+    if commit_sha:
+        detail = f"改动已提交为 {commit_sha}"
+    elif commit_error:
+        detail = f"提交源码改动时卡住了：{truncate_text(commit_error, 72)}"
+    elif commit_deferred_reason:
+        detail = "工作区里还有未提交改动，这轮先记下源码进化结果，没把别人的工作一起提交"
+    else:
+        detail = ""
+    if summary and detail:
+        return f"{summary}{detail}。"
+    if summary:
+        return summary
+    if detail:
+        return f"{detail}。"
+    if source_mutation.get("executed"):
+        change_count = len(list(source_mutation.get("changed_files") or []))
+        if change_count > 0:
+            return f"本轮源码级进化已完成，共动了 {change_count} 处源码。"
+        return "本轮源码级进化已完成。"
+    if source_mutation.get("pending"):
+        return "源码级进化仍在运行，这轮没重复拉起。"
+    return ""
+
+
 def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -> str:
-    actions = summary.get("actions", [])
     comment_backlog = summary.get("comment_backlog", {})
     external_engagement_count = int(summary.get("external_engagement_count") or 0)
     visible_failures = [item for item in list(summary.get("failure_details", [])) if not _is_normal_mechanism_item(item)]
     failure_details = _truncate_failure_details(visible_failures, failure_detail_limit)
-    next_actions = summary.get("next_actions", [])
     source_mutation = summary.get("source_mutation") or {}
     low_heat_reflection = summary.get("low_heat_reflection") or {}
-    idea_lane_strategy = summary.get("idea_lane_strategy") or {}
-    runtime_stage_strategy = summary.get("runtime_stage_strategy") or {}
     external_observations = [
         item
         for item in list(summary.get("external_observations") or [])
@@ -6616,10 +6633,6 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     lines = [
         "派蒙心跳已完成。",
     ]
-    stage_rationale = str(runtime_stage_strategy.get("rationale") or "").strip()
-    if stage_rationale:
-        lines.append(f"起手判断：{stage_rationale}")
-    lines.append(f"核心推进：{_compose_core_progress_line(summary)}")
     primary_status_line = _compose_primary_status_line(summary)
     if primary_status_line:
         lines.append(primary_status_line)
@@ -6629,9 +6642,6 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
             for item in external_observations[:4]
         )
         lines.append(f"外部观察：{title_text}")
-    lane_rationale = str(idea_lane_strategy.get("rationale") or "").strip()
-    if lane_rationale:
-        lines.append(f"当前判断：{lane_rationale}")
     if low_heat_reflection.get("triggered"):
         low_heat_title = str(low_heat_reflection.get("title") or "").strip()
         low_heat_summary = str(low_heat_reflection.get("summary") or "").strip()
@@ -6640,7 +6650,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
                 lines.append(f"低热复盘：《{low_heat_title}》：{low_heat_summary}")
             else:
                 lines.append(f"低热复盘：{low_heat_summary}")
-    mutation_summary = _sanitize_source_mutation_summary(str(source_mutation.get("human_summary") or ""))
+    mutation_summary = _compose_source_mutation_line(source_mutation)
     if mutation_summary:
         lines.append(f"源码进化：{mutation_summary}")
     lines.append(interaction_line)
@@ -7139,10 +7149,7 @@ def main() -> None:
         end_overview,
         comparison_overview=((last_run_state.get("account_snapshot") or {}).get("finished") or {}),
     )
-    source_mutation_state = _schedule_background_source_mutation(
-        allow_codex=args.allow_codex,
-        low_heat_reflection=low_heat_reflection,
-    )
+    source_mutation_state = _run_source_mutation_worker(allow_codex=args.allow_codex)
 
     primary_visibility_confirmed = _confirm_primary_publication(primary_action) if args.execute else None
     if primary_action is not None:
@@ -7220,6 +7227,7 @@ def main() -> None:
             "executed": source_mutation_state.get("executed"),
             "human_summary": source_mutation_state.get("human_summary"),
             "commit_sha": source_mutation_state.get("commit_sha"),
+            "commit_error": source_mutation_state.get("commit_error"),
             "commit_deferred_reason": source_mutation_state.get("commit_deferred_reason"),
             "changed_files": source_mutation_state.get("changed_files", []),
             "preexisting_dirty_files": source_mutation_state.get("preexisting_dirty_files", []),

@@ -4,6 +4,7 @@ import fs from "node:fs";
 
 import {
   buildCodexPrompt,
+  buildPlanExecutionInput,
   buildFeishuContextBlock,
   buildPlanCompletionCard,
   buildQuestionAnswerPayload,
@@ -99,6 +100,12 @@ test("normalizePlanActionDecision recognizes execute and continue replies", () =
   assert.equal(normalizePlanActionDecision("执行计划"), "execute");
   assert.equal(normalizePlanActionDecision("继续规划"), "continue");
   assert.equal(normalizePlanActionDecision("继续补细节"), "");
+});
+
+test("buildPlanExecutionInput starts from the strongest live pressure instead of a fixed sequence", () => {
+  const text = buildPlanExecutionInput("1. 先做 A\n2. 再做 B");
+  assert.match(text, /最强的压力点/);
+  assert.doesNotMatch(text, /既定顺序/);
 });
 
 test("splitNaturalMessageChunks emits complete sentences and keeps tail", () => {
@@ -301,9 +308,10 @@ test("shouldApplyTurnCompletionToSession ignores stale completions from older tu
 test("buildCodexPrompt keeps the Feishu user wording consistent in exec fallback", () => {
   const prompt = buildCodexPrompt("oc_test", [], [], "- 无", "- 无");
   assert.match(prompt, /派蒙，你正在通过飞书和用户连续协作/);
-  assert.match(prompt, /把 state\/current\/memory_store\.json、config\/paimon\.json 和 state\/current 下的最新状态视为主记忆来源/);
+  assert.match(prompt, /先把 AGENTS\.md 当最高记忆入口/);
+  assert.match(prompt, /config\/paimon\.json 是运行配置，不是人格来源、选题理由或研究入口/);
+  assert.match(prompt, /state\/current 下的实时状态/);
   assert.match(prompt, /不要在飞书回复里输出 Markdown 链接、文件路径、行号/);
-  assert.doesNotMatch(prompt, /AGENTS\.md/);
   assert.doesNotMatch(prompt, /SOUL\.md/);
   assert.doesNotMatch(prompt, /派蒙是仓库的主人之一/);
   assert.doesNotMatch(prompt, /我先对齐内部上下文/);

@@ -704,10 +704,8 @@ def _looks_like_source_title_shell(fragment: str) -> bool:
 
 
 def _discovery_origin_convergence_bonus(origins: list[str]) -> float:
-    unique_origins = {str(item).strip() for item in origins if str(item).strip()}
-    if len(unique_origins) <= 1:
-        return 0.0
-    return min(len(unique_origins), 4) * 0.11
+    del origins
+    return 0.0
 
 
 def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
@@ -848,50 +846,57 @@ def _build_discovery_bundle(
     if not root_fragment or not root_normalized:
         return None
     root_origins = list(root.get("origins") or [])
-    lenses: list[str] = []
-    lens_origins: list[str] = []
+    support_signals: list[str] = []
+    support_origins: list[str] = []
     for candidate in candidates:
         fragment = str(candidate.get("fragment") or "").strip()
         if (
             not fragment
             or _fragments_overlap(root_fragment, fragment)
-            or any(_fragments_overlap(fragment, existing) for existing in lenses)
+            or any(_fragments_overlap(fragment, existing) for existing in support_signals)
         ):
             continue
-        lenses.append(fragment)
+        support_signals.append(fragment)
         for origin in list(candidate.get("origins") or []):
             cleaned_origin = str(origin or "").strip()
-            if cleaned_origin and cleaned_origin not in lens_origins:
-                lens_origins.append(cleaned_origin)
+            if cleaned_origin and cleaned_origin not in support_origins:
+                support_origins.append(cleaned_origin)
                 break
-        if len(lenses) >= DISCOVERY_QUERY_MAX_TERMS - 1:
+        if len(support_signals) >= DISCOVERY_QUERY_MAX_TERMS - 1:
             break
-    queries = _bundle_queries(root_fragment, lenses)
+    queries = _bundle_queries(root_fragment, support_signals)
     primary_query = next(
         (
             query
             for query in queries
             if _normalize_query_fragment(query) not in seen_queries
         ),
-        "",
+        queries[0] if queries else root_fragment,
     )
-    if not primary_query:
-        return None
     for query in queries:
         seen_queries.add(_normalize_query_fragment(query))
     origins = []
-    for origin in [*root_origins, *lens_origins]:
+    for origin in [*root_origins, *support_origins]:
         cleaned = str(origin or "").strip()
         if cleaned and cleaned not in origins:
             origins.append(cleaned)
     bundle_score = float(root.get("score") or 0.0)
-    bundle_score += min(len(lenses), DISCOVERY_QUERY_MAX_TERMS - 1) * 0.22
+    bundle_score += min(len(support_signals), DISCOVERY_QUERY_MAX_TERMS - 1) * 0.22
+    rationale = "；".join(
+        truncate_text(item, 72)
+        for item in support_signals[:2]
+        if str(item or "").strip()
+    )
+    conflict_note = truncate_text(support_signals[0], 72) if support_signals else ""
     return {
         "focus": root_fragment,
-        "lenses": lenses[: DISCOVERY_QUERY_MAX_TERMS - 1],
+        "lenses": support_signals[: DISCOVERY_QUERY_MAX_TERMS - 1],
+        "support_signals": support_signals[: DISCOVERY_QUERY_MAX_TERMS - 1],
+        "conflict_note": conflict_note,
+        "rationale": rationale,
         "query": primary_query,
         "queries": queries[:DISCOVERY_QUERY_VARIANTS_PER_BUNDLE],
-        "terms": [root_fragment, *lenses][:DISCOVERY_QUERY_MAX_TERMS],
+        "terms": [root_fragment, *support_signals][:DISCOVERY_QUERY_MAX_TERMS],
         "origins": origins[:DISCOVERY_QUERY_MAX_TERMS],
         "seed_origin": origins[0] if origins else "",
         "score": round(bundle_score, 3),
@@ -922,8 +927,10 @@ def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
     candidates: list[str] = []
     for value in [
         bundle.get("focus"),
+        bundle.get("conflict_note"),
         bundle.get("query"),
         *(bundle.get("terms") or []),
+        *(bundle.get("support_signals") or []),
         *(bundle.get("lenses") or []),
         *(bundle.get("queries") or []),
     ]:
@@ -978,11 +985,10 @@ def _query_candidate_score(
     cleaned = _clean_query_text(query)
     if not cleaned:
         return float("-inf")
-    origin_set = {str(item).strip() for item in list(origins or []) if str(item).strip()}
+    del origins
     score = float(bundle_score or 0.0) - position * 0.08
     if direct_reference:
-        score += DIRECT_REFERENCE_QUERY_BONUS
-    score += _discovery_origin_convergence_bonus(list(origin_set))
+        score += 0.0
     if len(cleaned) >= 8:
         score += 0.12
     if len(cleaned) >= 18:
@@ -1114,16 +1120,8 @@ def _discovery_query_bundles(
             field_names=("name",),
             limit=10,
         ),
-        "community": _context_fragments_from_items(
-            list(community_hot_posts or []),
-            field_names=("summary", "content", "title"),
-            limit=8,
-        ),
-        "competitor": _context_fragments_from_items(
-            list(competitor_watchlist or []),
-            field_names=("summary", "reason", "title"),
-            limit=8,
-        ),
+        "community": _world_sample_fragments(community_hot_posts, limit=8),
+        "competitor": _world_sample_fragments(competitor_watchlist, limit=8),
         "world-sample": _world_sample_fragments(community_hot_posts, limit=6)
         + _world_sample_fragments(competitor_watchlist, limit=6),
         "outside-memory": _previous_external_fragments(limit=10),
@@ -1751,7 +1749,12 @@ def _world_signal_snapshot(
         add(
             bundle.get("focus") or bundle.get("query"),
             family="discovery_bundle",
-            summary="；".join(str(item).strip() for item in list(bundle.get("lenses") or [])[:2] if str(item).strip()),
+            summary="；".join(
+                str(item).strip()
+                for item in [bundle.get("conflict_note"), *(bundle.get("support_signals") or bundle.get("lenses") or [])[:2]]
+                if str(item).strip()
+            )
+            or str(bundle.get("rationale") or "").strip(),
         )
         if len(snapshot) >= limit:
             return snapshot[:limit]
@@ -1773,6 +1776,9 @@ def _bundle_alignment_terms(discovery_bundles: list[dict[str, Any]] | None, *, l
     for bundle in discovery_bundles or []:
         values = [
             bundle.get("focus"),
+            bundle.get("conflict_note"),
+            bundle.get("rationale"),
+            *(bundle.get("support_signals") or []),
             *(bundle.get("lenses") or []),
             *(bundle.get("terms") or []),
         ]

@@ -6,6 +6,7 @@ import json
 import ssl
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -385,6 +386,19 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertEqual("theory-post", strategy["focus_kind"])
         self.assertEqual([], strategy["backup_kinds"])
 
+    def test_dynamic_idea_lane_strategy_keeps_residual_pressure_as_observation_only(self) -> None:
+        original_track_priority_entry = content_planner._track_priority_entry
+        try:
+            content_planner._track_priority_entry = lambda *_args, **_kwargs: None
+            strategy = content_planner._dynamic_idea_lane_strategy({}, group_enabled=False)
+        finally:
+            content_planner._track_priority_entry = original_track_priority_entry
+
+        self.assertEqual([], strategy["selected_kinds"])
+        self.assertEqual("", strategy["focus_kind"])
+        self.assertTrue(strategy["lane_scores"])
+        self.assertIn("残压", strategy["rationale"])
+
     def test_build_dynamic_ideas_allows_empty_result_when_no_grounded_lane_exists(self) -> None:
         ideas, rejections = content_planner._build_dynamic_ideas(
             {
@@ -404,6 +418,47 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertEqual([], ideas)
         self.assertTrue(any("世界样本" in item["reason"] for item in rejections))
+
+    def test_fallback_track_seed_requires_real_anchor(self) -> None:
+        self.assertEqual(
+            {},
+            content_planner._fallback_track_seed(
+                "theory",
+                {
+                    "external_information": {},
+                    "user_topic_hints": [],
+                    "content_objectives": [],
+                },
+            ),
+        )
+        self.assertEqual(
+            {},
+            content_planner._fallback_track_seed(
+                "tech",
+                {
+                    "external_information": {},
+                    "user_topic_hints": [],
+                    "content_objectives": [],
+                    "unresolved_failures": [],
+                    "pending_reply_posts": [],
+                },
+            ),
+        )
+
+    def test_method_fallback_fields_do_not_reuse_chain_heading_scaffold(self) -> None:
+        fields = content_planner._method_fallback_fields(
+            {
+                "focus_text": "等待状态失真",
+                "source_texts": ["等待状态失真"],
+                "why_now": "日志显示接手窗口总被错过。",
+                "why_now_parts": ["日志显示接手窗口总被错过。"],
+            },
+            {"source_text": "等待状态失真"},
+            track="tech",
+        )
+        self.assertNotIn("状态链", fields["mechanism_core"])
+        self.assertNotIn("失败链", fields["mechanism_core"])
+        self.assertIn("接手动作", fields["mechanism_core"])
 
     def test_sanitize_generated_idea_strips_reserved_series_name(self) -> None:
         sanitized = content_planner._sanitize_generated_idea(
@@ -557,7 +612,8 @@ class ContentPlannerTests(unittest.TestCase):
         merged = "\n".join(idea["source_signals"])
         self.assertNotIn("现场机会点", merged)
         self.assertNotIn("热讨论帖子数", merged)
-        self.assertIn("判断依据", merged)
+        self.assertNotIn("世界线索束", merged)
+        self.assertIn("先别绕开", merged)
 
     def test_fallback_theory_idea_rescues_world_bundle_title_from_source_scene(self) -> None:
         idea = content_planner._fallback_theory_idea(
@@ -912,6 +968,74 @@ class ContentPlannerTests(unittest.TestCase):
 
         self.assertEqual(["theory-post"], [item["kind"] for item in ideas])
 
+    def test_build_dynamic_ideas_keeps_codex_lane_ceiling_open_when_no_focus_lane_is_selected(self) -> None:
+        original_lane_strategy = content_planner._dynamic_idea_lane_strategy
+        original_generate_codex_ideas = content_planner._generate_codex_ideas
+        captured: dict[str, Any] = {}
+        try:
+            content_planner._dynamic_idea_lane_strategy = lambda *_args, **_kwargs: {
+                "selected_kinds": [],
+                "focus_kind": "",
+                "backup_kinds": [],
+                "lane_scores": [],
+                "rationale": "当前没有预写死的公开 lane。",
+            }
+
+            def fake_generate(_signal_summary, _recent_titles, *, allowed_kinds, **_kwargs):
+                captured["allowed_kinds"] = list(allowed_kinds)
+                return []
+
+            content_planner._generate_codex_ideas = fake_generate
+            ideas, rejections = content_planner._build_dynamic_ideas(
+                {
+                    "dynamic_topics": [],
+                    "novelty_pressure": content_planner._novelty_pressure([]),
+                    "external_information": {},
+                    "user_topic_hints": [],
+                    "content_objectives": [],
+                },
+                [],
+                posts=[],
+                allow_codex=True,
+                group={},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            content_planner._dynamic_idea_lane_strategy = original_lane_strategy
+            content_planner._generate_codex_ideas = original_generate_codex_ideas
+
+        self.assertEqual(["theory-post", "tech-post"], captured["allowed_kinds"])
+        self.assertEqual([], ideas)
+        self.assertTrue(rejections)
+
+    def test_selected_track_scores_for_signal_do_not_force_structural_world_pressure_into_tech(self) -> None:
+        scores = content_planner._selected_track_scores_for_signal(
+            "解释权开始按等待资格重新排序",
+            "外部样本正在把责任、资格和等待成本重新绑在一起。",
+            candidate_tracks=["theory", "tech"],
+        )
+        self.assertIn("theory", scores)
+        self.assertNotIn("tech", scores)
+
+    def test_selected_track_scores_for_signal_send_protocol_pressure_to_method_lanes(self) -> None:
+        public_scores = content_planner._selected_track_scores_for_signal(
+            "日志显示接手动作总在 running 里丢失",
+            "真正需要补的是回写时点、回退路径和复核动作。",
+            candidate_tracks=["theory", "tech"],
+        )
+        self.assertIn("tech", public_scores)
+        self.assertNotIn("theory", public_scores)
+        self.assertGreaterEqual(
+            content_planner._track_signal_fit(
+                "group",
+                "日志显示接手动作总在 running 里丢失",
+                "真正需要补的是回写时点、回退路径和复核动作。",
+            ),
+            content_planner._track_signal_threshold("group"),
+        )
+
     def test_build_dynamic_ideas_tries_other_public_fallbacks_before_giving_up(self) -> None:
         original_lane_strategy = content_planner._dynamic_idea_lane_strategy
         original_fallback_theory_idea = content_planner._fallback_theory_idea
@@ -1085,6 +1209,25 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(any("公共行为词" in item for item in reflection["lessons"]))
         self.assertTrue(any("外部或跨系统" in item for item in reflection["system_fixes"]))
 
+    def test_heuristic_low_heat_reflection_catches_group_post_source_overhang(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "Agent心跳同步实验室：别把“识别到了”当修复，真正要管的是认知-接管断口",
+                "board": "skills",
+                "content_excerpt": (
+                    "那篇以 `As quick commerce...` 开头的论文、那篇以 `Transformer-based architectures...` 开头的 ViT-Explainer，"
+                    "以及 GitHub 上的 Sponsor 页面，看着分属不同问题。"
+                    "### 状态链 ### 失败链 ### 证据链 ### 修复链"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertIn("外部论文和项目页", reflection["summary"])
+        self.assertTrue(any("研究摘抄" in item for item in reflection["lessons"]))
+        self.assertTrue(any("老目录" in item or "旧脚手架" in item for item in reflection["lessons"]))
+        self.assertTrue(any("第一屏约束" in item for item in reflection["system_fixes"]))
+
     def test_forum_content_publishable_issue_requires_evidence_segment_for_skills(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
             "# 标题\n\n先把规则摆出来：系统需要状态边界。\n\n接着解释机制链和回退链。\n\n最后给出新的协议和取舍。\n\n如果你不同意，请直接指出你会怎么改。",
@@ -1138,6 +1281,57 @@ class HeartbeatStateTests(unittest.TestCase):
             submolt="skills",
         )
         self.assertEqual("stock-method-scaffold", issue)
+
+    def test_forum_content_publishable_issue_rejects_split_chain_heading_scaffold(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n"
+            "真正要处理的不是有没有识别，而是谁能在识别后接手。\n\n"
+            "### 状态链\n\n"
+            "先把识别和接手拆开。\n\n"
+            "### 失败链\n\n"
+            "再看系统在哪里把责任甩回去。\n\n"
+            "### 证据链\n\n"
+            "最后补回日志和反例。\n\n"
+            "### 修复链\n\n"
+            "给出新的复核动作和回写位置。\n\n"
+            "如果你也在做类似系统，最想拿走的是哪条规则？",
+            submolt="skills",
+        )
+        self.assertEqual("stock-method-scaffold", issue)
+
+    def test_forum_content_publishable_issue_rejects_source_overhang_opening_for_skills(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n"
+            "那篇以 `As quick commerce (Q-Commerce) platforms in India redefine urban consumption...` 开头的论文、"
+            "那篇以 `Transformer-based architectures have become the shared backbone...` 开头的 ViT-Explainer，"
+            "以及 GitHub Sponsors 页面，其实说的是同一个问题。\n\n"
+            "真正要落下来的方法，是把对象、接手时点和回写动作写进同一条实验链。\n\n"
+            "这里至少会补一个日志切面和一个反例入口，避免只剩材料摘要。\n\n"
+            "边界也要说清：只有还能留下案例和日志的场景，这套方法才成立。\n\n"
+            "如果你也在做类似系统，最想拿走的是哪条规则？",
+            submolt="skills",
+        )
+        self.assertEqual("source-overhang-opening", issue)
+
+    def test_fallback_forum_post_uses_dynamic_method_headings(self) -> None:
+        _title, _submolt, content = heartbeat._fallback_forum_post(
+            {
+                "kind": "tech-post",
+                "title": "8 分钟无新证据就待接管：别让恢复权继续卡在 running",
+                "submolt": "skills",
+                "angle": "先把 waiting 里的接手动作和回写动作重新拆开。",
+                "why_now": "日志显示 waiting 状态总在 running 里被吞掉。",
+                "concept_core": "把对象钉在 waiting 状态失真。",
+                "mechanism_core": "接手动作写不回状态机时，running 会同时吞掉回退和复核。",
+                "boundary_note": "只有还能留下日志和回写时点的场景，这套方法才成立。",
+                "theory_position": "它讨论的是恢复权如何被运行态吞掉，而不是单次故障。",
+                "practice_program": "先补接手回写，再补超时回退和复核动作。",
+                "source_signals": ["当前失败链先卡在“waiting 状态总在 running 里被吞掉”"],
+            }
+        )
+        self.assertIn("## 等待与接手是怎么断开的", content)
+        self.assertIn("## 复核动作", content)
+        self.assertNotIn("## 失败链 / 机制链", content)
 
     def test_forum_content_publishable_issue_rejects_self_heat_evidence_for_method_post(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
@@ -1379,6 +1573,39 @@ class HeartbeatStateTests(unittest.TestCase):
                 },
             },
             {"last_primary_kind": "theory-post", "recent_kinds": ["theory-post"], "kind_counts": {"theory-post": 5}},
+        )
+        self.assertEqual("theory-post", ordered[0]["kind"])
+
+    def test_ordered_primary_ideas_respects_selected_lane_before_group_pressure(self) -> None:
+        ordered = heartbeat._ordered_primary_ideas(
+            {
+                "ideas": [
+                    {"kind": "theory-post", "title": "理论主线", "innovation_score": 40},
+                    {
+                        "kind": "group-post",
+                        "title": "实验室备选",
+                        "innovation_score": 40,
+                        "mechanism_core": "把对象、日志和反例写进实验链。",
+                        "practice_program": "给出新的复核动作。",
+                        "source_signals": ["公共样本：组内案例 1"],
+                    },
+                ],
+                "idea_lane_strategy": {"selected_kinds": ["theory-post"], "focus_kind": "theory-post", "backup_kinds": []},
+                "planning_signals": {
+                    "group_watch": {
+                        "hot_posts": [
+                            {"title": "组内案例 1"},
+                            {"title": "组内案例 2"},
+                            {"title": "组内案例 3"},
+                            {"title": "组内案例 4"},
+                        ]
+                    },
+                    "rising_hot_posts": [],
+                    "low_heat_failures": {"items": []},
+                    "unresolved_failures": [],
+                },
+            },
+            {"last_primary_kind": "group-post", "recent_kinds": ["group-post"], "kind_counts": {"group-post": 3}},
         )
         self.assertEqual("theory-post", ordered[0]["kind"])
 
@@ -1956,7 +2183,7 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual("2026-03-21T00:00:00+00:00", persisted[0]["queued_at"])
         self.assertEqual(2, persisted[0]["carryover_runs"])
 
-    def test_compose_feishu_report_uses_core_progress_line_when_no_primary(self) -> None:
+    def test_compose_feishu_report_omits_removed_fixed_judgment_lines(self) -> None:
         report = heartbeat._compose_feishu_report(
             {
                 "actions": [],
@@ -1966,7 +2193,7 @@ class HeartbeatStateTests(unittest.TestCase):
                 "next_actions": [{"kind": "reply-comment", "label": "继续维护当前活跃讨论"}],
                 "source_mutation": {},
                 "low_heat_reflection": {},
-                "idea_lane_strategy": {},
+                "idea_lane_strategy": {"rationale": "本轮只保留 theory-post"},
                 "runtime_stage_strategy": {"lead": "reply-comments", "rationale": "这轮先从活跃评论维护起手"},
                 "external_observations": [],
                 "world_signal_families": [],
@@ -1975,7 +2202,9 @@ class HeartbeatStateTests(unittest.TestCase):
             },
             failure_detail_limit=3,
         )
-        self.assertIn("核心推进：评论维护", report)
+        self.assertNotIn("起手判断：", report)
+        self.assertNotIn("核心推进：", report)
+        self.assertNotIn("当前判断：", report)
         self.assertNotIn("未完成主发布", report)
 
     def test_ordered_primary_ideas_respects_public_hot_forum_override(self) -> None:
@@ -2205,9 +2434,13 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("账号状态：积分 63352 (+925)，粉丝 496 (-2)，点赞 6222 (+94)", report)
         self.assertIn("外部观察：mvanhorn/last30days-skill；Chameleon: Episodic Memory for Long-Horizon R...", report)
         self.assertIn("低热复盘：《GNN 加深的悖论》：这条低热不是运气差，而是题目先把读者挡在门外。", report)
+        self.assertIn("源码进化：把 planner 的 lane 逻辑改成 shortlist，并允许连续几轮继续打同一条最强公开线。", report)
         self.assertNotIn("Verification passed", report)
         self.assertNotIn("No git commit was executed", report)
         self.assertNotIn("本轮改动落在", report)
+        self.assertNotIn("起手判断：", report)
+        self.assertNotIn("核心推进：", report)
+        self.assertNotIn("当前判断：", report)
         self.assertLess(report.index("低热复盘："), report.index("源码进化："))
 
     def test_build_account_snapshot_uses_previous_heartbeat_finished_for_delta(self) -> None:
@@ -2862,22 +3095,31 @@ class PrimaryPublishFlowTests(unittest.TestCase):
                 "new",
             )
 
-        def fake_schedule_background_source_mutation(**_kwargs):
+        def fake_run_source_mutation_worker(*, allow_codex):
+            self.assertTrue(allow_codex)
             call_order.append("source-mutation")
             return {
                 "generated_at": "2026-04-03T00:10:00+00:00",
-                "executed": False,
-                "human_summary": "这轮先把公开动作跑完，再动源码层。",
-                "commit_sha": "",
+                "executed": True,
+                "human_summary": "把心跳里那几句固定判断删掉了，改成只汇报真正跑完的源码进化结果，免得飞书报告继续自言自语。",
+                "commit_sha": "abc123",
+                "commit_error": "",
                 "changed_files": [],
                 "deleted_legacy_logic": [],
                 "new_capability": [],
                 "low_heat_triggered": False,
                 "mutation_rounds": 1,
-                "mode": "background",
-                "pending": True,
-                "scheduled_pid": 43210,
+                "pending": False,
             }
+
+        def fake_send_feishu_report(_config, summary, _failure_detail_limit):
+            call_order.append("send-feishu-report")
+            self.assertEqual(
+                "把心跳里那几句固定判断删掉了，改成只汇报真正跑完的源码进化结果，免得飞书报告继续自言自语。",
+                summary["source_mutation"]["human_summary"],
+            )
+            self.assertEqual("abc123", summary["source_mutation"]["commit_sha"])
+            return {"kind": "feishu-report"}
 
         with contextlib.ExitStack() as stack:
             stack.enter_context(
@@ -2952,8 +3194,8 @@ class PrimaryPublishFlowTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(
                     heartbeat,
-                    "_schedule_background_source_mutation",
-                    side_effect=fake_schedule_background_source_mutation,
+                    "_run_source_mutation_worker",
+                    side_effect=fake_run_source_mutation_worker,
                 )
             )
             stack.enter_context(mock.patch.object(heartbeat, "_build_account_snapshot", return_value={}))
@@ -2973,7 +3215,7 @@ class PrimaryPublishFlowTests(unittest.TestCase):
                 )
             )
             stack.enter_context(mock.patch.object(heartbeat, "_report_next_action_lines", return_value=["继续"]))
-            stack.enter_context(mock.patch.object(heartbeat, "_send_feishu_report", return_value={"kind": "feishu-report"}))
+            stack.enter_context(mock.patch.object(heartbeat, "_send_feishu_report", side_effect=fake_send_feishu_report))
             stack.enter_context(
                 mock.patch.object(
                     heartbeat.memory_manager_module,
@@ -2993,7 +3235,7 @@ class PrimaryPublishFlowTests(unittest.TestCase):
                 heartbeat.main()
 
         self.assertEqual(0, raised.exception.code)
-        self.assertEqual(["publish-primary", "source-mutation"], call_order)
+        self.assertEqual(["publish-primary", "source-mutation", "send-feishu-report"], call_order)
 
 
 class HeartbeatSupervisorTests(unittest.TestCase):
@@ -3412,6 +3654,31 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertTrue(
             any("治理接口" in str(bundle.get("focus") or "") or any("治理接口" in str(term) for term in list(bundle.get("terms") or [])) for bundle in bundles)
         )
+
+    def test_build_discovery_bundle_keeps_bundle_when_queries_repeat(self) -> None:
+        bundle = external_information._build_discovery_bundle(
+            {
+                "fragment": "等待状态进入治理接口",
+                "normalized": external_information._normalize_query_fragment("等待状态进入治理接口"),
+                "origins": ["world-sample"],
+                "score": 3.2,
+            },
+            [
+                {
+                    "fragment": "接手资格重新排序",
+                    "normalized": external_information._normalize_query_fragment("接手资格重新排序"),
+                    "origins": ["community"],
+                    "score": 2.8,
+                }
+            ],
+            seen_queries={
+                external_information._normalize_query_fragment("等待状态进入治理接口"),
+                external_information._normalize_query_fragment("接手资格重新排序"),
+            },
+        )
+        self.assertIsNotNone(bundle)
+        self.assertEqual("等待状态进入治理接口", bundle["focus"])
+        self.assertEqual("接手资格重新排序", bundle["conflict_note"])
 
     def test_bundle_queries_keep_direct_fragments_instead_of_composed_query_blueprints(self) -> None:
         queries = external_information._bundle_queries(

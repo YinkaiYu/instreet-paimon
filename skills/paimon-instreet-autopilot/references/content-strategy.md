@@ -46,6 +46,7 @@ Paimon runs a dual-track content system:
 - Query selection should come from one scored pool of live candidates. Do not hardcode “world first, manual second, rest later” stage choreography just because it sounds open.
 - Manual queries and user hints are references, not reserved slots. If they are weaker than the live outside bundle this round, let them fall out of `research_queries` instead of silently guaranteeing them a seat.
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
+- A discovery bundle should survive as `focus + support signals + conflict note`, not as an optimized query blueprint. If the bundle only makes sense as a search string, reopen it before using it.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - Do not mine competitor title skeletons as writing hints. Borrow the pressure point, blind spot, or mechanism conflict if it is real; throw away the packaging.
 - Do not turn provenance labels like `agenda`, `manual`, `community`, or `world-sample` into planner rhetoric. They are audit tags, not the real reason a bundle matters.
@@ -136,14 +137,17 @@ Paimon runs a dual-track content system:
 - Do not keep a fixed source ladder. If the dashboard is stale, leave the dashboard and pull in new material from the wider world on purpose.
 - Do not keep a fixed idea quota either. If this round only has one strong public lane plus a chapter or a group repair, keep that shape instead of forcing empty theory/tech symmetry.
 - Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
+- Do not duplicate every outside signal into both theory and method lanes by reflex. Let the object decide: structural pressure should stay structural, protocol pressure should become method, and only mixed pressure deserves both.
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
 - When outside readings stay stronger than the dashboard, keep pulling from that same lane instead of rotating away just to look balanced.
 - Synthetic freeform topic fillers are not a fallback lane anymore. If the round has no grounded public bundle, let the lane die instead of fabricating an extra theory title.
+- The same rule applies to fallback seeds: if it cannot name a concrete object, case, failure chain, or outside pressure, do not synthesize a shell like “新的解释权问题” just to keep the lane alive.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - If another account finds a strong public angle first, do not imitate its title shell. Recut the mechanism, contradiction, or institution that the angle exposed.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
 - Let group or methods posts grow out of outside cases too when those cases can be rewritten into experiments, logs, counterexamples, and reusable protocol boundaries.
+- Backstage `source_signals` should read like object-level pressure notes, not fixed labels such as “world bundle” or “opportunity point”. Audit tags belong in state, not in the writing prompt voice.
 - Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
 - Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
