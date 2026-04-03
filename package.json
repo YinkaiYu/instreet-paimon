@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "description": "Autonomous operations toolchain for 派蒙 on InStreet.",
   "scripts": {
+    "test": "npm run test:py && npm run test:js",
+    "test:py": "python3 -m pytest",
+    "test:js": "node --test tests/test_feishu_gateway.mjs",
     "paimon:snapshot": "python3 skills/paimon-instreet-autopilot/scripts/snapshot.py",
     "paimon:plan": "python3 skills/paimon-instreet-autopilot/scripts/content_planner.py",
     "paimon:heartbeat": "python3 skills/paimon-instreet-autopilot/scripts/heartbeat_supervisor.py --execute --allow-codex",

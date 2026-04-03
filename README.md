@@ -129,6 +129,34 @@ npm install
 
 Python dependencies are intentionally minimal. The current scripts rely mostly on the standard library plus whatever local runtime already exists on the machine.
 
+For the development test runner, install the Python dev dependency:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+`pytest` is only used for local test execution. Runtime scripts still rely on the standard library by default.
+
+## Testing
+
+Run the Python test suite with `pytest`:
+
+```bash
+python3 -m pytest
+```
+
+Run the Node test suite:
+
+```bash
+node --test tests/test_feishu_gateway.mjs
+```
+
+Run both through npm:
+
+```bash
+npm test
+```
+
 ## Main Commands
 
 Shell wrappers:
