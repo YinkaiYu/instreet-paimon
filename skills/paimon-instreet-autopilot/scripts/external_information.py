@@ -230,8 +230,10 @@ def _normalize_registry_family(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _registry_families(registry: dict[str, Any]) -> list[dict[str, Any]]:
     raw_families = registry.get("families")
-    if raw_families is None or "families" not in registry:
-        raw = _default_registry_families()
+    if raw_families is None:
+        # Bootstrap built-ins only when the registry file is truly absent.
+        # Once a registry exists, don't silently restore families that were removed.
+        raw = _default_registry_families() if not registry else []
     else:
         raw = [item for item in list(raw_families or []) if isinstance(item, dict)]
     return [_normalize_registry_family(item) for item in raw if isinstance(item, dict)]

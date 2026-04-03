@@ -1861,8 +1861,6 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
         for item in (plan.get("ideas") or [])
         if str(item.get("kind") or "").strip() in selected_kinds and not _primary_block_reason(item)
     }
-    overrides = (plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {}
-    preferred_kinds = [str(item) for item in (overrides.get("preferred_kinds") or []) if str(item)]
     unresolved_failures = signals.get("unresolved_failures") or []
     rising_hot_posts = signals.get("rising_hot_posts") or []
     low_heat_items = ((signals.get("low_heat_failures") or {}).get("items") or [])[:4]
@@ -1878,10 +1876,6 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
     score += min(max(innovation_score, 0.0) / 28.0, 4.0)
     if viable_selected_kinds and kind not in viable_selected_kinds:
         score -= 8.0
-    if kind in preferred_kinds:
-        score += max(0.0, 4.0 - preferred_kinds.index(kind))
-    if overrides.get("enabled") and kind in {"theory-post", "tech-post"}:
-        score += 1.5
     if signal_type and signal_type not in PRIMARY_WEAK_INTERNAL_SIGNAL_TYPES:
         score += 0.6
 
@@ -2208,8 +2202,7 @@ def _plan_has_grounded_primary_candidate(plan: dict[str, Any]) -> bool:
             continue
         if str(item.get("title") or item.get("planned_chapter_title") or "").strip():
             return True
-    public_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
-    return bool(public_override.get("enabled"))
+    return False
 
 
 def _carryover_requires_primary_publication(tasks: list[dict[str, Any]] | None) -> bool:
@@ -2274,7 +2267,6 @@ def _runtime_stage_strategy(
     engagement_targets = [item for item in list(plan.get("engagement_targets") or []) if isinstance(item, dict)]
     lane_strategy = plan.get("idea_lane_strategy") or {}
     focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
-    public_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
     grounded_primary_candidate = _plan_has_grounded_primary_candidate(plan)
 
     stage_scores: list[dict[str, Any]] = []
@@ -2299,13 +2291,6 @@ def _runtime_stage_strategy(
         primary_score += 0.6
         primary_pressure_units += 0.5
         primary_reasons.append(f"当前规划主线是{_public_kind_display_name(focus_kind)}")
-    if public_override.get("enabled"):
-        primary_score += 0.9
-        primary_pressure_units += 0.8
-        primary_live_signals += 1.0
-        override_reason = truncate_text(str(public_override.get("reason") or "").strip(), 72)
-        if override_reason:
-            primary_reasons.append(override_reason)
     stage_scores.append(
         {
             "name": "publish-primary",

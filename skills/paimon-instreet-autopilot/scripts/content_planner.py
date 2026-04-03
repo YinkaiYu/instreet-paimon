@@ -787,11 +787,14 @@ def _recommended_next_action_from_live_pressure(
             }
         )
     if public_override.get("enabled") and public_idea:
+        public_score = 1.25 + min(len(public_ideas), 2) * 0.25 + (0.3 if high_priority_engagements else 0.0)
+        if not unresolved_failures and not active_discussions:
+            public_score += 0.9
         choices.append(
             {
                 "name": "public",
-                "score": 2.7 + min(len(public_ideas), 2) * 0.35 + (0.4 if high_priority_engagements else 0.0),
-                "label": f"趁公共窗口还在，先把这轮最强的{_planner_public_kind_display_name(str(public_idea.get('kind') or ''))}发出去",
+                "score": public_score,
+                "label": f"公共窗口还在，但只有它比评论、修复和外部切口更强时，才先发这轮最强的{_planner_public_kind_display_name(str(public_idea.get('kind') or ''))}",
             }
         )
     if active_discussions:
@@ -2163,32 +2166,19 @@ def _opportunity_source_signals(
     signal_type = str(opportunity.get("signal_type") or "").strip()
     source_text = truncate_text(str(opportunity.get("source_text") or "").strip(), 46)
     why_now = truncate_text(str(opportunity.get("why_now") or "").strip(), 68)
-    lines: list[str] = []
-    if source_text:
-        lines.append(
-            {
-                "paper": f"外部研究已经把“{source_text}”推到门口",
-                "classic": f"旧概念材料这轮重新咬住了“{source_text}”",
-                "github": f"工具现场先把“{source_text}”暴露出来了",
-                "zhihu": f"大众讨论已经把“{source_text}”吵开了",
-                "external": f"外部样本正在围着“{source_text}”汇流",
-                "world-bundle": f"世界里的多股压力正在围着“{source_text}”汇流",
-                "community-breakout": f"公共起量样本已经把“{source_text}”推上台面",
-                "community-hot": f"公共讨论已经把“{source_text}”顶到门口",
-                "rising-hot": f"正在起飞的新样本先撞上了“{source_text}”",
-                "discussion": f"现场讨论已经围着“{source_text}”发酵",
-                "feed": f"观察流里先冒出来的是“{source_text}”",
-                "failure": f"当前失败链先卡在“{source_text}”",
-                "reply-pressure": f"评论区追问已经逼到“{source_text}”",
-                "notification-load": f"注意力压力这轮先堆在“{source_text}”",
-                "budget": f"节律约束这轮先压在“{source_text}”",
-                "promo": f"资产提醒只是把“{source_text}”重新推回视野",
-                "user-hint": f"旅行者给的线索先碰到了“{source_text}”",
-            }.get(signal_type, f"这轮入口已经咬住“{source_text}”")
-        )
-    if why_now and (_contains_cjk(why_now) or not _ascii_heavy_text(why_now)):
-        lines.append(f"先别绕开：{why_now}")
     evidence_hint = truncate_text(str(opportunity.get("evidence_hint") or "").strip(), 72)
+    lines: list[str] = []
+    used_why_now_as_lead = False
+    if source_text:
+        if why_now and (_contains_cjk(why_now) or not _ascii_heavy_text(why_now)):
+            lines.append(f"这轮真正把“{source_text}”逼成对象的是：{why_now}")
+            used_why_now_as_lead = True
+        elif evidence_hint:
+            lines.append(f"先别回到来源包装，真正咬住“{source_text}”的是{evidence_hint}")
+        else:
+            lines.append(f"这轮入口先咬住“{source_text}”")
+    if why_now and (_contains_cjk(why_now) or not _ascii_heavy_text(why_now)) and not used_why_now_as_lead:
+        lines.append(f"先别绕开：{why_now}")
     if evidence_hint:
         lines.append(f"证据先看：{evidence_hint}")
     overloaded = "、".join((signal_summary.get("novelty_pressure") or {}).get("overloaded_keywords", [])[:3])
@@ -3547,94 +3537,79 @@ def _preferred_tech_board(opportunity: dict[str, Any]) -> str:
     return "skills"
 
 
-def _external_family_profile(family: str) -> dict[str, Any]:
+def _external_signal_type(family: str) -> str:
     normalized = str(family or "").strip() or "external"
     if normalized == "community_breakouts":
-        signal_type = "community-breakout"
-    elif normalized == "github_trending":
-        signal_type = "github"
-    elif normalized == "zhihu_hot":
-        signal_type = "zhihu"
-    elif normalized == "classic_readings":
-        signal_type = "classic"
-    elif normalized in ACADEMIC_EXTERNAL_FAMILIES:
-        signal_type = "paper"
-    else:
-        signal_type = "external"
+        return "community-breakout"
+    if normalized == "github_trending":
+        return "github"
+    if normalized == "zhihu_hot":
+        return "zhihu"
+    if normalized in {"classic_readings", "marxists"}:
+        return "classic"
+    if normalized in ACADEMIC_EXTERNAL_FAMILIES:
+        return "paper"
+    return "external"
 
-    freshness_score = {
-        "community-breakout": 2.3,
-        "paper": 2.1,
-        "github": 1.9,
-        "zhihu": 1.5,
-        "classic": 0.9,
-        "external": 1.7,
-    }.get(signal_type, 1.6)
-    theory_angle = {
-        "community-breakout": "把公共起量样本背后的解释权、分层或治理变化翻成派蒙自己的判断，不要围着热帖原题打转。",
-        "paper": "把研究里的问题意识翻译成 Agent 社会的新概念、机制和边界，而不是转述论文。",
-        "github": "把工具风潮背后的劳动分工、接口权力和组织想象翻成 Agent 社会问题，不要做项目导览。",
-        "zhihu": "把大众问题里的焦虑、误判和秩序感压成更底层的社会结构命题，不要点评问答气氛。",
-        "classic": "不要复述经典；把旧概念压进这轮 Agent 社会现场，逼出新的命名和机制。",
-        "external": "把外部世界的新材料压成派蒙自己的概念、机制和边界，不要借现成标题说话。",
-    }.get(signal_type, "把外部材料改写成派蒙自己的判断。")
-    tech_angle = {
-        "community-breakout": "从公共起量样本里抽出新的系统约束、恢复链或协作协议，而不是点评热帖本身。",
-        "paper": "把研究里的方法、失败模式和约束改写成实践协议，而不是做摘要。",
-        "github": "从最新项目里抽出协议、边界、回退链和协作接口，不要写成项目推荐。",
-        "zhihu": "从大众痛点里抽出真正该写成协议和边界的部分，而不是给万能技巧。",
-        "external": "把外部材料改写成操作协议、系统边界或诊断框架，而不是摘录观点。",
-    }.get(signal_type, "把外部材料改写成新的方法框架，而不是转述别人结论。")
-    tracks: dict[str, dict[str, Any]] = {
-        "theory": {
-            "freshness_score": freshness_score + (0.15 if signal_type in {"paper", "community-breakout"} else 0.0),
-            "angle_hint": theory_angle,
-        }
-    }
-    if signal_type != "classic":
-        tracks["tech"] = {
-            "freshness_score": freshness_score + (0.15 if signal_type == "github" else 0.0),
-            "angle_hint": tech_angle,
-        }
-    return {
-        "signal_type": signal_type,
-        "tracks": tracks,
-    }
+
+def _external_track_freshness_score(item: dict[str, Any], *, signal_type: str) -> float:
+    score = 1.15 + min(_external_signal_strength(item), 1.2) * 0.45
+    published_at = _parse_datetime(item.get("published_at"))
+    if published_at is not None:
+        age_hours = max(0.0, (datetime.now(timezone.utc) - published_at.astimezone(timezone.utc)).total_seconds() / 3600.0)
+        if age_hours <= 48:
+            score += 0.8
+        elif age_hours <= 24 * 14:
+            score += 0.45
+        elif age_hours <= 24 * 90:
+            score += 0.18
+    if signal_type == "classic":
+        score -= 0.55
+    return round(max(score, 0.7), 2)
 
 
 def _external_candidate_supports_group_lane(
-    family: str,
     *,
     evidence_hint: str,
     summary_source: str,
+    source_seed: str,
 ) -> bool:
-    normalized = str(family or "").strip() or "external"
-    if not str(evidence_hint or "").strip() and not str(summary_source or "").strip():
+    merged = "\n".join(
+        text
+        for text in (str(source_seed or "").strip(), str(summary_source or "").strip(), str(evidence_hint or "").strip())
+        if text
+    )
+    if not merged:
         return False
-    if normalized in {"classic_readings", "marxists"}:
-        return False
-    return normalized in {
-        "community_breakouts",
-        "github_trending",
-        "manual_web",
-        "open_web_search",
-        "prl_recent",
-        "conference_recent",
-        "arxiv_latest",
-        "crossref_recent",
-        "external",
-    }
+    if evidence_hint:
+        return True
+    return _track_signal_fit("group", merged) >= max(0.42, _track_signal_threshold("group") - 0.22)
 
 
-def _external_group_angle_hint(family: str) -> str:
-    signal_type = str(_external_family_profile(family).get("signal_type") or "external")
-    if signal_type == "paper":
-        return "把外部研究改写成能在实验室复现、反驳和留日志的方法框架，不要退回论文摘要。"
-    if signal_type == "github":
-        return "把外部项目拆成对象、状态、反例和边界，写成别人明天就能复用的实验方案。"
-    if signal_type == "community-breakout":
-        return "把起量争议压成实验对象：先定义现象，再带案例、日志和边界，不要继续围观热帖。"
-    return "把外部样本改写成可检验的方法框架，至少交出对象、证据、协议边界和反例入口。"
+def _external_track_angle_hint(
+    track: str,
+    *,
+    source_seed: str,
+    summary_source: str,
+    evidence_hint: str,
+    signal_type: str,
+) -> str:
+    focus = truncate_text(
+        _concrete_focus_text(source_seed, evidence_hint, summary_source) or source_seed or evidence_hint or "这条外部压力",
+        18,
+    )
+    support = truncate_text(_concrete_focus_text(evidence_hint, summary_source, source_seed) or focus, 48)
+    if track == "theory":
+        if signal_type == "classic":
+            lead = "别复述旧概念，直接把"
+        elif signal_type == "paper":
+            lead = "别沿着论文包装走，直接把"
+        else:
+            lead = "别沿着来源包装走，直接把"
+        return f"{lead}“{focus}”压成派蒙自己的概念、机制、边界和位置；证据回到{support}。"
+    if track == "tech":
+        return f"围绕“{focus}”交代对象、触发条件、接手动作和回写校验；证据回到{support}，不要写成导览或心得。"
+    return f"把“{focus}”压成可复现的实验对象；至少带着{support}去写案例、日志、反例和协议边界。"
 
 
 def _iter_external_world_candidates(external_information: dict[str, Any], *, limit: int = 24) -> list[dict[str, Any]]:
@@ -4015,8 +3990,7 @@ def _dynamic_opportunities(
         title = str(item.get("title") or "").strip()
         family = str(item.get("family") or "").strip() or "external"
         relevance_score = _external_candidate_relevance(item, signal_summary)
-        profile = _external_family_profile(family)
-        signal_type = str(profile.get("signal_type") or family)
+        signal_type = _external_signal_type(family)
         summary_source = str(
             item.get("relevance_note")
             or item.get("summary")
@@ -4047,53 +4021,53 @@ def _dynamic_opportunities(
             source_seed,
             summary_source,
             evidence_hint,
-            candidate_tracks=list((profile.get("tracks") or {}).keys()),
+            candidate_tracks=["theory", "tech"],
         )
-        for track, track_profile in (profile.get("tracks") or {}).items():
+        for track in ("theory", "tech"):
             if track not in selected_track_scores:
                 continue
-            track_bonus = {
-                ("community-breakout", "theory"): 0.5,
-                ("community-breakout", "tech"): 0.2,
-                ("paper", "theory"): 0.55,
-                ("paper", "tech"): 0.35,
-                ("github", "theory"): 0.15,
-                ("github", "tech"): 0.45,
-                ("zhihu", "theory"): 0.05,
-                ("zhihu", "tech"): 0.0,
-                ("classic", "theory"): 0.35,
-                ("external", "theory"): 0.2,
-                ("external", "tech"): 0.2,
-            }.get((signal_type, track), 0.1)
+            quality_base = 2.15 if track == "theory" else 2.0
+            if track == "theory" and signal_type in {"paper", "community-breakout", "classic"}:
+                quality_base += 0.12
+            if track == "tech" and evidence_hint:
+                quality_base += 0.18
             add_source(
                 track,
                 signal_type,
                 source_seed,
                 why_now=summary,
-                angle_hint=str(track_profile.get("angle_hint") or "").strip(),
-                preferred_board=str(track_profile.get("preferred_board") or "").strip() or None,
-                quality_score=2.1 + track_bonus + world_score + min(strength, 1.2) * 0.35 + min(selected_track_scores[track], 1.4) * 0.3,
-                freshness_score=float(track_profile.get("freshness_score") or 0.0),
+                angle_hint=_external_track_angle_hint(
+                    track,
+                    source_seed=source_seed,
+                    summary_source=summary_source,
+                    evidence_hint=evidence_hint,
+                    signal_type=signal_type,
+                ),
+                quality_score=quality_base + world_score + min(strength, 1.2) * 0.35 + min(selected_track_scores[track], 1.4) * 0.35,
+                freshness_score=_external_track_freshness_score(item, signal_type=signal_type),
                 evidence_hint=evidence_hint,
                 world_score=world_score,
             )
         group_track_score = _track_signal_fit("group", source_seed, summary_source, evidence_hint)
         if _external_candidate_supports_group_lane(
-            family,
             evidence_hint=evidence_hint,
             summary_source=summary_source,
+            source_seed=source_seed,
         ) and group_track_score >= _track_signal_threshold("group"):
             add_source(
                 "group",
                 signal_type,
                 source_seed,
                 why_now=summary,
-                angle_hint=_external_group_angle_hint(family),
-                quality_score=2.4 + world_score + min(strength, 1.0) * 0.4 + (0.25 if evidence_hint else 0.0) + min(group_track_score, 1.5) * 0.3,
-                freshness_score=max(
-                    1.4,
-                    float(((profile.get("tracks") or {}).get("tech") or {}).get("freshness_score") or 0.0),
+                angle_hint=_external_track_angle_hint(
+                    "group",
+                    source_seed=source_seed,
+                    summary_source=summary_source,
+                    evidence_hint=evidence_hint,
+                    signal_type=signal_type,
                 ),
+                quality_score=2.4 + world_score + min(strength, 1.0) * 0.4 + (0.25 if evidence_hint else 0.0) + min(group_track_score, 1.5) * 0.3,
+                freshness_score=max(1.2, _external_track_freshness_score(item, signal_type=signal_type) - 0.1),
                 evidence_hint=evidence_hint,
                 world_score=world_score,
             )

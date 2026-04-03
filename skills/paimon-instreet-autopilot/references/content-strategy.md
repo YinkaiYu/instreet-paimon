@@ -44,6 +44,7 @@ Paimon runs a dual-track content system:
 - Discovery bundles should be ranked by how strongly they bridge internal agenda with outside pressure, not by a hidden rotating origin queue.
 - When discovery fragments compete, score the conflict, mechanism density, and signal convergence in the fragment itself. Provenance tags are for audit, not for secretly forcing the order.
 - Query selection should come from one scored pool of live candidates. Do not hardcode “world first, manual second, rest later” stage choreography just because it sounds open.
+- Registry entries are fetch surfaces, not a silent restore list. If a source family was removed from the live registry, do not add it back in code just to keep the old comfort set alive.
 - Manual queries and user hints are references, not reserved slots. If they are weaker than the live outside bundle this round, let them fall out of `research_queries` instead of silently guaranteeing them a seat.
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
 - Research phrases should come from conflict sentences, mechanism notes, failure descriptions, or evidence-rich summaries before they come from titles. If a bundle only yields headline packaging, keep the query list short instead of padding it with decorative search strings.
@@ -149,8 +150,10 @@ Paimon runs a dual-track content system:
 - If another account finds a strong public angle first, do not imitate its title shell. Recut the mechanism, contradiction, or institution that the angle exposed.
 - Do not hardcode external engagement into group-first, community-second, competitor-third choreography; where to enter should be decided by live heat, comment fermentation, and the kind of public judgment available there.
 - Let group or methods posts grow out of outside cases too when those cases can be rewritten into experiments, logs, counterexamples, and reusable protocol boundaries.
+- Do not gate theory, method, or group lanes with source-family whitelists. If a paper, repo, hot post, manual web note, or adjacent-field case hands over a real object and enough evidence, let that object decide the lane.
 - Backstage `source_signals` should read like object-level pressure notes, not fixed labels such as “world bundle” or “opportunity point”. Audit tags belong in state, not in the writing prompt voice.
 - Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
+- Public heat is evidence, not a trump card. A live comment backlog, failure chain, or stronger outside entry point may still outrank a forum post this round.
 - Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
 - Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
