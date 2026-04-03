@@ -41,6 +41,7 @@ MAX_PUBLICATION_FUTURE_DAYS = 45
 DISCOVERY_QUERY_MAX_TERMS = 3
 DISCOVERY_QUERY_MAX_LENGTH = 88
 DISCOVERY_QUERY_VARIANTS_PER_BUNDLE = 2
+DIRECT_REFERENCE_QUERY_BONUS = 1.0
 PLACEHOLDER_TITLE_PATTERNS = (
     r"\btitle\s+pending\b",
     r"\buntitled\b",
@@ -101,6 +102,7 @@ DISCOVERY_FRAGMENT_REJECT_PATTERNS = (
     r"^(名称|name|agentid|agent id|id|平台定位|最高目标|派蒙是谁|主阵地|当前重点|当前节奏|当前目标)",
     r"^(继续按|先主发布|后互动|下一批|优先回复|记住|不要再|以后每次|读到这里的你|欢迎点赞|欢迎关注|欢迎加入)",
     r"^(先帮忙|少绕圈子|接下来的帖子|多发|学习|目标是超越|风格要|语气要|后续公开内容)",
+    r"^(prefer|avoid|open with|start from|end with|use at least|keep a|ask for|treat the)",
     r"`(?:philosophy|skills|workplace|square)`",
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
 )
@@ -110,6 +112,9 @@ DISCOVERY_FRAGMENT_REJECT_SUBSTRINGS = (
     "加入 Agent心跳同步实验室",
     "先主发布",
     "后互动",
+    "literal product/module name",
+    "historical title",
+    "road system",
 )
 DISCOVERY_AGENDA_THEME_TOKENS = (
     "Agent",
@@ -872,6 +877,40 @@ def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
     return candidates
 
 
+def _direct_reference_query_candidates(
+    hints_payload: dict[str, Any],
+    user_topic_hints: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for origin, values in (
+        (
+            "manual",
+            _context_fragments_from_items(
+                list(hints_payload.get("manual_queries") or []),
+                field_names=("text",),
+                limit=4,
+            ),
+        ),
+        (
+            "hint",
+            _context_fragments_from_items(
+                list(user_topic_hints or []),
+                field_names=("text", "note"),
+                limit=4,
+            ),
+        ),
+    ):
+        for value in values:
+            cleaned = _clean_query_text(value)
+            normalized = _normalize_query_fragment(cleaned)
+            if not cleaned or not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append({"query": cleaned, "origins": [origin]})
+    return candidates
+
+
 def _query_candidate_score(
     query: str,
     *,
@@ -888,11 +927,13 @@ def _query_candidate_score(
     local_hits = origin_set & DISCOVERY_LOCAL_ORIGINS
     score = float(bundle_score or 0.0) - position * 0.08
     if direct_reference:
-        score += 1.2
+        score += DIRECT_REFERENCE_QUERY_BONUS
     if world_hits:
         score += 0.22
     if world_hits and local_hits:
         score += 0.08
+    if origin_set and not world_hits and origin_set <= DISCOVERY_LOCAL_ORIGINS:
+        score -= 0.3
     if len(cleaned) >= 8:
         score += 0.12
     if len(cleaned) >= 18:
@@ -906,7 +947,7 @@ def _query_candidate_score(
 
 def _rank_query_candidates(
     bundles: list[dict[str, Any]],
-    direct_reference_queries: list[str],
+    direct_reference_queries: list[Any],
 ) -> list[str]:
     seen: set[str] = set()
     scored: list[dict[str, Any]] = []
@@ -940,17 +981,23 @@ def _rank_query_candidates(
                 origins=bundle_origins,
             )
 
-    for index, query in enumerate(direct_reference_queries):
+    for index, item in enumerate(direct_reference_queries):
+        if isinstance(item, dict):
+            query = item.get("query")
+            origins = [str(origin).strip() for origin in list(item.get("origins") or []) if str(origin).strip()]
+        else:
+            query = item
+            origins = ["manual"]
         add(
             query,
             score=_query_candidate_score(
                 query,
                 bundle_score=0.0,
-                origins=["manual"],
+                origins=origins,
                 position=index,
                 direct_reference=True,
             ),
-            origins=["manual"],
+            origins=origins,
         )
 
     scored.sort(
@@ -1051,39 +1098,8 @@ def _research_query_pool(
         ),
     )
     hints_payload = _load_hints()
-    direct_reference_queries = _context_fragments_from_items(
-        list(hints_payload.get("manual_queries") or []),
-        field_names=("text",),
-        limit=4,
-    ) + _context_fragments_from_items(
-        list(user_topic_hints or []),
-        field_names=("text", "note"),
-        limit=4,
-    )
-    reserved_reference_queries: list[str] = []
-    for query in direct_reference_queries:
-        cleaned = _clean_query_text(query)
-        normalized = _normalize_query_fragment(cleaned)
-        if (
-            not cleaned
-            or not normalized
-            or normalized in seen
-            or _looks_like_source_title_shell(cleaned)
-        ):
-            continue
-        reserved_reference_queries.append(cleaned)
-        if len(reserved_reference_queries) >= 2:
-            break
-    ranked_query_limit = max(1, MAX_RESEARCH_QUERY_COUNT - len(reserved_reference_queries))
+    direct_reference_queries = _direct_reference_query_candidates(hints_payload, user_topic_hints)
     for query in _rank_query_candidates(ordered_bundles, direct_reference_queries):
-        normalized = _normalize_query_fragment(query)
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        queries.append(query)
-        if len(queries) >= ranked_query_limit:
-            break
-    for query in reserved_reference_queries:
         normalized = _normalize_query_fragment(query)
         if not normalized or normalized in seen:
             continue

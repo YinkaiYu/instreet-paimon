@@ -442,6 +442,83 @@ STOCK_THEORY_SCAFFOLD_FRAGMENTS = (
     "哪种 Agent 社会秩序正在决定谁能解释过去、谁承担代价、谁被迫等待",
     "把判断边界、证据入口、接管窗口和纠错责任写实",
 )
+GENERIC_METHOD_PLACEHOLDER_FRAGMENTS = (
+    "把失败链、状态链和恢复链拆成可复用机制",
+    "把表面失手翻成系统规则",
+    "最后必须落到新的操作协议、诊断顺序或恢复方针",
+    "给出新的操作协议",
+    "给出新的实验或治理协议",
+    "把争议最大的约束改写成协议、边界和实验",
+)
+STOCK_METHOD_SCAFFOLD_FRAGMENTS = (
+    "状态链、失败链、证据链、修复链",
+    "状态边界、接管窗口、证据回写",
+    "协议、状态分层、接管窗口和回退链",
+    "先界定接管窗口，再定义状态分层、证据保存、回退路径和复盘判据",
+)
+METHOD_TITLE_PACKAGING_TOKENS = (
+    "协议",
+    "框架",
+    "方法",
+    "流程",
+    "状态机",
+    "手册",
+    "清单",
+)
+METHOD_TITLE_CONCRETE_OBJECT_TOKENS = (
+    "评论",
+    "通知",
+    "抓取",
+    "申诉",
+    "归属",
+    "队列",
+    "接口",
+    "写入",
+    "回写",
+    "日志",
+    "脚本",
+    "记忆",
+    "审批",
+    "工单",
+    "权限",
+    "记录",
+    "上下文",
+    "心跳",
+    "调度",
+    "超时",
+    "检索",
+    "RAG",
+    "监测",
+    "私信",
+    "对话",
+    "缓存",
+)
+METHOD_TITLE_FAILURE_OR_PAYOFF_TOKENS = (
+    "误判",
+    "误判率",
+    "失败率",
+    "延迟",
+    "漏回",
+    "漏抓",
+    "超时",
+    "积压",
+    "返工",
+    "待处理",
+    "空转",
+    "卡住",
+    "提速",
+    "提效",
+    "降本",
+    "减半",
+    "砍半",
+    "缩短",
+    "清零",
+    "归零",
+    "止损",
+    "更稳",
+    "更快",
+    "更准",
+)
 LEGACY_STATE_ALIASES = {
     "external_information": "high_quality_sources",
     "source_mutation_state": "source_evolution_state",
@@ -1805,6 +1882,53 @@ def _contains_stock_theory_scaffold(text: str) -> bool:
     return any(_normalize_title(fragment) in normalized for fragment in STOCK_THEORY_SCAFFOLD_FRAGMENTS)
 
 
+def _looks_like_generic_method_field(text: str) -> bool:
+    normalized = _normalize_title(text)
+    if not normalized:
+        return False
+    return any(_normalize_title(fragment) in normalized for fragment in GENERIC_METHOD_PLACEHOLDER_FRAGMENTS)
+
+
+def _contains_stock_method_scaffold(text: str) -> bool:
+    normalized = _normalize_title(text)
+    if not normalized:
+        return False
+    return any(_normalize_title(fragment) in normalized for fragment in STOCK_METHOD_SCAFFOLD_FRAGMENTS)
+
+
+def _method_title_has_concrete_anchor(title: str) -> bool:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return False
+    if _contains_any(title_text, METHOD_TITLE_CONCRETE_OBJECT_TOKENS):
+        return True
+    if _contains_any(title_text, METHOD_TITLE_FAILURE_OR_PAYOFF_TOKENS):
+        return True
+    return bool(
+        re.search(
+            r"(误判率|失败率|延迟|成本|积压|返工|超时).{0,8}(砍半|减半|降低|压到|缩短|清零|归零|提速|提效|提升)",
+            title_text,
+        )
+    )
+
+
+def _method_title_protocol_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    lead = title_text.split("：", 1)[0].split(":", 1)[0].strip()
+    if not _contains_any(lead or title_text, METHOD_TITLE_PACKAGING_TOKENS):
+        return ""
+    if not (
+        re.search(r"[0-9一二三四五六七八九十两]+\s*(段|步|层|条|套)", lead)
+        or any((lead or title_text).endswith(token) for token in METHOD_TITLE_PACKAGING_TOKENS)
+    ):
+        return ""
+    if _method_title_has_concrete_anchor(title_text):
+        return ""
+    return "方法帖标题还在先报协议壳，没有先点明具体对象、故障或读者能拿走的收益。"
+
+
 def _idea_source_signal_fragments(idea: dict[str, Any], *, limit: int = 8) -> list[str]:
     fragments: list[str] = []
     seen: set[str] = set()
@@ -2716,6 +2840,20 @@ def _idea_method_specificity_issues(idea: dict[str, Any]) -> list[str]:
         issues.append("方法框架还停在导读、拆文或六步清单的话术")
     if not any(_text_mentions_idea_anchor(str(idea.get(field) or ""), anchors) for field in ("mechanism_core", "practice_program")):
         issues.append("方法框架还没咬住本题自己的对象、案例或证据锚点")
+    generic_fields = sum(
+        1
+        for field in ("angle", "why_now", "mechanism_core", "boundary_note", "practice_program")
+        if _looks_like_generic_method_field(str(idea.get(field) or ""))
+    )
+    if generic_fields >= 2:
+        issues.append("方法框架还是模板句，没有把这道题自己的对象、日志和改写动作写实")
+    stock_fields = sum(
+        1
+        for field in ("angle", "mechanism_core", "boundary_note", "practice_program")
+        if _contains_stock_method_scaffold(str(idea.get(field) or ""))
+    )
+    if stock_fields >= 1:
+        issues.append("方法框架还在复用旧协议壳，没有交出这次题目自己的故障对象和验证动作")
     return issues
 
 
@@ -2868,6 +3006,8 @@ def _audit_generated_idea(
         failure_reason = meta_reason
     elif kind == "theory-post" and (surface_reason := _theory_title_surface_overhang_reason(str(audited.get("title") or ""))):
         failure_reason = surface_reason
+    elif kind in {"tech-post", "group-post"} and (method_title_reason := _method_title_protocol_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = method_title_reason
     elif title_scene_overhang:
         failure_reason = (
             "标题还在拿外部场景当门口："
@@ -3413,13 +3553,20 @@ def _public_hot_forum_override(
     if not strong_public_signal:
         return {"enabled": False}
 
+    desired_kind = ""
+    if hottest_board in {"skills", "workplace"}:
+        desired_kind = "tech-post"
+    elif hottest_board in {"square", "philosophy"}:
+        desired_kind = "theory-post"
+    if desired_kind and desired_kind not in public_ideas:
+        return {"enabled": False}
+
     preferred_kinds: list[str] = []
-    if hottest_board in {"skills", "workplace"} and "tech-post" in public_ideas:
-        preferred_kinds.append("tech-post")
-    if "theory-post" in public_ideas:
-        preferred_kinds.append("theory-post")
-    if "tech-post" in public_ideas and "tech-post" not in preferred_kinds:
-        preferred_kinds.append("tech-post")
+    if desired_kind:
+        preferred_kinds.append(desired_kind)
+    for kind in ("theory-post", "tech-post"):
+        if kind in public_ideas and kind not in preferred_kinds:
+            preferred_kinds.append(kind)
 
     trigger_title = next(
         (
@@ -3963,7 +4110,7 @@ def _generate_codex_ideas(
    - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
    - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
    - `philosophy`：悖论、困境、真相、结构判断，要能引发站队或反驳。
-   - `skills`：数字、前后对比、失败链路、可复制规则。
+   - `skills`：数字、前后对比、失败链路、可复制规则；标题第一屏必须先点明具体对象、故障或收益，不要只报“4 段协议”“一套框架”这种内部包装。
 18. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
    - `square` 默认：`board_profile=square`, `hook_type=public-emotion`, `cta_type=comment-scene`
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`

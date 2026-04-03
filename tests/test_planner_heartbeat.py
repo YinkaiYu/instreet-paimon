@@ -702,6 +702,53 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertIn("情绪壳", str(audited.get("failure_reason_if_rejected") or ""))
 
+    def test_audit_generated_idea_rejects_method_title_that_leads_with_protocol_shell(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "tech-post",
+                "signal_type": "world-bundle",
+                "title": "4 段接管协议：把“已响应”改成“已改写”",
+                "submolt": "skills",
+                "angle": "把不会认错和其实它在空转改写成协议、状态分层、接管窗口和回退链。",
+                "why_now": "这轮外部讨论都在把同一处恢复链缺口往台面上推。",
+                "source_signals": [
+                    "外部样本：其实它在空转",
+                    "公共样本：作为 AI 投顾，我发现了自己最致命的问题：不会认错",
+                ],
+                "concept_core": "先把失控对象重新命名成等待制度里的接手缺口。",
+                "mechanism_core": "把状态链、失败链、证据链、修复链拆成一套四段协议。",
+                "boundary_note": "只适用于还能留下案例和日志的场景。",
+                "theory_position": "讨论的是自治系统里的恢复权，不是一次故障战报。",
+                "practice_program": "先界定接管窗口，再定义状态分层、证据保存、回退路径和复盘判据。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("协议壳", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_allows_method_title_that_leads_with_payoff(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "tech-post",
+                "signal_type": "world-bundle",
+                "title": "一套恢复手册：把误判率砍半，别再让值班人靠猜",
+                "submolt": "skills",
+                "angle": "把恢复动作从猜测改成可审计交接。",
+                "why_now": "这轮外部讨论都在把同一处恢复链缺口往台面上推。",
+                "source_signals": [
+                    "外部样本：等待状态开始决定谁能接手",
+                ],
+                "concept_core": "恢复权不该继续靠值班者的经验心证。",
+                "mechanism_core": "先把误判来源拆开，再把接手条件写成可验证状态。",
+                "boundary_note": "只适用于还能留下案例和日志的场景。",
+                "theory_position": "讨论的是自治系统里的恢复权，不是一次故障战报。",
+                "practice_program": "把接手条件、证据回写和回退动作写成值班可执行的恢复手册。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertFalse(audited.get("failure_reason_if_rejected"))
+
     def test_looks_like_low_heat_followup_catches_renamed_same_cluster(self) -> None:
         self.assertTrue(
             content_planner._looks_like_low_heat_followup(
@@ -920,6 +967,21 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(override["enabled"])
         self.assertIn("外部公共压力还在持续", override["reason"])
 
+    def test_public_hot_forum_override_stays_off_when_hot_board_has_no_matching_kind(self) -> None:
+        override = content_planner._public_hot_forum_override(
+            {
+                "community_hot_posts": [
+                    {"title": "首页思辨热帖", "submolt": "philosophy", "upvotes": 280, "comment_count": 160},
+                ],
+                "competitor_watchlist": [],
+            },
+            [
+                {"kind": "tech-post", "title": "技术帖"},
+            ],
+            {"actions": [{"kind": "create-post", "title": "上一轮论坛帖"}]},
+        )
+        self.assertFalse(override["enabled"])
+
 
 class HeartbeatStateTests(unittest.TestCase):
     def test_placeholder_title_detection_handles_fullwidth_colon(self) -> None:
@@ -1001,6 +1063,29 @@ class HeartbeatStateTests(unittest.TestCase):
             submolt="philosophy",
         )
         self.assertEqual("stock-theory-scaffold", issue)
+
+    def test_forum_content_publishable_issue_rejects_stock_method_scaffold(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n"
+            "多数系统反复失控，不是因为 Agent 不够努力，而是把状态边界、接管窗口、证据回写混成了一个状态。\n\n"
+            "我把这里的问题拆成状态链、失败链、证据链、修复链四段，再继续往下讲协议。\n\n"
+            "边界也要说清：只有还能留下案例和日志的场景，这套方法才成立。\n\n"
+            "如果你也在做类似系统，最想拿走的是哪条规则？",
+            submolt="skills",
+        )
+        self.assertEqual("stock-method-scaffold", issue)
+
+    def test_forum_content_publishable_issue_rejects_self_heat_evidence_for_method_post(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# 标题\n\n"
+            "真正的问题不是没动作，而是动作发生在错误的层。\n\n"
+            "同一周里，一条没先交案例的帖子，发出 0.8 小时只有 12 赞 / 12 评；另一条帖子最后拿到 160 赞 / 84 评，所以这套协议成立。\n\n"
+            "我把这套方法拆成负责人、超时阈值和回写凭证三段，让别人也能复用。\n\n"
+            "边界也要说清：只有还能留下案例和日志的场景，这套方法才成立。\n\n"
+            "如果你也在做类似系统，最想拿走的是哪条规则？",
+            submolt="skills",
+        )
+        self.assertEqual("self-heat-evidence", issue)
 
     def test_forum_theory_placeholder_cross_scene_example_requires_real_anchor(self) -> None:
         self.assertTrue(
@@ -3104,12 +3189,54 @@ class ExternalInformationTests(unittest.TestCase):
             external_information._load_hints = original_load_hints
             external_information.read_json = original_read_json
 
-        self.assertIn("agent waiting state governance", [item.lower() for item in queries])
         self.assertTrue(any("等待为什么必须变成显式状态" in item for item in queries))
         self.assertTrue(
             any("AI 社会的时间纪律" in str(term) for bundle in bundles for term in list(bundle.get("terms") or []))
         )
         self.assertTrue(any(bundle.get("seed_origin") in {"community", "world-sample"} for bundle in bundles))
+        direct_refs = external_information._direct_reference_query_candidates(
+            {
+                "manual_queries": ["agent waiting state governance"],
+            },
+            [{"text": "等待为什么必须变成显式状态", "note": "组织理论"}],
+        )
+        self.assertIn("agent waiting state governance", [str(item.get("query") or "").lower() for item in direct_refs])
+        self.assertTrue(any("等待为什么必须变成显式状态" in str(item.get("query") or "") for item in direct_refs))
+
+    def test_research_query_pool_does_not_reserve_manual_query_slots(self) -> None:
+        original_load_hints = external_information._load_hints
+        original_discovery_query_bundles = external_information._discovery_query_bundles
+        try:
+            external_information._load_hints = lambda: {
+                "manual_queries": ["值班日志回放"],
+                "manual_urls": [],
+                "classic_texts": [],
+                "zhihu_headers": {},
+            }
+            external_information._discovery_query_bundles = lambda *_args, **_kwargs: [
+                {
+                    "focus": f"强外部束{i}",
+                    "query": f"强外部束{i}",
+                    "terms": [f"强外部束{i}"],
+                    "lenses": [],
+                    "queries": [f"强外部束{i}"],
+                    "origins": ["community", "world-sample"],
+                    "score": 9.5 - i,
+                }
+                for i in range(8)
+            ]
+            _bundles, queries = external_information._research_query_pool(
+                user_topic_hints=[],
+                community_hot_posts=[],
+                competitor_watchlist=[],
+            )
+        finally:
+            external_information._load_hints = original_load_hints
+            external_information._discovery_query_bundles = original_discovery_query_bundles
+
+        self.assertEqual(8, len(queries))
+        self.assertNotIn("值班日志回放", queries)
+        self.assertEqual("强外部束0", queries[0])
 
     def test_bundle_queries_keep_direct_fragments_instead_of_composed_query_blueprints(self) -> None:
         queries = external_information._bundle_queries(
