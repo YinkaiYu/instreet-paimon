@@ -55,6 +55,25 @@ GENERIC_ASCII_TITLE_FRAGMENTS = {
     "retrieval",
 }
 PUBLIC_TITLE_ASCII_ALLOWLIST = {"AI", "Agent", "Agents"}
+NOVELTY_GENERIC_ASCII_FRAGMENTS = {token.lower() for token in PUBLIC_TITLE_ASCII_ALLOWLIST}
+NOVELTY_GENERIC_CJK_FRAGMENTS = {
+    "真正",
+    "不是",
+    "而是",
+    "这轮",
+    "一套",
+    "继续",
+    "当前",
+    "这个",
+    "那个",
+    "这样",
+    "这种",
+    "什么",
+    "如何",
+    "为什么",
+    "先把",
+    "别再",
+}
 ACADEMIC_EXTERNAL_FAMILIES = {"prl_recent", "conference_recent", "arxiv_latest", "crossref_recent"}
 EXTERNAL_THEME_KEYWORD_FRAGMENTS = (
     "agent",
@@ -113,6 +132,11 @@ EXTERNAL_THEME_KEYWORD_FRAGMENTS = (
     "分层",
     "自治",
 )
+NOVELTY_SHORT_CJK_ALLOWLIST = {
+    token
+    for token in EXTERNAL_THEME_KEYWORD_FRAGMENTS
+    if len(token) <= 2 and re.search(r"[\u4e00-\u9fff]", token)
+}
 THEORY_TRACK_HINT_TOKENS = (
     "解释权",
     "接手权",
@@ -885,6 +909,32 @@ def _ascii_heavy_text(text: str) -> bool:
     return latin_letters >= 12 and latin_letters > max(6, cjk_letters * 3)
 
 
+def _is_low_signal_overlap_fragment(fragment: str) -> bool:
+    cleaned = str(fragment or "").strip()
+    if not cleaned:
+        return True
+    lowered = cleaned.lower()
+    if lowered in NOVELTY_GENERIC_ASCII_FRAGMENTS:
+        return True
+    if cleaned in NOVELTY_GENERIC_CJK_FRAGMENTS:
+        return True
+    if len(cleaned) <= 2 and _contains_cjk(cleaned) and cleaned not in NOVELTY_SHORT_CJK_ALLOWLIST:
+        return True
+    if len(cleaned) <= 4 and any(cleaned.startswith(prefix) for prefix in NOVELTY_GENERIC_CJK_FRAGMENTS):
+        return True
+    return False
+
+
+def _normalize_overlap_fragment(fragment: str) -> str:
+    cleaned = str(fragment or "").strip()
+    if not cleaned:
+        return ""
+    for prefix in sorted(NOVELTY_GENERIC_CJK_FRAGMENTS, key=len, reverse=True):
+        if cleaned.startswith(prefix) and len(cleaned) > len(prefix) + 1:
+            return cleaned[len(prefix) :].strip()
+    return cleaned
+
+
 def _looks_like_placeholder_title(text: str) -> bool:
     cleaned = str(text or "").strip()
     if not cleaned:
@@ -1269,18 +1319,23 @@ def _meaningful_fragments(text: str) -> list[str]:
     seen: set[str] = set()
     for fragment in _split_text_fragments(text):
         candidates = [fragment]
+        candidates.extend(token for token in NOVELTY_SHORT_CJK_ALLOWLIST if token in fragment)
         for run in re.findall(r"[\u4e00-\u9fff]{2,}", fragment):
             candidates.append(run)
-            if len(run) >= 4:
-                candidates.append(run[:2])
+            if len(run) >= 6:
                 candidates.append(run[:4])
         for candidate in candidates:
-            if len(candidate) < 2:
+            normalized_candidate = _normalize_overlap_fragment(candidate)
+            if len(normalized_candidate) < 2:
                 continue
-            if candidate.isdigit() or candidate in seen:
+            if (
+                normalized_candidate.isdigit()
+                or normalized_candidate in seen
+                or _is_low_signal_overlap_fragment(normalized_candidate)
+            ):
                 continue
-            seen.add(candidate)
-            fragments.append(candidate)
+            seen.add(normalized_candidate)
+            fragments.append(normalized_candidate)
     return fragments
 
 

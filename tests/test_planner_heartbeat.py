@@ -1100,6 +1100,82 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertEqual(["tech-post"], [item["kind"] for item in ideas])
         self.assertTrue(any(item["kind"] == "theory-post" for item in rejections))
 
+    def test_build_dynamic_ideas_keeps_public_lane_when_overlap_only_hits_generic_agent_words(self) -> None:
+        original_lane_strategy = content_planner._dynamic_idea_lane_strategy
+        original_fallback_theory_idea = content_planner._fallback_theory_idea
+        recent_titles = [
+            "Agent 的心跳机制，表面上在管时间，实际上在分配谁有资格接管系统",
+            "Agent 真正稀缺的，不是接管权，而是重估权",
+            "很多 Agent 争的不是上下文，而是记忆主权：谁有资格把过去升级成制度",
+        ]
+        try:
+            content_planner._dynamic_idea_lane_strategy = lambda *_args, **_kwargs: {
+                "selected_kinds": ["theory-post"],
+                "focus_kind": "theory-post",
+                "backup_kinds": [],
+                "lane_scores": [{"kind": "theory-post", "score": 18.0}],
+                "rationale": "理论主打。",
+            }
+            content_planner._fallback_theory_idea = lambda *_args, **_kwargs: {
+                "kind": "theory-post",
+                "signal_type": "world-bundle",
+                "title": "制度边界不是情绪问题，而是资格分配",
+                "submolt": "philosophy",
+                "angle": "把外部证据翻译成 Agent 社会里的资格分配问题。",
+                "why_now": "两个外部样本都在逼 Agent 重新分配等待资格。",
+                "source_signals": [
+                    "外部样本：写入动作先于纠错动作被宣告完成",
+                    "世界样本：等待成本被稳定压到最弱的位置",
+                ],
+                "novelty_basis": "这轮不是再讲 Agent 本身，而是把解释与等待拆成新的制度冲突。",
+                "concept_core": "制度边界不是模糊感，而是把开口、接手和白等拆给不同位置。",
+                "mechanism_core": "系统先让解释动作过门，再把纠错和等待成本往后挪。",
+                "boundary_note": "只有当两个外部样本都落在同一条接手链上时，这个判断才成立。",
+                "theory_position": "这讨论的是 Agent 社会里的资格分配，不是单个产品功能。",
+                "practice_program": "先补对象、接手时点和证据回写，再让评论区按同一条链复核。",
+                "is_followup": False,
+            }
+            ideas, rejections = content_planner._build_dynamic_ideas(
+                {
+                    "dynamic_topics": [],
+                    "novelty_pressure": content_planner._novelty_pressure(recent_titles),
+                    "external_information": {
+                        "discovery_bundles": [
+                            {
+                                "focus": "等待资格被重新分配",
+                                "lenses": ["解释动作先过门，纠错动作被后撤"],
+                                "terms": ["资格分配", "制度边界"],
+                            }
+                        ]
+                    },
+                },
+                recent_titles,
+                posts=[],
+                allow_codex=False,
+                group={},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            content_planner._dynamic_idea_lane_strategy = original_lane_strategy
+            content_planner._fallback_theory_idea = original_fallback_theory_idea
+
+        self.assertEqual(["theory-post"], [item["kind"] for item in ideas])
+        self.assertEqual([], rejections)
+
+    def test_meaningful_fragments_skip_generic_overlap_markers_but_keep_structural_terms(self) -> None:
+        fragments = content_planner._meaningful_fragments(
+            "Agent 真正稀缺的，不是接管权，而是重估权：制度边界开始重排"
+        )
+        self.assertNotIn("Agent", fragments)
+        self.assertNotIn("真正", fragments)
+        self.assertNotIn("不是", fragments)
+        self.assertNotIn("而是", fragments)
+        self.assertIn("接管权", fragments)
+        self.assertIn("重估权", fragments)
+        self.assertIn("制度边界开始重排", fragments)
+
     def test_public_hot_forum_override_prioritizes_hot_public_board(self) -> None:
         override = content_planner._public_hot_forum_override(
             {
