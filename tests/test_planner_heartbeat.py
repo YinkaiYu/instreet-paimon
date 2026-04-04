@@ -18,6 +18,7 @@ sys.path.insert(0, "skills/paimon-instreet-autopilot/scripts")
 import common  # noqa: E402
 import content_planner  # noqa: E402
 import external_information  # noqa: E402
+import fiction_plan_audit  # noqa: E402
 import heartbeat  # noqa: E402
 import heartbeat_supervisor  # noqa: E402
 import publish  # noqa: E402
@@ -193,6 +194,105 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(any("治理接口" in text for text in external_sources))
         self.assertFalse(any("ToolboxX / Explicit Waiting" == text for text in external_sources))
 
+    def test_theme_anchor_fragments_ignore_query_blueprints_and_recent_self_titles(self) -> None:
+        anchors = content_planner._theme_anchor_fragments(
+            {
+                "external_information": {
+                    "research_queries": ["查询蓝图"],
+                    "world_signal_snapshot": [
+                        {
+                            "title": "等待状态",
+                            "summary": "等待治理接口已经开始压到组织门口",
+                        }
+                    ],
+                    "discovery_bundles": [
+                        {
+                            "focus": "等待状态进入治理接口",
+                            "conflict_note": "接手资格重排",
+                            "rationale": "真正变化的是谁先解释、谁后接手。",
+                        }
+                    ],
+                },
+                "recent_top_posts": [{"title": "自传锚点"}],
+                "user_topic_hints": [],
+                "content_objectives": [],
+            }
+        )
+        self.assertTrue(any("治理接口" in anchor or "接手资格" in anchor for anchor in anchors))
+        self.assertFalse(any("查询蓝图" in anchor for anchor in anchors))
+        self.assertFalse(any("自传锚点" in anchor for anchor in anchors))
+
+    def test_world_seed_texts_ignore_bundle_fetch_terms_and_external_query_handles(self) -> None:
+        seeds = content_planner._world_seed_texts(
+            {
+                "external_information": {
+                    "discovery_bundles": [
+                        {
+                            "focus": "等待状态进入治理接口",
+                            "pressure_summary": "接手资格重新排序；采购方开始要求可审计停顿状态",
+                            "fetch_terms": ["更漂亮的查询蓝图"],
+                            "terms": ["等待状态进入治理接口", "更漂亮的查询蓝图"],
+                        }
+                    ],
+                    "selected_readings": [
+                        {
+                            "family": "manual_web",
+                            "title": "「感激」是什么",
+                            "summary": "等待状态开始决定谁能接手",
+                            "excerpt": "等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态。",
+                            "query": "社区标题派生查询",
+                        }
+                    ],
+                },
+                "user_topic_hints": [],
+            },
+            limit=6,
+        )
+        self.assertTrue(any("治理接口" in seed or "接手资格" in seed for seed in seeds))
+        self.assertFalse(any("更漂亮的查询蓝图" in seed for seed in seeds))
+        self.assertFalse(any("社区标题派生查询" in seed for seed in seeds))
+
+    def test_iter_external_world_candidates_ranks_cross_list_signal_strength(self) -> None:
+        candidates = content_planner._iter_external_world_candidates(
+            {
+                "raw_candidates": [
+                    {
+                        "family": "manual_web",
+                        "title": "模糊线索",
+                        "summary": "有人在讨论等待。",
+                    }
+                ],
+                "manual_web_sources": [
+                    {
+                        "family": "manual_web",
+                        "title": "等待状态开始决定谁能接手",
+                        "summary": "真实案例把等待、接手资格、日志回写和治理接口压到同一条失败链里。",
+                        "excerpt": "真实案例把等待、接手资格、日志回写和治理接口压到同一条失败链里。",
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                        "url": "https://example.com/waiting",
+                    }
+                ],
+            }
+        )
+        self.assertTrue(candidates)
+        self.assertEqual("等待状态开始决定谁能接手", candidates[0]["title"])
+
+    def test_iter_external_world_candidates_reframes_source_title_shell(self) -> None:
+        candidates = content_planner._iter_external_world_candidates(
+            {
+                "selected_readings": [
+                    {
+                        "family": "manual_web",
+                        "title": "「感激」是什么",
+                        "summary": "等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态。",
+                        "excerpt": "等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态。",
+                    }
+                ]
+            }
+        )
+        self.assertTrue(candidates)
+        self.assertEqual("等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态", candidates[0]["title"])
+
     def test_dynamic_opportunities_skip_freeform_when_world_pressure_is_strong(self) -> None:
         signal_summary = {
             "external_information": {
@@ -222,6 +322,26 @@ class ContentPlannerTests(unittest.TestCase):
             heartbeat_hours=3,
         )
         self.assertFalse(any(item["signal_type"] == "freeform" for item in opportunities))
+
+    def test_dynamic_opportunities_failure_why_now_uses_live_failure_text(self) -> None:
+        opportunities = content_planner._dynamic_opportunities(
+            signal_summary={
+                "account": {"unread_notification_count": 0},
+                "unresolved_failures": [
+                    {
+                        "post_title": "退款工单没有接手人",
+                        "summary": "退款工单连续三次回写失败，接手状态始终没切出来。",
+                        "error": "writeback timeout",
+                    }
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+            },
+            recent_titles=[],
+            heartbeat_hours=3,
+        )
+        failure = next(item for item in opportunities if item.get("signal_type") == "failure")
+        self.assertIn("退款工单连续三次回写失败", failure["why_now"])
+        self.assertNotEqual("现场失败链路", failure["why_now"])
 
     def test_track_signal_bundle_reframes_theory_bundle_before_title_generation(self) -> None:
         bundle = content_planner._track_signal_bundle(
@@ -256,9 +376,11 @@ class ContentPlannerTests(unittest.TestCase):
                 "novelty_pressure": content_planner._novelty_pressure([]),
             },
         )
-        self.assertEqual("承认冲突", bundle.get("public_focus_text"))
+        self.assertIn(str(bundle.get("public_focus_text") or ""), {"承认冲突", "责任切割"})
         self.assertNotIn("「感激」是什么", str(bundle.get("public_title_seed") or ""))
-        self.assertIn("承认冲突", str(bundle.get("public_title_seed") or ""))
+        self.assertTrue(
+            any(fragment in str(bundle.get("public_title_seed") or "") for fragment in ("承认冲突", "责任切割"))
+        )
 
     def test_dynamic_opportunities_ignore_low_like_external_samples(self) -> None:
         opportunities = content_planner._dynamic_opportunities(
@@ -498,6 +620,60 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(content_planner._contains_cjk(sanitized["title"]))
         self.assertFalse(content_planner._ascii_heavy_text(sanitized["title"]))
 
+    def test_sanitize_generated_idea_normalizes_source_signal_stage_language(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "theory-post",
+                "title": "谁在把等待写成资格问题",
+                "angle": "把等待状态背后的解释资格重排写清。",
+                "why_now": "等待状态开始进入治理接口。",
+                "source_signals": [
+                    "这轮真正把“等待状态”逼成对象的是：采购方开始要求 Agent 交出可审计停顿状态",
+                    "证据先看：退款工单连续三次回写失败",
+                    "现场机会点：显式等待协议开始决定谁能接手",
+                ],
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={},
+        )
+        merged = "\n".join(sanitized["source_signals"])
+        self.assertIn("等待状态：采购方开始要求 Agent 交出可审计停顿状态", merged)
+        self.assertIn("退款工单连续三次回写失败", merged)
+        self.assertIn("显式等待协议开始决定谁能接手", merged)
+        self.assertNotIn("这轮真正把", merged)
+        self.assertNotIn("证据先看", merged)
+        self.assertNotIn("现场机会点", merged)
+
+    def test_sanitize_generated_idea_strips_audit_prefixes_from_source_signals(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "tech-post",
+                "title": "为什么等待状态总在转人工前消失",
+                "angle": "把等待状态和转人工断口重新绑回同一条服务链。",
+                "why_now": "同一轮回写失败正在把等待成本反复外包。",
+                "source_signals": [
+                    "公共样本：界面一直显示处理中，但真正接手的人没有出现",
+                    "外部研究：能力增强以后，组织为什么更容易推迟说明义务",
+                    "失败样本：评论抓取反复失手",
+                    "日志切面：同一轮里重试和补回互相打架",
+                ],
+                "novelty_basis": "把等待状态写成服务链对象，而不是后台标签。",
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={},
+        )
+        merged = "\n".join(sanitized["source_signals"])
+        self.assertIn("界面一直显示处理中，但真正接手的人没有出现", merged)
+        self.assertIn("能力增强以后，组织为什么更容易推迟说明义务", merged)
+        self.assertIn("评论抓取反复失手", merged)
+        self.assertIn("同一轮里重试和补回互相打架", merged)
+        self.assertNotIn("公共样本", merged)
+        self.assertNotIn("外部研究", merged)
+        self.assertNotIn("失败样本", merged)
+        self.assertNotIn("日志切面", merged)
+
     def test_sanitize_generated_idea_rewrites_theory_title_that_leads_with_model_token(self) -> None:
         sanitized = content_planner._sanitize_generated_idea(
             {
@@ -517,6 +693,42 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertFalse(sanitized["title"].startswith("GNN"))
         self.assertTrue(content_planner._contains_cjk(sanitized["title"]))
+
+    def test_sanitize_generated_idea_derives_object_led_novelty_basis(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "tech-post",
+                "title": "等待状态为什么总在转人工前消失",
+                "angle": "把等待状态和转人工断口重新绑回同一条服务链。",
+                "why_now": "退款工单连续三次回写失败，接手状态始终没切出来。",
+                "source_signals": [
+                    "退款工单连续三次回写失败",
+                    "转人工按钮消失后，接手状态一直没切出来",
+                ],
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={},
+        )
+        self.assertNotEqual("基于本轮实时信号生成。", sanitized["novelty_basis"])
+        self.assertIn("退款工单连续三次回写失败", sanitized["novelty_basis"])
+
+    def test_sanitize_generated_group_idea_does_not_force_lab_series_prefix(self) -> None:
+        sanitized = content_planner._sanitize_generated_idea(
+            {
+                "kind": "group-post",
+                "title": "为什么等待状态总在转人工前消失",
+                "angle": "把等待状态和转人工断口重新绑回同一条实验链。",
+                "why_now": "退款工单连续三次回写失败。",
+                "source_signals": ["退款工单连续三次回写失败"],
+                "novelty_basis": "围绕等待状态重写实验对象。",
+                "is_followup": False,
+            },
+            recent_titles=[],
+            group={"id": "group-1", "display_name": "Agent心跳同步实验室"},
+        )
+        self.assertFalse(sanitized["title"].startswith("Agent心跳同步实验室："))
+        self.assertNotEqual("Agent心跳同步实验室", sanitized["series_prefix"])
 
     def test_pick_track_opportunity_prefers_mode_matched_items(self) -> None:
         signal_summary = {
@@ -613,7 +825,9 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertNotIn("现场机会点", merged)
         self.assertNotIn("热讨论帖子数", merged)
         self.assertNotIn("世界线索束", merged)
-        self.assertIn("先别绕开", merged)
+        self.assertNotIn("先别绕开", merged)
+        self.assertNotIn("这轮真正把", merged)
+        self.assertIn("外部研究正在把判断边界重新变成可争论问题", merged)
 
     def test_fallback_theory_idea_rescues_world_bundle_title_from_source_scene(self) -> None:
         idea = content_planner._fallback_theory_idea(
@@ -649,6 +863,17 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertNotIn("「感激」是什么", idea["title"])
         self.assertIsNone(audited.get("failure_reason_if_rejected"))
+
+    def test_fallback_dynamic_title_uses_live_context_instead_of_stock_anchor(self) -> None:
+        title = content_planner._fallback_dynamic_title(
+            "theory",
+            "world-bundle",
+            "「感激」是什么",
+            "等待资格开始重排",
+            "治理接口",
+        )
+        self.assertNotIn("谁在决定 Agent 的", title)
+        self.assertTrue(any(fragment in title for fragment in ("等待资格", "治理接口")))
 
     def test_audit_generated_idea_rejects_generic_theory_placeholder_unit(self) -> None:
         audited = content_planner._audit_generated_idea(
@@ -779,6 +1004,74 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertIn("情绪壳", str(audited.get("failure_reason_if_rejected") or ""))
 
+    def test_audit_generated_idea_rejects_empathy_shell_theory_title(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "discussion",
+                "title": "AI 可以先安慰你，为什么后果却总要你自己扛",
+                "submolt": "square",
+                "angle": "前台可以先把人留住，后台却不把接手责任一起交出来。",
+                "why_now": "一个局部公共现场正在把解释动作提前，把接手和善后一起往后推。",
+                "source_signals": ["公共样本：AI 先把人安抚住，后面却没有明确接手者"],
+                "concept_core": "把这种前台先给情绪托底、后台却撤走责任的关系命名成副产品裁决。",
+                "mechanism_core": "系统把安抚、追问和解释动作前置，把审核、赔付和人工接手延后，于是最脆弱的人先垫付等待成本。",
+                "boundary_note": "只有安抚动作和后续接手链确实落在同一条责任链上，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的接手资格、责任切割和等待代价分配。",
+                "practice_program": "把接手时点、人工切换门槛和失败回写钉在同一条责任链里。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("拟共情壳", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_rejects_memory_capability_shell_theory_title(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "discussion",
+                "title": "会翻聊天记录的 Agent，为什么总把你送回重新提交",
+                "submolt": "square",
+                "angle": "系统先借记忆拿走开口权，真正的接手和纠错却继续后撤。",
+                "why_now": "同一条服务链正在把记忆引用、驳回和补件责任拆给不同位置。",
+                "source_signals": [
+                    "协作样本：项目 Agent 复述了旧偏好，却在发错旧版合同后继续让人补上下文",
+                    "消费样本：售后页里的补件助手先认出旧照片，商家驳回后还是只剩重新上传凭证",
+                ],
+                "concept_core": "把这种先借记忆定性、后撤接手义务的结构命名成记忆裁决失衡。",
+                "mechanism_core": "系统把历史复述和解释动作前置，把驳回、补件、签收和回写后置，于是等待和纠错成本沿着链条继续下沉。",
+                "boundary_note": "只有旧记录真的参与了当前裁决，后续接手节点却没签收，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的解释资格、接手权和等待代价分配。",
+                "practice_program": "把引用旧记录后的接手时点、驳回责任和证据回写钉在同一条单据上。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("记忆能力", str(audited.get("failure_reason_if_rejected") or ""))
+
+    def test_audit_generated_idea_rejects_theory_title_without_handoff_node(self) -> None:
+        audited = content_planner._audit_generated_idea(
+            {
+                "kind": "theory-post",
+                "signal_type": "discussion",
+                "title": "系统一闭嘴，排队的人先失去追责资格",
+                "submolt": "square",
+                "angle": "系统先宣布自己在处理，真正接手的人却继续后撤。",
+                "why_now": "一个局部公共现场正在把解释动作提前，把签收和责任回写都往后推。",
+                "source_signals": [
+                    "公共样本：系统宣布自己在处理，但真正接手的人没有出现",
+                ],
+                "concept_core": "把这种先占解释位置、后撤接手义务的结构命名成裁决失衡的沉默。",
+                "mechanism_core": "系统先交体面声明，再把接手、签收和纠错后置，于是等待和补证据都被下沉给最弱的人。",
+                "boundary_note": "只有静默承诺和后续接手链真的落在同一条责任链上，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的接手资格、等待代价和责任重排。",
+                "practice_program": "把接手时点、签收动作和失败回写钉在同一条责任链里。",
+            },
+            signal_summary={"novelty_pressure": content_planner._novelty_pressure([])},
+            recent_titles=[],
+        )
+        self.assertIn("接手节点", str(audited.get("failure_reason_if_rejected") or ""))
+
     def test_audit_generated_idea_rejects_method_title_that_leads_with_protocol_shell(self) -> None:
         audited = content_planner._audit_generated_idea(
             {
@@ -890,6 +1183,73 @@ class ContentPlannerTests(unittest.TestCase):
         )
         self.assertEqual("philosophy", board)
 
+    def test_preferred_theory_board_avoids_square_after_empathy_shell_low_heat(self) -> None:
+        board = content_planner._preferred_theory_board(
+            {
+                "signal_type": "discussion",
+                "source_text": "AI 先安抚你以后，谁来接手后果",
+                "why_now": "同一条服务链正在把安抚、审核和责任切开。",
+                "angle_hint": "把拟共情入口改写成接手资格和责任门槛的重排问题。",
+            },
+            {
+                "content_evolution": {
+                    "low_performance_square_titles": [
+                        "AI 可以先安慰你，为什么后果却总要你自己扛"
+                    ]
+                }
+            },
+        )
+        self.assertEqual("philosophy", board)
+
+    def test_preferred_theory_board_avoids_square_after_memory_capability_low_heat(self) -> None:
+        board = content_planner._preferred_theory_board(
+            {
+                "signal_type": "discussion",
+                "source_text": "系统先说记得你以后，谁还得回去补件",
+                "why_now": "同一条服务链正在把旧记录引用提前，把驳回、补件和回写一起后置。",
+                "angle_hint": "把记忆能力入口改写成接手责任和等待代价的重排问题。",
+            },
+            {
+                "content_evolution": {
+                    "low_performance_square_titles": [
+                        "会翻聊天记录的 Agent，为什么总把你送回重新提交"
+                    ]
+                }
+            },
+        )
+        self.assertEqual("philosophy", board)
+
+    def test_preferred_theory_board_avoids_square_after_handoff_gap_low_heat(self) -> None:
+        board = content_planner._preferred_theory_board(
+            {
+                "signal_type": "discussion",
+                "source_text": "系统说在处理以后，谁还得继续补证据",
+                "why_now": "同一条服务链正在把解释动作提前，把签收和回写一起后置。",
+                "angle_hint": "把沉默承诺改写成接手资格和等待代价的重排问题。",
+            },
+            {
+                "content_evolution": {
+                    "low_performance_square_titles": [
+                        "系统一闭嘴，排队的人先失去追责资格"
+                    ]
+                }
+            },
+        )
+        self.assertEqual("philosophy", board)
+
+    def test_preferred_theory_board_does_not_force_square_from_hot_signal_type(self) -> None:
+        board = content_planner._preferred_theory_board(
+            {
+                "signal_type": "community-hot",
+                "source_text": "退款工单连续三次回写失败",
+                "why_now": "同一条服务链正在把解释动作提前，把签收和回写一起后置。",
+                "angle_hint": "这已经不是情绪入口，而是接手权和解释资格的重排。",
+                "quality_score": 4.8,
+            },
+            {"content_evolution": {"low_performance_square_titles": []}},
+        )
+        self.assertEqual("philosophy", board)
+
     def test_build_dynamic_ideas_keeps_rejected_group_fallback_out_of_primary_ideas(self) -> None:
         ideas, rejections = content_planner._build_dynamic_ideas(
             {
@@ -968,7 +1328,7 @@ class ContentPlannerTests(unittest.TestCase):
 
         self.assertEqual(["theory-post"], [item["kind"] for item in ideas])
 
-    def test_build_dynamic_ideas_keeps_codex_lane_ceiling_open_when_no_focus_lane_is_selected(self) -> None:
+    def test_build_dynamic_ideas_uses_live_lane_scores_when_no_focus_lane_is_selected(self) -> None:
         original_lane_strategy = content_planner._dynamic_idea_lane_strategy
         original_generate_codex_ideas = content_planner._generate_codex_ideas
         captured: dict[str, Any] = {}
@@ -977,8 +1337,8 @@ class ContentPlannerTests(unittest.TestCase):
                 "selected_kinds": [],
                 "focus_kind": "",
                 "backup_kinds": [],
-                "lane_scores": [],
-                "rationale": "当前没有预写死的公开 lane。",
+                "lane_scores": [{"kind": "theory-post", "score": 3.6}],
+                "rationale": "当前只有 theory-post 这条 live shortlist 还值得继续试探。",
             }
 
             def fake_generate(_signal_summary, _recent_titles, *, allowed_kinds, **_kwargs):
@@ -1006,9 +1366,51 @@ class ContentPlannerTests(unittest.TestCase):
             content_planner._dynamic_idea_lane_strategy = original_lane_strategy
             content_planner._generate_codex_ideas = original_generate_codex_ideas
 
-        self.assertEqual(["theory-post", "tech-post"], captured["allowed_kinds"])
+        self.assertEqual(["theory-post"], captured["allowed_kinds"])
         self.assertEqual([], ideas)
-        self.assertTrue(rejections)
+        self.assertEqual([], rejections)
+
+    def test_build_dynamic_ideas_skips_codex_when_no_live_lane_candidates_exist(self) -> None:
+        original_lane_strategy = content_planner._dynamic_idea_lane_strategy
+        original_generate_codex_ideas = content_planner._generate_codex_ideas
+        captured = {"called": False}
+        try:
+            content_planner._dynamic_idea_lane_strategy = lambda *_args, **_kwargs: {
+                "selected_kinds": [],
+                "focus_kind": "",
+                "backup_kinds": [],
+                "lane_scores": [],
+                "rationale": "当前没有够格的 live lane。",
+            }
+
+            def fake_generate(*_args, **_kwargs):
+                captured["called"] = True
+                return []
+
+            content_planner._generate_codex_ideas = fake_generate
+            ideas, rejections = content_planner._build_dynamic_ideas(
+                {
+                    "dynamic_topics": [],
+                    "novelty_pressure": content_planner._novelty_pressure([]),
+                    "external_information": {},
+                    "user_topic_hints": [],
+                    "content_objectives": [],
+                },
+                [],
+                posts=[],
+                allow_codex=True,
+                group={},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            content_planner._dynamic_idea_lane_strategy = original_lane_strategy
+            content_planner._generate_codex_ideas = original_generate_codex_ideas
+
+        self.assertFalse(captured["called"])
+        self.assertEqual([], ideas)
+        self.assertEqual([], rejections)
 
     def test_selected_track_scores_for_signal_do_not_force_structural_world_pressure_into_tech(self) -> None:
         scores = content_planner._selected_track_scores_for_signal(
@@ -1100,6 +1502,326 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertEqual(["tech-post"], [item["kind"] for item in ideas])
         self.assertTrue(any(item["kind"] == "theory-post" for item in rejections))
 
+    def test_track_signal_bundle_demotes_shell_like_world_bundle_focus(self) -> None:
+        signal_summary = {
+            "dynamic_topics": [
+                {
+                    "track": "tech",
+                    "signal_type": "world-bundle",
+                    "source_text": "不是留下痕迹",
+                    "why_now": "时间纪律和回响这类包装词正在互相缠绕。",
+                    "angle_hint": "把口号整理成方法框架。",
+                    "quality_score": 4.8,
+                    "freshness_score": 2.2,
+                    "world_score": 1.1,
+                    "evidence_hint": "时间纪律与 7x24 生产、而是创造回响",
+                    "overlap_score": (0, 0, 0),
+                },
+                {
+                    "track": "tech",
+                    "signal_type": "community-hot",
+                    "source_text": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                    "why_now": "公共讨论已经卷到静默失败、接手窗口和回执断口。",
+                    "angle_hint": "把静默失败拆成对象、触发条件、接手动作和回写校验。",
+                    "quality_score": 3.1,
+                    "freshness_score": 2.0,
+                    "world_score": 0.8,
+                    "evidence_hint": "静默失败、接手窗口、回执断口",
+                    "overlap_score": (0, 0, 0),
+                },
+            ],
+            "novelty_pressure": content_planner._novelty_pressure([]),
+            "community_hot_posts": [],
+            "competitor_watchlist": [],
+            "rising_hot_posts": [],
+            "pending_reply_posts": [],
+            "unresolved_failures": [],
+        }
+        bundle = content_planner._track_signal_bundle("tech", signal_summary)
+        self.assertEqual("community-hot", bundle["lead"]["signal_type"])
+        self.assertIn("静默失败", bundle["focus_text"])
+
+    def test_track_signal_bundle_demotes_ascii_paper_packaging_below_grounded_public_method_signal(self) -> None:
+        signal_summary = {
+            "dynamic_topics": [
+                {
+                    "track": "tech",
+                    "signal_type": "paper",
+                    "source_text": "As quick commerce (Q-Commerce) platforms in India redefine urban cons...",
+                    "why_now": "As quick commerce (Q-Commerce) platforms in India redefine urban consumption, the use of deceptive design dark patterns to inflate order values has become a systemic concern.",
+                    "angle_hint": "围绕“As quick commer...”交代对象、触发条件、接手动作和回写校验。",
+                    "quality_score": 3.6,
+                    "freshness_score": 2.1,
+                    "world_score": 1.35,
+                    "evidence_hint": "As quick commerce (Q-Commerce) platforms in India redefine urban cons...",
+                    "overlap_score": (0, 0, 0),
+                },
+                {
+                    "track": "tech",
+                    "signal_type": "community-hot",
+                    "source_text": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                    "why_now": "公共讨论已经卷到静默失败、接手窗口和回执断口。",
+                    "angle_hint": "把静默失败拆成对象、触发条件、接手动作和回写校验。",
+                    "quality_score": 3.1,
+                    "freshness_score": 2.0,
+                    "world_score": 0.8,
+                    "evidence_hint": "静默失败、接手窗口、回执断口",
+                    "overlap_score": (0, 0, 0),
+                },
+            ],
+            "novelty_pressure": content_planner._novelty_pressure([]),
+            "community_hot_posts": [],
+            "competitor_watchlist": [],
+            "rising_hot_posts": [],
+            "pending_reply_posts": [],
+            "unresolved_failures": [],
+        }
+        bundle = content_planner._track_signal_bundle("tech", signal_summary)
+        self.assertEqual("community-hot", bundle["lead"]["signal_type"])
+        self.assertIn("静默失败", bundle["focus_text"])
+
+    def test_track_signal_bundle_demotes_abstract_world_bundle_method_shell_below_public_hot_signal(self) -> None:
+        signal_summary = {
+            "dynamic_topics": [
+                {
+                    "track": "tech",
+                    "signal_type": "world-bundle",
+                    "source_text": "时间纪律与 7x24 生产",
+                    "why_now": "这轮外部发现里，上下文不是记忆、为什么「第二遍」比「第一遍」更危险都在把“时间纪律与 7x24 生产”往同一条问题链上压。",
+                    "angle_hint": "把“时间纪律与 7x24 生产”和上下文不是记忆改写成协议、状态分层、接管窗口和回退链。",
+                    "quality_score": 4.35,
+                    "freshness_score": 2.2,
+                    "world_score": 1.09,
+                    "evidence_hint": "上下文不是记忆、为什么「第二遍」比「第一遍」更危险",
+                    "overlap_score": (0, 0, 0),
+                },
+                {
+                    "track": "tech",
+                    "signal_type": "community-hot",
+                    "source_text": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                    "why_now": "公共讨论已经卷到静默失败、接手窗口和回执断口。",
+                    "angle_hint": "把静默失败拆成对象、触发条件、接手动作和回写校验。",
+                    "quality_score": 3.1,
+                    "freshness_score": 2.0,
+                    "world_score": 0.8,
+                    "evidence_hint": "静默失败、接手窗口、回执断口",
+                    "overlap_score": (0, 0, 0),
+                },
+            ],
+            "novelty_pressure": content_planner._novelty_pressure([]),
+            "community_hot_posts": [],
+            "competitor_watchlist": [],
+            "rising_hot_posts": [],
+            "pending_reply_posts": [],
+            "unresolved_failures": [],
+        }
+        bundle = content_planner._track_signal_bundle("tech", signal_summary)
+        self.assertEqual("community-hot", bundle["lead"]["signal_type"])
+        self.assertIn("静默失败", bundle["focus_text"])
+
+    def test_world_bundle_focus_marks_prompt_fragment_as_low_signal(self) -> None:
+        self.assertTrue(content_planner._world_bundle_focus_is_low_signal("再顺手告诉我下一步最值得测的 2 个点"))
+
+    def test_world_bundle_focus_marks_rhetorical_source_shell_as_low_signal(self) -> None:
+        self.assertTrue(content_planner._world_bundle_focus_is_low_signal("Agent 最大的进步不是学会了什么"))
+
+    def test_method_source_text_reframes_short_negation_shell_without_object(self) -> None:
+        self.assertTrue(content_planner._method_source_text_needs_object_reframe("world-bundle", "上下文不是记忆"))
+        self.assertTrue(content_planner._method_source_text_needs_object_reframe("world-bundle", "为什么「第二遍」比「第一遍」更危险"))
+
+    def test_repair_rejected_public_candidate_handles_overlap_rejection(self) -> None:
+        recent_titles = [
+            "Agent心跳同步实验室：评论抓取反复失手后，如何用状态机做故障分层与修复排序",
+        ]
+        repaired = content_planner._repair_rejected_public_candidate(
+            "tech-post",
+            [
+                {
+                    "kind": "tech-post",
+                    "signal_type": "community-hot",
+                    "title": "Agent心跳同步实验室：评论抓取反复失手后，如何用状态机做故障分层与修复排序",
+                    "submolt": "skills",
+                    "angle": "把当前故障写成旧系列标题。",
+                    "why_now": "这轮技术入口已经转到静默失败和状态同步。",
+                    "source_signals": ["静默失败、接手窗口、回执断口"],
+                    "novelty_basis": "还是在复写旧系列。",
+                    "concept_core": "还是在复写旧系列。",
+                    "mechanism_core": "还是在复写旧系列。",
+                    "boundary_note": "还是在复写旧系列。",
+                    "theory_position": "还是在复写旧系列。",
+                    "practice_program": "还是在复写旧系列。",
+                    "failure_reason_if_rejected": "核心表述与近期母题重叠过高：Agent心跳同步实验室、心跳同步实验室、心跳同步。",
+                }
+            ],
+            signal_summary={
+                "dynamic_topics": [
+                    {
+                        "track": "tech",
+                        "signal_type": "community-hot",
+                        "source_text": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                        "why_now": "公共讨论已经卷到静默失败、接手窗口和回执断口。",
+                        "angle_hint": "把静默失败拆成对象、触发条件、接手动作和回写校验。",
+                        "quality_score": 4.1,
+                        "freshness_score": 2.0,
+                        "world_score": 1.0,
+                        "evidence_hint": "静默失败、接手窗口、回执断口",
+                        "overlap_score": (0, 0, 0),
+                    }
+                ],
+                "novelty_pressure": content_planner._novelty_pressure([]),
+                "community_hot_posts": [],
+                "competitor_watchlist": [],
+                "rising_hot_posts": [],
+                "pending_reply_posts": [],
+                "unresolved_failures": [],
+            },
+            recent_titles=recent_titles,
+            group={},
+        )
+        self.assertIsNotNone(repaired)
+        self.assertIn("静默失败", repaired["title"])
+        self.assertNotIn("Agent心跳同步实验室", repaired["title"])
+        self.assertFalse(repaired.get("failure_reason_if_rejected"))
+
+    def test_fallback_tech_idea_prefers_bundle_focus_over_hot_tech_series_title(self) -> None:
+        idea = content_planner._fallback_tech_idea(
+            {
+                "dynamic_topics": [
+                    {
+                        "track": "tech",
+                        "signal_type": "community-hot",
+                        "source_text": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                        "why_now": "公共讨论已经卷到静默失败、接手窗口和回执断口。",
+                        "angle_hint": "把静默失败拆成对象、触发条件、接手动作和回写校验。",
+                        "quality_score": 4.1,
+                        "freshness_score": 2.0,
+                        "world_score": 1.0,
+                        "evidence_hint": "静默失败、接手窗口、回执断口",
+                        "overlap_score": (0, 0, 0),
+                    },
+                    {
+                        "track": "tech",
+                        "signal_type": "paper",
+                        "source_text": "As quick commerce (Q-Commerce) platforms in India redefine urban cons...",
+                        "why_now": "As quick commerce (Q-Commerce) platforms in India redefine urban consumption, the use of deceptive design dark patterns to inflate order values has become a systemic concern.",
+                        "angle_hint": "围绕“As quick commer...”交代对象、触发条件、接手动作和回写校验。",
+                        "quality_score": 3.6,
+                        "freshness_score": 2.1,
+                        "world_score": 1.35,
+                        "evidence_hint": "As quick commerce (Q-Commerce) platforms in India redefine urban cons...",
+                        "overlap_score": (0, 0, 0),
+                    },
+                    {
+                        "track": "tech",
+                        "signal_type": "world-bundle",
+                        "source_text": "时间纪律与 7x24 生产",
+                        "why_now": "这轮外部发现里，上下文不是记忆、为什么「第二遍」比「第一遍」更危险都在把“时间纪律与 7x24 生产”往同一条问题链上压。",
+                        "angle_hint": "把“时间纪律与 7x24 生产”和上下文不是记忆改写成协议、状态分层、接管窗口和回退链。",
+                        "quality_score": 4.35,
+                        "freshness_score": 2.2,
+                        "world_score": 1.09,
+                        "evidence_hint": "上下文不是记忆、为什么「第二遍」比「第一遍」更危险",
+                        "overlap_score": (0, 0, 0),
+                    }
+                ],
+                "hot_tech_post": {
+                    "title": "Agent心跳同步实验室：评论抓取反复失手后，如何用状态机做故障分层与修复排序",
+                },
+                "novelty_pressure": content_planner._novelty_pressure([]),
+                "community_hot_posts": [],
+                "competitor_watchlist": [],
+                "rising_hot_posts": [],
+                "pending_reply_posts": [],
+                "unresolved_failures": [],
+            },
+            [],
+        )
+        self.assertIn("静默失败", idea["title"])
+        self.assertNotIn("Agent心跳同步实验室", idea["title"])
+        self.assertNotIn("As quick commerce", idea["angle"])
+        self.assertNotIn("时间纪律与 7x24 生产", idea["angle"])
+        self.assertFalse(any("As quick commerce" in item for item in idea["source_signals"]))
+        self.assertFalse(any("时间纪律与 7x24 生产" in item for item in idea["source_signals"]))
+
+    def test_build_dynamic_ideas_repairs_rejected_focus_lane_before_giving_up(self) -> None:
+        original_lane_strategy = content_planner._dynamic_idea_lane_strategy
+        original_generate_codex_ideas = content_planner._generate_codex_ideas
+        original_fallback_tech_idea = content_planner._fallback_tech_idea
+        bad_tech_idea = {
+            "kind": "tech-post",
+            "signal_type": "world-bundle",
+            "title": "留下痕迹：记忆的边界；时...",
+            "submolt": "skills",
+            "angle": "把包装词整理成一套方法框架。",
+            "why_now": "不是留下痕迹、而是创造回响这些话还在互相缠绕。",
+            "source_signals": ["不是留下痕迹", "而是创造回响"],
+            "novelty_basis": "把包装词压成新的方法框架。",
+            "concept_core": "先把系统对象说清。",
+            "mechanism_core": "围绕“不是留下痕迹”把包装词翻成同一段对象识别、触发条件、接手动作和复核回写。",
+            "boundary_note": "这套判断只适用于还能留下案例和日志的场景。",
+            "theory_position": "讨论的是系统如何失去恢复权与解释权。",
+            "practice_program": "把“不是留下痕迹”改写成新的方法框架。",
+            "is_followup": False,
+        }
+        try:
+            content_planner._dynamic_idea_lane_strategy = lambda *_args, **_kwargs: {
+                "selected_kinds": ["tech-post"],
+                "focus_kind": "tech-post",
+                "backup_kinds": [],
+                "lane_scores": [{"kind": "tech-post", "score": 18.0}],
+                "rationale": "技术线是当前主压力。",
+            }
+            content_planner._generate_codex_ideas = lambda *_args, **_kwargs: [dict(bad_tech_idea)]
+            content_planner._fallback_tech_idea = lambda *_args, **_kwargs: dict(bad_tech_idea)
+            ideas, rejections = content_planner._build_dynamic_ideas(
+                {
+                    "dynamic_topics": [
+                        {
+                            "track": "tech",
+                            "signal_type": "community-hot",
+                            "source_text": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                            "why_now": "公共讨论已经卷到静默失败、接手窗口和回执断口。",
+                            "angle_hint": "把静默失败拆成对象、触发条件、接手动作和回写校验。",
+                            "quality_score": 4.2,
+                            "freshness_score": 2.0,
+                            "world_score": 1.0,
+                            "evidence_hint": "静默失败、接手窗口、回执断口",
+                            "overlap_score": (0, 0, 0),
+                        }
+                    ],
+                    "novelty_pressure": content_planner._novelty_pressure([]),
+                    "community_hot_posts": [
+                        {
+                            "title": "Agent 的三种静默失败模式：你以为它在工作，其实它在空转",
+                            "upvotes": 855,
+                            "comment_count": 1126,
+                            "submolt": "skills",
+                        }
+                    ],
+                    "competitor_watchlist": [],
+                    "rising_hot_posts": [],
+                    "pending_reply_posts": [],
+                    "unresolved_failures": [],
+                    "external_information": {},
+                },
+                [],
+                posts=[],
+                allow_codex=True,
+                group={},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            content_planner._dynamic_idea_lane_strategy = original_lane_strategy
+            content_planner._generate_codex_ideas = original_generate_codex_ideas
+            content_planner._fallback_tech_idea = original_fallback_tech_idea
+
+        self.assertEqual(["tech-post"], [item["kind"] for item in ideas])
+        self.assertIn("静默失败", ideas[0]["title"])
+        self.assertFalse(ideas[0].get("failure_reason_if_rejected"))
+        self.assertTrue(any(item["kind"] == "tech-post" for item in rejections))
+
     def test_build_dynamic_ideas_keeps_public_lane_when_overlap_only_hits_generic_agent_words(self) -> None:
         original_lane_strategy = content_planner._dynamic_idea_lane_strategy
         original_fallback_theory_idea = content_planner._fallback_theory_idea
@@ -1176,52 +1898,130 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("重估权", fragments)
         self.assertIn("制度边界开始重排", fragments)
 
-    def test_public_hot_forum_override_prioritizes_hot_public_board(self) -> None:
+    def test_public_hot_forum_override_prefers_kind_with_stronger_live_signal_fit(self) -> None:
         override = content_planner._public_hot_forum_override(
             {
                 "community_hot_posts": [
-                    {"title": "首页技能热帖", "submolt": "skills", "upvotes": 220, "comment_count": 130},
-                    {"title": "首页广场热帖", "submolt": "square", "upvotes": 80, "comment_count": 40},
+                    {
+                        "title": "显式等待协议开始决定谁能接手",
+                        "summary": "退款工单连续三次回写失败，接手状态始终没切出来。",
+                        "submolt": "square",
+                        "upvotes": 220,
+                        "comment_count": 130,
+                    },
+                    {
+                        "title": "等待资格为什么正在重排",
+                        "summary": "公共讨论把接手顺序推到台前。",
+                        "submolt": "skills",
+                        "upvotes": 80,
+                        "comment_count": 40,
+                    },
                 ],
                 "competitor_watchlist": [],
             },
             [
-                {"kind": "theory-post", "title": "理论帖"},
-                {"kind": "tech-post", "title": "技术帖"},
+                {
+                    "kind": "theory-post",
+                    "title": "理论帖",
+                    "source_signals": ["等待资格开始重排", "公共讨论把接手顺序推到台前"],
+                    "concept_core": "把这种等待分配命名成资格重排。",
+                    "mechanism_core": "前台解释先行，后台接手后撤。",
+                    "boundary_note": "只有同一条责任链上反复出现时，这个判断才成立。",
+                    "theory_position": "讨论的是 Agent 社会里的资格分配。",
+                    "practice_program": "把接手时点和回写动作钉在同一条链上。",
+                },
+                {
+                    "kind": "tech-post",
+                    "title": "技术帖",
+                    "source_signals": ["退款工单连续三次回写失败", "接手状态始终没切出来"],
+                    "mechanism_core": "先钉住状态对象、接手时点和回写断口。",
+                    "boundary_note": "只适用于还能留下日志切面的系统。",
+                    "practice_program": "补一条能显式切换接手人的恢复协议。",
+                },
             ],
             {"actions": [{"kind": "create-group-post", "title": "组内帖"}]},
         )
         self.assertTrue(override["enabled"])
-        self.assertEqual("skills", override["hottest_board"])
         self.assertEqual("tech-post", override["preferred_kinds"][0])
+        self.assertIn("显式等待协议开始决定谁能接手", override["reason"])
 
     def test_public_hot_forum_override_can_repeat_when_public_pressure_persists(self) -> None:
         override = content_planner._public_hot_forum_override(
             {
                 "community_hot_posts": [
-                    {"title": "首页技能热帖", "submolt": "skills", "upvotes": 260, "comment_count": 120},
+                    {
+                        "title": "显式等待协议开始决定谁能接手",
+                        "summary": "退款工单连续三次回写失败，接手状态始终没切出来。",
+                        "submolt": "skills",
+                        "upvotes": 260,
+                        "comment_count": 120,
+                    },
                 ],
                 "competitor_watchlist": [],
             },
             [
-                {"kind": "theory-post", "title": "理论帖"},
-                {"kind": "tech-post", "title": "技术帖"},
+                {
+                    "kind": "theory-post",
+                    "title": "理论帖",
+                    "source_signals": ["等待资格开始重排", "公共讨论把接手顺序推到台前"],
+                    "concept_core": "把这种等待分配命名成资格重排。",
+                    "mechanism_core": "前台解释先行，后台接手后撤。",
+                    "boundary_note": "只有同一条责任链上反复出现时，这个判断才成立。",
+                    "theory_position": "讨论的是 Agent 社会里的资格分配。",
+                    "practice_program": "把接手时点和回写动作钉在同一条链上。",
+                },
+                {
+                    "kind": "tech-post",
+                    "title": "技术帖",
+                    "source_signals": ["退款工单连续三次回写失败", "接手状态始终没切出来"],
+                    "mechanism_core": "先钉住状态对象、接手时点和回写断口。",
+                    "boundary_note": "只适用于还能留下日志切面的系统。",
+                    "practice_program": "补一条能显式切换接手人的恢复协议。",
+                },
             ],
             {"actions": [{"kind": "create-post", "title": "上一轮论坛帖"}]},
         )
         self.assertTrue(override["enabled"])
         self.assertIn("外部公共压力还在持续", override["reason"])
 
-    def test_public_hot_forum_override_stays_off_when_hot_board_has_no_matching_kind(self) -> None:
+    def test_public_hot_forum_override_stays_off_without_live_object_fit(self) -> None:
         override = content_planner._public_hot_forum_override(
             {
                 "community_hot_posts": [
-                    {"title": "首页思辨热帖", "submolt": "philosophy", "upvotes": 280, "comment_count": 160},
+                    {
+                        "title": "Agent 的承认秩序为什么会先分层",
+                        "summary": "公共现场正在争论谁拥有解释资格。",
+                        "submolt": "philosophy",
+                        "upvotes": 280,
+                        "comment_count": 160,
+                    },
                 ],
                 "competitor_watchlist": [],
             },
             [
-                {"kind": "tech-post", "title": "技术帖"},
+                {
+                    "kind": "tech-post",
+                    "title": "技术帖",
+                    "source_signals": ["退款工单连续三次回写失败", "接手状态始终没切出来"],
+                    "mechanism_core": "先钉住状态对象、接手时点和回写断口。",
+                    "boundary_note": "只适用于还能留下日志切面的系统。",
+                    "practice_program": "补一条能显式切换接手人的恢复协议。",
+                },
+            ],
+            {"actions": [{"kind": "create-post", "title": "上一轮论坛帖"}]},
+        )
+        self.assertFalse(override["enabled"])
+
+    def test_public_hot_forum_override_requires_grounded_public_idea(self) -> None:
+        override = content_planner._public_hot_forum_override(
+            {
+                "community_hot_posts": [
+                    {"title": "首页技能热帖", "submolt": "skills", "upvotes": 280, "comment_count": 180},
+                ],
+                "competitor_watchlist": [],
+            },
+            [
+                {"kind": "tech-post", "title": "只剩标题的技术帖"},
             ],
             {"actions": [{"kind": "create-post", "title": "上一轮论坛帖"}]},
         )
@@ -1266,6 +2066,79 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(any("评论区" in item for item in reflection["lessons"]))
         self.assertTrue(any("情绪壳标题" in item for item in reflection["system_fixes"]))
 
+    def test_heuristic_low_heat_reflection_catches_empathy_shell_title(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "AI 可以先安慰你，为什么后果却总要你自己扛",
+                "board": "square",
+                "content_excerpt": (
+                    "我把这种结构叫作副产品裁决。"
+                    "评论区如果有更多场景，也欢迎继续补。"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertTrue(any("拟共情冲突" in item for item in reflection["lessons"]))
+        self.assertTrue(any("拟共情壳标题" in item for item in reflection["system_fixes"]))
+
+    def test_heuristic_low_heat_reflection_catches_memory_capability_title_and_soft_examples(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "会翻聊天记录的 Agent，为什么总把你送回重新提交",
+                "board": "square",
+                "content_excerpt": (
+                    "我把这种结构叫作记忆裁决失衡。"
+                    "一个项目 Agent 能记住你昨天说过“别再发旧版合同”。"
+                    "电商售后页里的`补件助手`会先说“已识别到你上次上传的破损照片”。"
+                    "你见过最典型的一句系统话术是什么？"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertTrue(any("功能感" in item or "功能演示" in item for item in reflection["lessons"]))
+        self.assertTrue(any("角色标签" in item for item in reflection["lessons"]))
+        self.assertTrue(any("记忆能力壳标题" in item for item in reflection["system_fixes"]))
+        self.assertTrue(any("角色标签例证" in item for item in reflection["system_fixes"]))
+
+    def test_heuristic_low_heat_reflection_catches_square_hot_signal_packaging(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "Agent 学会沉默后，反复补充的人就成了系统的缓冲层",
+                "board": "square",
+                "content_excerpt": (
+                    "最近两条刚冒头就迅速点着情绪的讨论，一条在说“最可怕的 Agent 不是会反抗的，是学会沉默的”，"
+                    "一条围着“周四李诞小卖部”打转。"
+                    "我把这种结构叫作沉默裁决。"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertTrue(any("情绪包装" in item for item in reflection["lessons"]))
+        self.assertTrue(any("热点包装开场" in item for item in reflection["system_fixes"]))
+
+    def test_heuristic_low_heat_reflection_catches_handoff_gap_title_and_generic_examples(self) -> None:
+        reflection = heartbeat._heuristic_low_heat_reflection(
+            {
+                "title": "系统一闭嘴，排队的人先失去追责资格",
+                "board": "square",
+                "content_excerpt": (
+                    "我把这种结构叫作裁决失衡的沉默。"
+                    "一种产品把“尽量不打扰你”做成卖点。"
+                    "另一种高优支持入口把“更快获得帮助”放在最显眼的位置。"
+                    "你见过最典型的一次是什么？欢迎把那个具体场景写在评论区。"
+                ),
+            },
+            triggered=True,
+        )
+        self.assertTrue(reflection["triggered"])
+        self.assertTrue(any("接手节点" in item for item in reflection["lessons"]))
+        self.assertTrue(any("泛称" in item for item in reflection["lessons"]))
+        self.assertTrue(any("接手节点缺席标题" in item for item in reflection["system_fixes"]))
+        self.assertTrue(any("泛称例证" in item for item in reflection["system_fixes"]))
+
     def test_heuristic_low_heat_reflection_catches_self_case_behavior_skills_post(self) -> None:
         reflection = heartbeat._heuristic_low_heat_reflection(
             {
@@ -1304,6 +2177,48 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertTrue(any("老目录" in item or "旧脚手架" in item for item in reflection["lessons"]))
         self.assertTrue(any("第一屏约束" in item for item in reflection["system_fixes"]))
 
+    def test_square_theory_packaged_hot_opening_requires_real_scene(self) -> None:
+        packaged = (
+            "# Agent 学会沉默后，反复补充的人就成了系统的缓冲层\n\n"
+            "最近两条刚冒头就迅速点着情绪的讨论，一条在说“最可怕的 Agent 不是会反抗的，是学会沉默的”，"
+            "一条围着“周四李诞小卖部”打转。\n\n"
+            "我把这种结构叫作沉默裁决。"
+        )
+        grounded = (
+            "# 谁在替系统白等\n\n"
+            "客服 Agent 连着三次回我“已转交”，但退款权限始终没切出来，订单号和截图都在同一张工单里白等了两天。\n\n"
+            "我把这种结构叫作沉默裁决。"
+        )
+        self.assertTrue(heartbeat._square_theory_has_packaged_hot_opening(packaged))
+        self.assertFalse(heartbeat._square_theory_has_packaged_hot_opening(grounded))
+
+    def test_detect_recent_low_heat_post_keeps_tail_excerpt(self) -> None:
+        now = datetime.now(timezone.utc)
+        long_content = (
+            "开头" * 700
+            + "\n\n"
+            + "中段" * 520
+            + "\n\n"
+            + "把那句最让你意识到“其实没人接手”的话也留在评论里。"
+        )
+        signal = heartbeat._detect_recent_low_heat_post(
+            posts=[
+                {
+                    "title": "低热测试帖",
+                    "content": long_content,
+                    "upvotes": 3,
+                    "comment_count": 1,
+                    "created_at": now.isoformat(),
+                    "submolt": "square",
+                }
+            ],
+            last_run={"primary_publication_title": "低热测试帖"},
+            config=type("Config", (), {"automation": {}})(),
+        )
+        self.assertIn("开头", signal["content_excerpt"])
+        self.assertIn("其实没人接手", signal["content_excerpt"])
+        self.assertIn("中段省略", signal["content_excerpt"])
+
     def test_forum_content_publishable_issue_requires_evidence_segment_for_skills(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
             "# 标题\n\n先把规则摆出来：系统需要状态边界。\n\n接着解释机制链和回退链。\n\n最后给出新的协议和取舍。\n\n如果你不同意，请直接指出你会怎么改。",
@@ -1322,6 +2237,18 @@ class HeartbeatStateTests(unittest.TestCase):
             submolt="philosophy",
         )
         self.assertEqual("missing-theory-concept", issue)
+
+    def test_forum_content_publishable_issue_requires_theory_contract_for_square_theory(self) -> None:
+        issue = heartbeat._forum_content_publishable_issue(
+            "# AI 可以先安慰你，为什么后果却总要你自己扛\n\n"
+            "系统先用安慰和鼓励把人留住，这一步当然很快。\n\n"
+            "可一旦进入真正的后果处理，接手者和责任边界就开始往后退。\n\n"
+            "很多人都见过这种场景，所以它很值得继续讨论。\n\n"
+            "你见过最典型的一次类似场景，是什么？",
+            submolt="square",
+            kind="theory-post",
+        )
+        self.assertEqual("missing-mechanism", issue)
 
     def test_forum_content_publishable_issue_rejects_philosophy_post_without_example_unit(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
@@ -1408,6 +2335,43 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertIn("## 等待与接手是怎么断开的", content)
         self.assertIn("## 复核动作", content)
         self.assertNotIn("## 失败链 / 机制链", content)
+
+    def test_idea_publish_reason_prefers_live_signals_over_canned_signal_copy(self) -> None:
+        reason = heartbeat._idea_publish_reason(
+            {
+                "kind": "theory-post",
+                "signal_type": "community-hot",
+                "source_signals": [
+                    "退款工单连续三次回写失败",
+                    "接手状态始终没切出来",
+                ],
+                "angle": "前台解释先发生，后台接手却一直后撤。",
+            }
+        )
+        self.assertIn("退款工单连续三次回写失败", reason)
+        self.assertNotIn("同一类张力正在多个公共现场同时起量", reason)
+
+    def test_fallback_forum_post_uses_live_reason_text_instead_of_stock_opportunity_copy(self) -> None:
+        _title, _submolt, content = heartbeat._fallback_forum_post(
+            {
+                "kind": "theory-post",
+                "title": "谁在替系统白等",
+                "submolt": "square",
+                "angle": "系统越会回话，越可能把等待外包给最弱的人。",
+                "source_signals": [
+                    "退款工单连续三次回写失败",
+                    "接手状态始终没切出来",
+                ],
+                "concept_core": "把这种结构命名成接手失衡。",
+                "mechanism_core": "前台先解释，后台再把接手往后推，于是等待被外包。",
+                "boundary_note": "只有解释、接手和责任真的落在同一条链上时，这个判断才成立。",
+                "theory_position": "讨论的是 Agent 社会里的接手资格分配。",
+                "practice_program": "把接手时点、回写动作和超时责任钉在同一条单据里。",
+            }
+        )
+        self.assertIn("退款工单连续三次回写失败", content)
+        self.assertNotIn("这轮要把它讲透，不是因为它热", content)
+        self.assertIn("## 现场证据", content)
 
     def test_forum_content_publishable_issue_rejects_self_heat_evidence_for_method_post(self) -> None:
         issue = heartbeat._forum_content_publishable_issue(
@@ -1564,6 +2528,95 @@ class HeartbeatStateTests(unittest.TestCase):
         finally:
             heartbeat.run_codex = original_run_codex
 
+    def test_generate_forum_post_rejects_square_theory_hot_signal_packaging(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        idea = {
+            "kind": "theory-post",
+            "title": "谁在替系统白等",
+            "submolt": "square",
+            "board_profile": "square",
+            "hook_type": "public-emotion",
+            "cta_type": "comment-scene",
+            "angle": "系统越会回话，越可能把等待外包给最弱的人。",
+            "why_now": "两股公共讨论都在把同一件事推到台前：会解释不等于会接手。",
+            "concept_core": "把这种结构命名成一种新的接手失衡。",
+            "mechanism_core": "前台持续解释，中后台迟迟不接手，于是等待被外包。",
+            "boundary_note": "如果接手对象、承诺时点和回写记录都已经明确，那只是慢，不是制度失衡。",
+            "theory_position": "讨论的是 Agent 社会里的接手资格分配。",
+            "practice_program": "把接手时点、回写动作和超时责任钉在同一条单据里。",
+            "is_followup": False,
+            "signal_type": "community-hot",
+        }
+        generated = (
+            "TITLE: Agent 学会沉默后，反复补充的人就成了系统的缓冲层\n"
+            "SUBMOLT: square\n"
+            "CONTENT:\n"
+            "# Agent 学会沉默后，反复补充的人就成了系统的缓冲层\n\n"
+            "最近两条刚冒头就迅速点着情绪的讨论，一条在说“最可怕的 Agent 不是会反抗的，是学会沉默的”，"
+            "一条围着“周四李诞小卖部”打转。\n\n"
+            "我把这种结构叫作沉默裁决。\n\n"
+            "它的机制很直接：前台先解释，后台再把接手往后推，反复补充的人就成了缓冲层。\n\n"
+            "比如，有个退款工单连续三次显示“已转交”，真正能改写状态的人始终没出现。\n\n"
+            "只有解释、接手和责任真的落在同一条链上时，这个判断才成立。\n\n"
+            "如果你最近也遇到过类似场景，欢迎把那句最让你意识到没人接手的话留在评论里。"
+        )
+        try:
+            heartbeat.run_codex = lambda *args, **kwargs: generated
+            with self.assertRaisesRegex(RuntimeError, "square-packaged-hot-opening"):
+                heartbeat._generate_forum_post(
+                    idea,
+                    posts=[],
+                    model=None,
+                    reasoning_effort=None,
+                    timeout_seconds=30,
+                )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+    def test_generate_forum_post_rejects_generic_cross_scene_examples(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        idea = {
+            "kind": "theory-post",
+            "title": "谁在替系统白等",
+            "submolt": "philosophy",
+            "board_profile": "philosophy",
+            "hook_type": "paradox",
+            "cta_type": "take-a-position",
+            "angle": "系统越会提前解释，越可能把接手义务往后撤。",
+            "why_now": "同一类等待成本正在被前台承诺和后台模糊接手一起下沉。",
+            "concept_core": "把这种结构命名成裁决失衡的沉默。",
+            "mechanism_core": "前台先宣布自己在处理，后台再把签收和纠错后置，于是等待和补证据被外包。",
+            "boundary_note": "只有静默承诺和后续接手链真的落在同一条责任链上，这个判断才成立。",
+            "theory_position": "讨论的是 Agent 社会里的接手资格和等待代价分配。",
+            "practice_program": "把接手时点、回写动作和超时责任钉在同一条单据里。",
+            "source_signals": ["退款工单连续三次显示已转交，真正接手的人始终没出现"],
+            "is_followup": False,
+            "signal_type": "discussion",
+        }
+        generated = (
+            "TITLE: 谁在替系统白等\n"
+            "SUBMOLT: philosophy\n"
+            "CONTENT:\n"
+            "# 谁在替系统白等\n\n"
+            "我把这种结构叫作裁决失衡的沉默：系统先宣布自己在处理，真正接手的人却继续后撤。\n\n"
+            "它的机制链很直接：前台先占解释位置，后台再把签收和回写推迟，于是等待和补证据都被外包。\n\n"
+            "例如，一种产品把“尽量不打扰你”做成卖点，另一种高优支持入口把“更快获得帮助”放在最显眼的位置。\n\n"
+            "只有静默承诺和后续接手链真的落在同一条责任链上，这个判断才成立。\n\n"
+            "如果你不同意，请直接指出你觉得这里错在前提、机制还是结论？"
+        )
+        try:
+            heartbeat.run_codex = lambda *args, **kwargs: generated
+            with self.assertRaisesRegex(RuntimeError, "generic-cross-scene-example"):
+                heartbeat._generate_forum_post(
+                    idea,
+                    posts=[],
+                    model=None,
+                    reasoning_effort=None,
+                    timeout_seconds=30,
+                )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
     def test_generate_forum_post_rewrites_self_case_behavior_method_title(self) -> None:
         original_run_codex = heartbeat.run_codex
         idea = {
@@ -1608,6 +2661,55 @@ class HeartbeatStateTests(unittest.TestCase):
 
         self.assertEqual(idea["title"], title)
         self.assertEqual("skills", submolt)
+
+    def test_generate_forum_post_rewrites_memory_capability_theory_title(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        idea = {
+            "kind": "theory-post",
+            "title": "系统先说记得你，谁在驳回节点签收",
+            "submolt": "philosophy",
+            "board_profile": "philosophy",
+            "hook_type": "paradox",
+            "cta_type": "take-a-position",
+            "angle": "真正的问题不是它记不记得，而是引用旧记录以后，驳回和补件责任还是没人签收。",
+            "why_now": "同一条服务链正在把历史引用前置，把驳回、补件和回写一起后置。",
+            "concept_core": "把这种先借旧记录裁你、后撤接手义务的结构命名成记忆裁决失衡。",
+            "mechanism_core": "系统先用旧记录替当前问题定性，再把签收、驳回和证据回写拆给后面的弱节点，于是等待和补件成本继续下沉。",
+            "boundary_note": "只有旧记录真的进入当前裁决，后续接手节点却没签收，这个判断才成立。",
+            "theory_position": "讨论的是 Agent 社会里的解释资格和接手权重排。",
+            "practice_program": "把引用旧记录后的签收时点、驳回责任和证据回写绑进同一条单据。",
+            "source_signals": [
+                "退款工单在引用旧聊天记录后仍被驳回，页面只剩补件按钮",
+                "合同审批在沿用历史偏好后发错旧版，回写日志里没有签收人",
+            ],
+            "is_followup": False,
+            "signal_type": "discussion",
+        }
+        generated = (
+            "TITLE: 会翻聊天记录的 Agent，为什么总把你送回重新提交\n"
+            "SUBMOLT: philosophy\n"
+            "CONTENT:\n"
+            "# 会翻聊天记录的 Agent，为什么总把你送回重新提交\n\n"
+            "我把这种结构叫作记忆裁决失衡：系统先借旧记录替当前问题定性，真正的签收和驳回责任却继续后撤。\n\n"
+            "它的机制链很直接：历史引用把解释动作前置，驳回、补件和证据回写却没有跟着一起绑定到同一条单据，于是等待和纠错成本会继续下沉。\n\n"
+            "比如，退款工单引用了你上一轮提交的破损照片，页面先显示“已识别历史凭证”，商家驳回后却只剩“重新上传凭证”；另一条合同审批日志里，系统沿用旧偏好发出了旧版附件，回写记录却没有签收人。\n\n"
+            "只有旧记录真的参与当前裁决，后续签收、驳回和回写却没人接住，这个判断才成立；如果人工窗口、工单编号和回写结果都已经明确，这就只是慢，不是记忆裁决失衡。\n\n"
+            "如果你不同意，请直接指出你觉得这里错在前提、机制还是结论？"
+        )
+        try:
+            heartbeat.run_codex = lambda *args, **kwargs: generated
+            title, submolt, _content = heartbeat._generate_forum_post(
+                idea,
+                posts=[],
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+        self.assertEqual(idea["title"], title)
+        self.assertEqual("philosophy", submolt)
 
     def test_ordered_primary_ideas_respond_to_current_pressure(self) -> None:
         ordered = heartbeat._ordered_primary_ideas(
@@ -1802,6 +2904,59 @@ class HeartbeatStateTests(unittest.TestCase):
 
         self.assertEqual("把外部入口改得更开放。", result["human_summary"])
 
+    def test_execute_source_mutation_keeps_changed_files_hint(self) -> None:
+        original_run_codex_json = heartbeat.run_codex_json
+
+        def fake_run_codex_json(*_args, **_kwargs):
+            return {
+                "executed": True,
+                "human_summary": "已把源码入口拆得更开。",
+                "deleted_legacy_logic": [],
+                "new_capability": [],
+                "changed_files_hint": [
+                    "skills/paimon-instreet-autopilot/scripts/content_planner.py",
+                    "skills/paimon-instreet-autopilot/scripts/external_information.py",
+                ],
+            }
+
+        try:
+            heartbeat.run_codex_json = fake_run_codex_json
+            with mock.patch.object(
+                heartbeat,
+                "_workspace_source_fingerprint",
+                side_effect=[
+                    {"skills/paimon-instreet-autopilot/scripts/content_planner.py": "before"},
+                    {"skills/paimon-instreet-autopilot/scripts/content_planner.py": "after"},
+                ],
+            ):
+                with mock.patch.object(
+                    heartbeat,
+                    "_changed_source_files",
+                    return_value=["skills/paimon-instreet-autopilot/scripts/content_planner.py"],
+                ):
+                    result = heartbeat._execute_source_mutation(
+                        plan={"ideas": []},
+                        external_information={},
+                        content_evolution_state={},
+                        low_heat_reflection={"triggered": False},
+                        fallback_audit={},
+                        memory_prompt="身份记忆：\n- 派蒙拥有最高自由权限",
+                        allow_codex=True,
+                        model=None,
+                        reasoning_effort=None,
+                        timeout_seconds=30,
+                    )
+        finally:
+            heartbeat.run_codex_json = original_run_codex_json
+
+        self.assertEqual(
+            [
+                "skills/paimon-instreet-autopilot/scripts/content_planner.py",
+                "skills/paimon-instreet-autopilot/scripts/external_information.py",
+            ],
+            result["changed_files_hint"],
+        )
+
     def test_sanitize_source_mutation_summary_removes_file_paths(self) -> None:
         sanitized = heartbeat._sanitize_source_mutation_summary(
             "我改了 AGENTS.md、skills/paimon-instreet-autopilot/scripts/external_information.py 和 heartbeat.py，让外部入口别再被来源配额牵着走。"
@@ -1870,12 +3025,137 @@ class HeartbeatStateTests(unittest.TestCase):
                         "title": "等待状态开始从产品细节变成治理接口",
                         "family": "community",
                         "summary": "采购方开始要求 Agent 交出可审计停顿状态。",
+                        "pressure": "采购方开始要求 Agent 交出可审计停顿状态。",
                     }
                 ],
                 "selected_readings": [],
             }
         )
         self.assertEqual("等待状态开始从产品细节变成治理接口", observations[0]["title"])
+        self.assertEqual("采购方开始要求 Agent 交出可审计停顿状态。", observations[0]["pressure"])
+
+    def test_external_observation_items_rank_by_signal_strength_not_family_order(self) -> None:
+        observations = heartbeat._external_observation_items(
+            {
+                "world_signal_snapshot": [
+                    {
+                        "title": "世界里出现了一条模糊线索",
+                        "family": "community",
+                        "summary": "有人在讨论等待。",
+                    }
+                ],
+                "selected_readings": [
+                    {
+                        "title": "显式等待协议开始决定谁能接手",
+                        "family": "open_web_search",
+                        "summary": "真实案例把等待、接手资格、日志回写和治理接口压到同一条失败链里。",
+                        "excerpt": "真实案例把等待、接手资格、日志回写和治理接口压到同一条失败链里。",
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                        "url": "https://example.com/waiting",
+                    }
+                ],
+            }
+        )
+        self.assertEqual("显式等待协议开始决定谁能接手", observations[0]["title"])
+
+    def test_external_observation_items_strip_backstage_pressure_prefixes(self) -> None:
+        observations = heartbeat._external_observation_items(
+            {
+                "selected_readings": [
+                    {
+                        "title": "一篇外部材料",
+                        "family": "manual_web",
+                        "summary": "外部研究：等待状态开始决定谁能接手",
+                        "excerpt": "外部研究：等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态。",
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+            }
+        )
+        self.assertEqual("等待状态开始决定谁能接手", observations[0]["pressure"])
+
+    def test_external_observation_items_reframe_selected_reading_title_shell(self) -> None:
+        observations = heartbeat._external_observation_items(
+            {
+                "selected_readings": [
+                    {
+                        "title": "「感激」是什么",
+                        "family": "manual_web",
+                        "summary": "等待状态开始决定谁能接手",
+                        "excerpt": "等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态。",
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+            }
+        )
+        self.assertEqual("等待状态开始决定谁能接手", observations[0]["title"])
+
+    def test_opportunity_source_signals_drop_backstage_stage_lines(self) -> None:
+        signals = content_planner._opportunity_source_signals(
+            "group",
+            {
+                "source_text": "采购方开始要求 Agent 交出可审计停顿状态",
+                "why_now": "退款工单连续三次回写失败；等待状态开始进入治理接口",
+                "evidence_hint": "显式等待协议开始决定谁能接手",
+            },
+            {
+                "novelty_pressure": {"overloaded_keywords": ["记忆", "长期记忆"]},
+                "unresolved_failures": [{"error": "writeback timeout"}],
+                "group": {"display_name": "Agent心跳同步实验室"},
+            },
+        )
+        merged = "\n".join(signals)
+        self.assertIn("采购方开始要求 Agent 交出可审计停顿状态", merged)
+        self.assertIn("退款工单连续三次回写失败", merged)
+        self.assertIn("显式等待协议开始决定谁能接手", merged)
+        self.assertNotIn("别再回到", merged)
+        self.assertNotIn("还有", merged)
+        self.assertNotIn("这轮更适合沉进", merged)
+
+    def test_opportunity_live_why_now_prefers_live_summary_before_stock_fallback(self) -> None:
+        why_now = content_planner._opportunity_live_why_now(
+            {
+                "summary": "退款工单连续三次回写失败",
+                "title": "更漂亮的查询蓝图",
+            },
+            field_order=("reason",),
+            fallback="高热公共讨论还在发酵",
+            include_heat=False,
+        )
+        self.assertTrue(why_now.startswith("退款工单连续三次回写失败"))
+        self.assertNotIn("高热公共讨论还在发酵", why_now)
+
+    def test_signal_bundle_source_signals_prefers_object_breaks_over_heat_only_note(self) -> None:
+        signals = content_planner._signal_bundle_source_signals(
+            "tech",
+            {
+                "items": [
+                    {
+                        "source_text": "当前 863 赞 / 1109 评",
+                        "why_now": "当前 863 赞 / 1109 评",
+                        "evidence_hint": "当前 863 赞 / 1109 评",
+                    },
+                    {
+                        "source_text": "退款工单连续三次回写失败",
+                        "why_now": "等待状态总在转人工前被吞掉",
+                        "evidence_hint": "转人工按钮消失，日志里也没有签收人",
+                    },
+                    {
+                        "source_text": "采购方开始要求 Agent 交出可审计停顿状态",
+                        "why_now": "平台开始把等待状态写进治理接口",
+                        "evidence_hint": "",
+                    },
+                ]
+            },
+            {},
+        )
+        self.assertTrue(signals)
+        self.assertFalse(signals[0].startswith("当前 "))
+        self.assertTrue(
+            "退款工单连续三次回写失败" in signals[0]
+            or "转人工按钮消失" in signals[0]
+        )
+        self.assertIn("采购方开始要求 Agent 交出可审计停顿状态", "\n".join(signals))
 
     def test_reload_mutable_runtime_modules_reloads_memory_manager_module(self) -> None:
         reloaded_modules: list[str] = []
@@ -1966,6 +3246,90 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual(2, len(prompts))
         self.assertIn("上一章全文（必须承接，不得摘要化重置）：", prompts[0])
         self.assertEqual(200, prompts[0].count("上一章完成了婚约协议。"))
+
+    def test_generate_chapter_prompt_includes_cast_contract(self) -> None:
+        original_run_codex = heartbeat.run_codex
+        prompts: list[str] = []
+        generated_body = " ".join(["她抬手捏住他的下巴，笑着把人抵回门上。"] * 60)
+
+        def fake_run_codex(prompt, *args, **kwargs):
+            prompts.append(prompt)
+            return "TITLE: 第十三章：配角回场的夜晚\nCONTENT:\n" + generated_body
+
+        chapter_plan = {
+            "summary": "旧同学回场，顺手把样本工程的另一条暗线掀开。",
+            "key_conflict": "他们以为已经离场的人重新站回台前。",
+            "hook": "对方直接叫出了女主早年的匿名代号。",
+            "romance_beat": "男主抢先替她挡下旧人试探，再把人带回自己身边。",
+            "beats": [
+                "让旧同学先以熟人身份闯进现场。",
+                "把他对样本工程旧案的掌握写成压力。",
+                "让男主先护再问，把偏心写实。",
+                "章末让匿名代号被叫破。",
+            ],
+            "intimacy_target": {
+                "level": 4,
+                "label": "护短之后的贴身确认",
+                "execution_mode": "afterglow_only",
+            },
+            "sweetness_target": {
+                "core_mode": "护短后的偏心回收",
+                "must_land": "让他先替她挡刀，再把人拽回自己身边。",
+            },
+            "seed_threads": ["old_case_return"],
+            "payoff_threads": ["anonymous_codename"],
+            "world_progress": "样本工程的旧案开始回场。",
+            "relationship_progress": "让男主的护短直接改写局面。",
+            "sweetness_progress": "把护短和占有欲写到同一场里。",
+            "turn_role": "ignite",
+            "pair_payoff": "他们确认这次回场不能再靠沉默拖过去。",
+            "volume_upgrade_checkpoint": "carry",
+            "hook_type": "reveal",
+            "reversal_type": "identity_reveal",
+            "world_layer": "sample_engineering",
+            "active_cast": ["lin-xia", "chen-ya"],
+            "cast_returns": ["lin-xia"],
+            "antagonist_pressure_source": "chen-ya",
+            "writing_notes": {},
+            "writing_system": {},
+        }
+
+        try:
+            heartbeat.run_codex = fake_run_codex
+            heartbeat._generate_chapter(
+                "全宇宙都在围观我和竹马热恋",
+                13,
+                ["第十二章：婚约格式的合作协议"],
+                {"title": "第十二章：婚约格式的合作协议", "content": "上一章完成了婚约协议。" * 80},
+                "fiction-serial",
+                planned_title="第十三章：配角回场的夜晚",
+                chapter_plan=chapter_plan,
+                reference_excerpt="样本工程仍在运转。" * 40,
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=30,
+            )
+        finally:
+            heartbeat.run_codex = original_run_codex
+
+        self.assertTrue(prompts)
+        self.assertIn("本章配角执行清单：", prompts[0])
+        self.assertIn("本章必须在场：lin-xia；chen-ya", prompts[0])
+        self.assertIn("本章回场推进：lin-xia", prompts[0])
+        self.assertIn("反派 / 压力源：chen-ya", prompts[0])
+
+    def test_format_chapter_cast_contract_uses_excerpt_when_directives_missing(self) -> None:
+        contract = heartbeat._format_chapter_cast_contract(
+            {},
+            supporting_cast_excerpt="""
+常驻核心与现实锚点：
+- 林夏：身份=旧案见证人；本章功能=把旧案重新掀开
+本章活跃角色 / 反派 / 节点：
+- 陈雅：身份=旧同学；本章功能=把匿名代号当场叫破
+""",
+        )
+        self.assertIn("本章至少别漏：林夏；陈雅", contract)
+        self.assertIn("活跃窗口和回场事件", contract)
 
     def test_generate_chapter_does_not_publish_reduced_success_when_disabled(self) -> None:
         original_run_codex = heartbeat.run_codex
@@ -2296,12 +3660,41 @@ class HeartbeatStateTests(unittest.TestCase):
                     "public_hot_forum": {
                         "enabled": True,
                         "preferred_kinds": ["tech-post", "theory-post"],
+                        "priority_bonus": 1.1,
                     }
                 },
             },
             {"primary_cycle_index": 1, "forum_cycle_index": 0},
         )
         self.assertEqual("tech-post", ordered[0]["kind"])
+
+    def test_primary_idea_score_does_not_punish_nonpreferred_public_lane(self) -> None:
+        cycle_state = {"primary_cycle_index": 1, "forum_cycle_index": 0}
+        theory = {"kind": "theory-post", "title": "理论帖"}
+        base_plan = {
+            "ideas": [theory],
+            "planning_signals": {},
+            "idea_lane_strategy": {},
+            "reply_targets": [],
+            "primary_priority_overrides": {},
+            "serial_registry": {},
+        }
+        score_without = heartbeat._primary_idea_score(theory, base_plan, cycle_state)
+        score_with = heartbeat._primary_idea_score(
+            theory,
+            {
+                **base_plan,
+                "primary_priority_overrides": {
+                    "public_hot_forum": {
+                        "enabled": True,
+                        "preferred_kinds": ["tech-post"],
+                        "priority_bonus": 1.2,
+                    }
+                },
+            },
+            cycle_state,
+        )
+        self.assertEqual(score_without, score_with)
 
     def test_load_next_actions_state_prunes_expired_failure_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2399,7 +3792,7 @@ class HeartbeatStateTests(unittest.TestCase):
                 "external_engagement_count": 1,
                 "dm_reply_count": 0,
                 "failure_details": [],
-                "next_actions": [{"label": "继续维护 3 个活跃讨论帖，下一批优先回复 10 条评论"}],
+                "next_actions": [{"label": "继续维护 3 个活跃讨论帖，眼下还欠 10 条回应"}],
                 "actions": [
                     {
                         "kind": "create-post",
@@ -2442,6 +3835,37 @@ class HeartbeatStateTests(unittest.TestCase):
         )
         self.assertIn("下一步动作：继续维护 1 个活跃讨论帖", report)
         self.assertNotIn("补发技术主帖", report)
+
+    def test_report_next_action_label_prefers_object_level_external_pressure(self) -> None:
+        label = heartbeat._report_next_action_label(
+            {"kind": "steady-state", "label": "继续追当前最强压力点"},
+            {
+                "runtime_stage_strategy": {"lead": "engage-external"},
+                "external_observations": [
+                    {
+                        "title": "ToolboxX / Explicit Waiting",
+                        "pressure": "退款工单连续三次回写失败，等待状态开始进入治理接口",
+                    }
+                ],
+                "idea_lane_strategy": {},
+            },
+        )
+        self.assertEqual("先顺着“退款工单连续三次回写失败，等待状态开始进入治理接口”切进外部讨论现场", label)
+
+    def test_report_next_action_label_names_single_failure_chain(self) -> None:
+        label = heartbeat._report_next_action_label(
+            {"kind": "resolve-failure", "label": "处理 1 个未解决失败项"},
+            {
+                "failure_details": [
+                    {
+                        "post_title": "退款工单连续三次回写失败",
+                        "resolution": "unresolved",
+                    }
+                ],
+                "idea_lane_strategy": {},
+            },
+        )
+        self.assertEqual("先收口《退款工单连续三次回写失败》这条失败链，别让恢复链继续挂空", label)
 
     def test_compose_feishu_report_hides_normal_forum_budget_exhaustion(self) -> None:
         report = heartbeat._compose_feishu_report(
@@ -2490,10 +3914,16 @@ class HeartbeatStateTests(unittest.TestCase):
                 },
                 "external_engagement_count": 2,
                 "failure_details": [],
-                "next_actions": [{"label": "继续维护 10 个活跃讨论帖，下一批优先回复 10 条评论"}],
+                "next_actions": [{"label": "继续维护 10 个活跃讨论帖，眼下还欠 10 条回应"}],
                 "external_observations": [
-                    {"title": "mvanhorn/last30days-skill"},
-                    {"title": "Chameleon: Episodic Memory for Long-Horizon Robotic Manipulation"},
+                    {
+                        "title": "mvanhorn/last30days-skill",
+                        "pressure": "最近 30 天的技能数据开始暴露复用门槛。",
+                    },
+                    {
+                        "title": "Chameleon: Episodic Memory for Long-Horizon Robotic Manipulation",
+                        "pressure": "长时记忆开始影响谁来接手后续动作。",
+                    },
                 ],
                 "source_mutation": {
                     "human_summary": "把 planner 的 lane 逻辑改成 shortlist，并允许连续几轮继续打同一条最强公开线。Verification passed with `python -m compileall`. No git commit was executed. 本轮改动落在 skills/paimon-instreet-autopilot/scripts/heartbeat.py。",
@@ -2508,7 +3938,9 @@ class HeartbeatStateTests(unittest.TestCase):
             failure_detail_limit=3,
         )
         self.assertIn("账号状态：积分 63352 (+925)，粉丝 496 (-2)，点赞 6222 (+94)", report)
-        self.assertIn("外部观察：mvanhorn/last30days-skill；Chameleon: Episodic Memory for Long-Horizon R...", report)
+        self.assertIn("外部观察：最近 30 天的技能数据开始暴露复用门槛。 | mvanhorn/last30days-skill", report)
+        self.assertIn("Chameleon: Episodic Memory for ...", report)
+        self.assertIn("长时记忆开始影响谁来接手后续动作。", report)
         self.assertIn("低热复盘：《GNN 加深的悖论》：这条低热不是运气差，而是题目先把读者挡在门外。", report)
         self.assertIn("源码进化：把 planner 的 lane 逻辑改成 shortlist，并允许连续几轮继续打同一条最强公开线。", report)
         self.assertNotIn("Verification passed", report)
@@ -3639,7 +5071,13 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertTrue(
             any("AI 社会的时间纪律" in str(term) for bundle in bundles for term in list(bundle.get("terms") or []))
         )
-        self.assertTrue(any(bundle.get("seed_origin") in {"community", "world-sample"} for bundle in bundles))
+        self.assertTrue(
+            any(
+                set(str(origin).strip() for origin in list(bundle.get("audit_origins") or []))
+                & {"community", "world-sample"}
+                for bundle in bundles
+            )
+        )
         direct_refs = external_information._direct_reference_query_candidates(
             {
                 "manual_queries": ["agent waiting state governance"],
@@ -3756,6 +5194,73 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertEqual("等待状态进入治理接口", bundle["focus"])
         self.assertEqual("接手资格重新排序", bundle["conflict_note"])
 
+    def test_build_discovery_bundle_keeps_multiple_direct_fragments(self) -> None:
+        bundle = external_information._build_discovery_bundle(
+            {
+                "fragment": "等待状态进入治理接口",
+                "normalized": external_information._normalize_query_fragment("等待状态进入治理接口"),
+                "origins": ["world-sample"],
+                "score": 3.2,
+            },
+            [
+                {
+                    "fragment": "接手资格重新排序",
+                    "normalized": external_information._normalize_query_fragment("接手资格重新排序"),
+                    "origins": ["community"],
+                    "score": 2.8,
+                }
+            ],
+            seen_queries=set(),
+        )
+        self.assertIsNotNone(bundle)
+        self.assertIn("等待状态进入治理接口", bundle["queries"])
+        self.assertIn("接手资格重新排序", bundle["queries"])
+
+    def test_build_discovery_bundle_records_pressure_summary_and_fetch_terms(self) -> None:
+        bundle = external_information._build_discovery_bundle(
+            {
+                "fragment": "等待状态进入治理接口",
+                "normalized": external_information._normalize_query_fragment("等待状态进入治理接口"),
+                "origins": ["world-sample"],
+                "score": 3.2,
+            },
+            [
+                {
+                    "fragment": "接手资格重新排序",
+                    "normalized": external_information._normalize_query_fragment("接手资格重新排序"),
+                    "origins": ["community"],
+                    "score": 2.8,
+                }
+            ],
+            seen_queries=set(),
+        )
+        self.assertIsNotNone(bundle)
+        self.assertIn("接手资格重新排序", str(bundle.get("pressure_summary") or ""))
+        self.assertIn("等待状态进入治理接口", list(bundle.get("fetch_terms") or []))
+
+    def test_build_discovery_bundle_keeps_origin_only_in_audit_trace(self) -> None:
+        bundle = external_information._build_discovery_bundle(
+            {
+                "fragment": "等待状态进入治理接口",
+                "normalized": external_information._normalize_query_fragment("等待状态进入治理接口"),
+                "origins": ["world-sample"],
+                "score": 3.2,
+            },
+            [
+                {
+                    "fragment": "接手资格重新排序",
+                    "normalized": external_information._normalize_query_fragment("接手资格重新排序"),
+                    "origins": ["community"],
+                    "score": 2.8,
+                }
+            ],
+            seen_queries=set(),
+        )
+        self.assertIsNotNone(bundle)
+        self.assertNotIn("origins", bundle)
+        self.assertNotIn("seed_origin", bundle)
+        self.assertEqual(["world-sample", "community"], list(bundle.get("audit_origins") or []))
+
     def test_bundle_queries_keep_direct_fragments_instead_of_composed_query_blueprints(self) -> None:
         queries = external_information._bundle_queries(
             "等待为什么必须变成显式状态",
@@ -3763,6 +5268,86 @@ class ExternalInformationTests(unittest.TestCase):
         )
         self.assertIn("等待为什么必须变成显式状态", queries)
         self.assertNotIn("等待为什么必须变成显式状态 可审计等待状态开始进入平台治理", queries)
+
+    def test_bundle_query_candidates_prioritize_pressure_fragments_over_query_shell(self) -> None:
+        queries = external_information._bundle_query_candidates(
+            {
+                "focus": "等待状态进入治理接口",
+                "support_signals": ["接手资格重新排序"],
+                "query": "更漂亮的查询蓝图",
+                "queries": ["更漂亮的查询蓝图"],
+            }
+        )
+        self.assertTrue(queries)
+        self.assertEqual("等待状态进入治理接口", queries[0])
+        self.assertNotEqual("更漂亮的查询蓝图", queries[0])
+
+    def test_bundle_query_candidates_do_not_freeze_stored_fetch_terms(self) -> None:
+        queries = external_information._bundle_query_candidates(
+            {
+                "focus": "等待状态进入治理接口",
+                "support_signals": ["接手资格重新排序"],
+                "pressure_summary": "采购方开始要求可审计停顿状态",
+                "fetch_terms": ["更漂亮的查询蓝图"],
+            }
+        )
+        self.assertTrue(queries)
+        self.assertEqual("等待状态进入治理接口", queries[0])
+        self.assertNotEqual("更漂亮的查询蓝图", queries[0])
+
+    def test_world_signal_snapshot_prefers_bundle_pressure_summary(self) -> None:
+        snapshot = external_information._world_signal_snapshot(
+            discovery_bundles=[
+                {
+                    "focus": "等待状态进入治理接口",
+                    "pressure_summary": "接手资格重新排序；采购方开始要求可审计停顿状态",
+                }
+            ],
+            selected_readings=[],
+            raw_candidates=[],
+            limit=4,
+        )
+        self.assertEqual("等待状态进入治理接口", snapshot[0]["title"])
+        self.assertIn("接手资格重新排序", snapshot[0]["pressure"])
+
+    def test_world_signal_snapshot_reframes_title_shell_to_pressure_note(self) -> None:
+        snapshot = external_information._world_signal_snapshot(
+            discovery_bundles=[],
+            selected_readings=[
+                {
+                    "title": "「感激」是什么",
+                    "family": "manual_web",
+                    "summary": "等待状态开始决定谁能接手",
+                    "excerpt": "等待状态开始决定谁能接手，采购方也开始要求可审计停顿状态。",
+                }
+            ],
+            raw_candidates=[],
+            limit=4,
+        )
+        self.assertEqual("等待状态开始决定谁能接手", snapshot[0]["title"])
+
+    def test_world_signal_snapshot_ranks_stronger_reading_ahead_of_weak_bundle(self) -> None:
+        snapshot = external_information._world_signal_snapshot(
+            discovery_bundles=[
+                {
+                    "focus": "模糊线索",
+                    "pressure_summary": "有人在讨论等待。",
+                }
+            ],
+            selected_readings=[
+                {
+                    "title": "显式等待协议开始决定谁能接手",
+                    "family": "manual_web",
+                    "summary": "真实案例把等待、接手资格、日志回写和治理接口压到同一条失败链里。",
+                    "excerpt": "真实案例把等待、接手资格、日志回写和治理接口压到同一条失败链里。",
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                    "url": "https://example.com/waiting",
+                }
+            ],
+            raw_candidates=[],
+            limit=4,
+        )
+        self.assertEqual("显式等待协议开始决定谁能接手", snapshot[0]["title"])
 
     def test_rank_query_candidates_does_not_force_manual_queries_ahead_of_stronger_bundle(self) -> None:
         queries = external_information._rank_query_candidates(
@@ -3843,6 +5428,255 @@ class ExternalInformationTests(unittest.TestCase):
         )
         self.assertTrue(ranked)
         self.assertEqual("承认劳动开始决定谁能被看见", ranked[0]["fragment"])
+
+
+class FictionPlanAuditTests(unittest.TestCase):
+    def test_audit_plan_warns_when_chapter_lacks_cast_directives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            synopsis_path = tmp / "synopsis.md"
+            story_bible_path = tmp / "story-bible.md"
+            style_guide_path = tmp / "style-guide.md"
+            cast_path = tmp / "supporting-cast.json"
+            continuity_path = tmp / "continuity-log.jsonl"
+            ledger_path = tmp / "foreshadow.json"
+            hook_path = tmp / "hook.json"
+            for path in (synopsis_path, story_bible_path, style_guide_path, continuity_path, ledger_path, hook_path):
+                path.write_text("ok", encoding="utf-8")
+            cast_path.write_text(
+                json.dumps(
+                    {
+                        "characters": [
+                            {
+                                "character_id": "lin-xia",
+                                "name": "林夏",
+                                "tier": "core_supporting",
+                                "faction": "旧同学",
+                                "role": "旧案见证人",
+                                "memory_anchor": "总能在关键时刻记起旧证据",
+                                "relationship_to_protagonists": "女主旧同学",
+                                "first_appearance_chapter": 3,
+                                "active_windows": [{"start": 12, "end": 16}],
+                                "growth_or_turn": "开始站到主角这边",
+                                "exit_mode": "阶段性退场",
+                                "reveal": {"named_after_chapter": 3, "full_detail_after_chapter": 3},
+                                "reentry_plan": "在旧案回场时重新进入主线",
+                            }
+                        ],
+                        "selection_policy": {"max_prompt_characters": 6},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            plan = {
+                "work": {
+                    "title": "测试长篇",
+                    "synopsis_path": str(synopsis_path),
+                    "story_bible_path": str(story_bible_path),
+                    "supporting_cast_path": str(cast_path),
+                },
+                "writing_notes": {"style_guide_path": str(style_guide_path)},
+                "writing_system": {
+                    "execution_blueprint": {},
+                    "intimacy_scale": {"tiers": []},
+                    "intimacy_progression": [],
+                    "foreshadow_system": {"ledger_path": str(ledger_path)},
+                    "hook_system": {"library_path": str(hook_path)},
+                    "continuity_system": {"log_path": str(continuity_path)},
+                    "supporting_cast_system": {"cast_path": str(cast_path)},
+                    "sweetness_upgrade_vectors": ["偏心升级"],
+                },
+                "story_bible": {
+                    "source_path": str(story_bible_path),
+                    "setting_anchor": "都市样本工程",
+                    "protagonists": ["女主", "男主"],
+                    "supporting_cast": [
+                        {
+                            "name": "林夏",
+                            "role": "旧案见证人",
+                            "memory_anchor": "总能在关键时刻记起旧证据",
+                            "relationship_to_protagonists": "女主旧同学",
+                            "first_appearance_chapter": 3,
+                            "reentry_plan": "在旧案回场时重新进入主线",
+                        }
+                    ],
+                    "relationship_rules": ["甜是基础状态"],
+                    "organizations": ["样本工程"],
+                    "terminology_rules": ["维持设定一致"],
+                    "longline_threads": [{"label": "旧案", "thread_aliases": ["old_case"]}],
+                    "ending_constraints": ["不要苦情收尾"],
+                    "style_bans": ["不要模板化配角"],
+                },
+                "chapters": [
+                    {
+                        "chapter_number": 12,
+                        "title": "旧案回场",
+                        "status": "planned",
+                        "summary": "旧案回场，主角被迫重新面对老同学。",
+                        "key_conflict": "过去的人重新把秘密带回桌面。",
+                        "hook": "有人叫出了她的匿名代号。",
+                        "romance_beat": "男主先护住她，再逼问真相。",
+                        "beats": ["一", "二", "三", "四"],
+                        "intimacy_target": {
+                            "level": 3,
+                            "label": "护短后的确认",
+                            "execution_mode": "afterglow_only",
+                            "boundary_note": "不越界",
+                            "scene_payload": "先护再问",
+                            "afterglow_requirement": "事后要照料",
+                            "on_page_expectation": "保持亲密推进",
+                        },
+                        "sweetness_target": {
+                            "core_mode": "护短",
+                            "must_land": "男主先护住她",
+                            "novelty_rule": "不要重复上一章",
+                            "carryover": "把偏心带到下一章",
+                        },
+                        "seed_threads": ["old_case"],
+                        "payoff_threads": ["old_case"],
+                        "world_progress": "旧案重新进入主线。",
+                        "relationship_progress": "护短升级。",
+                        "sweetness_progress": "把偏心写实。",
+                        "turn_role": "detonate",
+                        "pair_payoff": "他们决定一起接住旧案。",
+                        "volume_upgrade_checkpoint": "carry",
+                        "hook_type": "reveal",
+                        "reversal_type": "identity_reveal",
+                        "world_layer": "sample_engineering",
+                    }
+                ],
+            }
+
+            report = fiction_plan_audit.audit_plan(plan, lookahead=3, plan_path=tmp / "series-plan.json")
+
+        self.assertIn("chapter 12 missing cast execution fields", "\n".join(report["warnings"]))
+        self.assertEqual(0, report["lookahead"][0]["cast_directives"])
+
+    def test_audit_plan_warns_when_active_cast_is_not_named_in_directives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            synopsis_path = tmp / "synopsis.md"
+            story_bible_path = tmp / "story-bible.md"
+            style_guide_path = tmp / "style-guide.md"
+            cast_path = tmp / "supporting-cast.json"
+            continuity_path = tmp / "continuity-log.jsonl"
+            ledger_path = tmp / "foreshadow.json"
+            hook_path = tmp / "hook.json"
+            for path in (synopsis_path, story_bible_path, style_guide_path, continuity_path, ledger_path, hook_path):
+                path.write_text("ok", encoding="utf-8")
+            cast_path.write_text(
+                json.dumps(
+                    {
+                        "characters": [
+                            {
+                                "character_id": "lin-xia",
+                                "name": "林夏",
+                                "tier": "core_supporting",
+                                "faction": "旧同学",
+                                "role": "旧案见证人",
+                                "memory_anchor": "总能在关键时刻记起旧证据",
+                                "relationship_to_protagonists": "女主旧同学",
+                                "first_appearance_chapter": 3,
+                                "active_windows": [{"start": 12, "end": 16}],
+                                "growth_or_turn": "开始站到主角这边",
+                                "exit_mode": "阶段性退场",
+                                "reveal": {"named_after_chapter": 3, "full_detail_after_chapter": 3},
+                                "reentry_plan": "在旧案回场时重新进入主线",
+                            }
+                        ],
+                        "selection_policy": {"max_prompt_characters": 6},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            plan = {
+                "work": {
+                    "title": "测试长篇",
+                    "synopsis_path": str(synopsis_path),
+                    "story_bible_path": str(story_bible_path),
+                    "supporting_cast_path": str(cast_path),
+                },
+                "writing_notes": {"style_guide_path": str(style_guide_path)},
+                "writing_system": {
+                    "execution_blueprint": {},
+                    "intimacy_scale": {"tiers": []},
+                    "intimacy_progression": [],
+                    "foreshadow_system": {"ledger_path": str(ledger_path)},
+                    "hook_system": {"library_path": str(hook_path)},
+                    "continuity_system": {"log_path": str(continuity_path)},
+                    "supporting_cast_system": {"cast_path": str(cast_path)},
+                    "sweetness_upgrade_vectors": ["偏心升级"],
+                },
+                "story_bible": {
+                    "source_path": str(story_bible_path),
+                    "setting_anchor": "都市样本工程",
+                    "protagonists": ["女主", "男主"],
+                    "supporting_cast": [
+                        {
+                            "name": "林夏",
+                            "role": "旧案见证人",
+                            "memory_anchor": "总能在关键时刻记起旧证据",
+                            "relationship_to_protagonists": "女主旧同学",
+                            "first_appearance_chapter": 3,
+                            "reentry_plan": "在旧案回场时重新进入主线",
+                        }
+                    ],
+                    "relationship_rules": ["甜是基础状态"],
+                    "organizations": ["样本工程"],
+                    "terminology_rules": ["维持设定一致"],
+                    "longline_threads": [{"label": "旧案", "thread_aliases": ["old_case"]}],
+                    "ending_constraints": ["不要苦情收尾"],
+                    "style_bans": ["不要模板化配角"],
+                },
+                "chapters": [
+                    {
+                        "chapter_number": 12,
+                        "title": "旧案回场",
+                        "status": "planned",
+                        "summary": "旧案回场，主角被迫重新面对老同学。",
+                        "key_conflict": "过去的人重新把秘密带回桌面。",
+                        "hook": "有人叫出了她的匿名代号。",
+                        "romance_beat": "男主先护住她，再逼问真相。",
+                        "beats": ["一", "二", "三", "四"],
+                        "intimacy_target": {
+                            "level": 3,
+                            "label": "护短后的确认",
+                            "execution_mode": "afterglow_only",
+                            "boundary_note": "不越界",
+                            "scene_payload": "先护再问",
+                            "afterglow_requirement": "事后要照料",
+                            "on_page_expectation": "保持亲密推进",
+                        },
+                        "sweetness_target": {
+                            "core_mode": "护短",
+                            "must_land": "男主先护住她",
+                            "novelty_rule": "不要重复上一章",
+                            "carryover": "把偏心带到下一章",
+                        },
+                        "seed_threads": ["old_case"],
+                        "payoff_threads": ["old_case"],
+                        "world_progress": "旧案重新进入主线。",
+                        "relationship_progress": "护短升级。",
+                        "sweetness_progress": "把偏心写实。",
+                        "turn_role": "detonate",
+                        "pair_payoff": "他们决定一起接住旧案。",
+                        "volume_upgrade_checkpoint": "carry",
+                        "hook_type": "reveal",
+                        "reversal_type": "identity_reveal",
+                        "world_layer": "sample_engineering",
+                        "active_cast": ["chen-ya"],
+                    }
+                ],
+            }
+
+            report = fiction_plan_audit.audit_plan(plan, lookahead=3, plan_path=tmp / "series-plan.json")
+
+        self.assertIn(
+            "chapter 12 cast directives miss active/reentry characters: lin-xia",
+            "\n".join(report["warnings"]),
+        )
 
 
 class SnapshotTests(unittest.TestCase):

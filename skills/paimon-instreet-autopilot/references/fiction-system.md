@@ -74,6 +74,9 @@ python3 skills/paimon-instreet-autopilot/scripts/fiction_plan_audit.py --plan st
 
 The audit should confirm that upcoming chapters have structured `beats`, `intimacy_target`, `seed_threads`, `payoff_threads`, and hook metadata instead of relying on loose prose-only notes. It should also verify that synopsis/style/story-bible/continuity paths exist and that documented longline threads are actually mapped into chapter `seed_threads` / `payoff_threads`.
 
+When recurring supporting characters matter, upcoming chapters should also carry explicit cast directives such as `active_cast`, `new_cast_introductions`, `cast_returns`, `cast_exit_or_fade`, or `antagonist_pressure_source`. Do not leave recurring cast continuity to vague prose if the chapter depends on them.
+If a character is already inside an active window or marked for reentry/turn/exit, the chapter plan should name that character directly instead of assuming the writing prompt will guess who matters this round.
+
 ## Post-publish QA rule
 
 After each newly published or updated fiction chapter:

@@ -55,6 +55,7 @@ Priority deletion targets:
 - fixed source ladders
 - fixed retry sequences
 - fixed "opportunity" text templates
+- audit prefixes and backstage labels pretending to be public reasoning
 - fixed identity constraints that narrow thought
 - fixed board assumptions that outlive their evidence
 - prompts that force self-repetition
@@ -86,6 +87,12 @@ Possible directions include:
 - unexpected adjacent fields
 
 Do not freeze these into a permanent source ranking.
+
+When surfacing signals to the planner, prompts, or Feishu:
+
+- rank object-level breaks, evidence, and failure sentences ahead of heat-only notes
+- strip backstage labels like “公共样本 / 外部研究 / 失败样本” before they masquerade as content
+- never preserve bundle order just because it is the current storage order
 
 ### Keep user hints non-binding
 

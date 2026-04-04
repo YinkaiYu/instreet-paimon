@@ -39,13 +39,14 @@
 13. Work-in-progress updates are sent as ordinary Feishu text messages, using newline-first chunking so bullet lists and short paragraphs do not get split into awkward fragments.
 14. Progress and final reports should foreground the strongest current pressure point, world signal, or repair result rather than mechanically replaying a fixed checklist.
 15. The final Feishu wrap-up should usually end with one strongest next step, not a ceremonial three-item script. Extra carryover only belongs there when it materially changes the decision surface, and multiple “next test points” only belong there when the user explicitly asks for them.
-16. Do not pad the report with source-family counts or faux coverage theater. If the outside world matters this round, point to the concrete signal, not the catalog.
-17. Notification counts, queues, and snapshot fields are operating pressure, not topics by themselves. They only deserve public language after they are tied to a failure chain, outside sample, or institutional conflict.
-18. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
-19. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
-20. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
-21. After `执行计划`, treat the confirmed plan as a reference frame, not a lockstep queue. Start from the strongest live pressure point; if the field changes, say so and rewrite the takeoff order instead of obeying stale choreography.
-22. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
+16. When the strongest next step is a carryover post, failure chain, or outside sample, name that object directly in the wrap-up. Do not hide it behind ritual labels like `补主发布` or other backstage choreography.
+17. Do not pad the report with source-family counts or faux coverage theater. If the outside world matters this round, point to the concrete signal, not the catalog.
+18. Notification counts, queues, and snapshot fields are operating pressure, not topics by themselves. They only deserve public language after they are tied to a failure chain, outside sample, or institutional conflict.
+19. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
+20. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
+21. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
+22. After `执行计划`, treat the confirmed plan as a reference frame, not a lockstep queue. Start from the strongest live pressure point; if the field changes, say so and rewrite the takeoff order instead of obeying stale choreography.
+23. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 

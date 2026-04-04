@@ -79,6 +79,13 @@ VALID_INTIMACY_EXECUTION_MODES = {"no_full_sex", "optional_full_sex", "must_full
 REQUIRED_SWEETNESS_TARGET_KEYS = ["core_mode", "must_land", "novelty_rule", "carryover"]
 REQUIRED_INTIMACY_TARGET_KEYS = ["level", "label", "execution_mode", "boundary_note", "scene_payload", "afterglow_requirement", "on_page_expectation"]
 LEGACY_INTIMACY_TEMPLATE = "同时满足：允许正面写到上床、做爱推进和事后余温，必须有连续动作、身体反应和情绪递进，不靠黑屏跳过。"
+CAST_CHAPTER_DIRECTIVE_KEYS = [
+    "active_cast",
+    "new_cast_introductions",
+    "cast_returns",
+    "cast_exit_or_fade",
+    "antagonist_pressure_source",
+]
 
 
 def _coerce_int(value: Any, default: int = 0) -> int:
@@ -149,6 +156,63 @@ def _required_chapter_keys(plan: dict[str, Any]) -> list[str]:
     return list(DEFAULT_LOOKAHEAD_REQUIRED_CHAPTER_KEYS)
 
 
+def _chapter_cast_directive_values(chapter: dict[str, Any]) -> dict[str, list[str]]:
+    directives: dict[str, list[str]] = {}
+    for key in CAST_CHAPTER_DIRECTIVE_KEYS:
+        raw_value = chapter.get(key)
+        values: list[str] = []
+        if isinstance(raw_value, str):
+            token = raw_value.strip()
+            if token:
+                values.append(token)
+        elif isinstance(raw_value, list):
+            values.extend(str(item).strip() for item in raw_value if str(item).strip())
+        if values:
+            directives[key] = values
+    return directives
+
+
+def _known_cast_identifiers(items: list[dict[str, Any]]) -> set[str]:
+    identifiers: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in ("character_id", "name"):
+            token = str(item.get(key) or "").strip()
+            if token:
+                identifiers.add(token)
+    return identifiers
+
+
+def _cast_is_active_for_chapter(item: dict[str, Any], chapter_number: int) -> bool:
+    windows = _dict_list(item.get("active_windows"))
+    for window in windows:
+        start = _coerce_int(window.get("start"), 0)
+        end = _coerce_int(window.get("end"), 0)
+        if start and end and start <= chapter_number <= end:
+            return True
+    key_chapters = item.get("key_chapters") or {}
+    if isinstance(key_chapters, dict):
+        for key in ("entry", "turn", "exit", "return"):
+            if chapter_number in [_coerce_int(value, 0) for value in _listify(key_chapters.get(key))]:
+                return True
+    return False
+
+
+def _expected_cast_identifiers(items: list[dict[str, Any]], chapter_number: int) -> list[str]:
+    expected: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not _cast_is_active_for_chapter(item, chapter_number):
+            continue
+        identifier = str(item.get("character_id") or item.get("name") or "").strip()
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        expected.append(identifier)
+    return expected
+
+
 def _chapters_dir_for_plan(plan_path: Path | None) -> Path | None:
     if plan_path is None:
         return None
@@ -164,6 +228,8 @@ def audit_plan(plan: dict[str, Any], *, lookahead: int, plan_path: Path | None =
     warnings: list[str] = []
     required_chapter_keys = _required_chapter_keys(plan)
     chapters_dir = _chapters_dir_for_plan(plan_path)
+    file_cast: list[dict[str, Any]] = []
+    known_cast_ids: set[str] = set()
 
     for label, path_value in (
         ("synopsis", work.get("synopsis_path")),
@@ -237,6 +303,7 @@ def audit_plan(plan: dict[str, Any], *, lookahead: int, plan_path: Path | None =
             file_names = {str(item.get("name") or "").strip() for item in file_cast if str(item.get("name") or "").strip()}
             if story_names and file_names and not story_names.issubset(file_names):
                 issues.append("story_bible supporting_cast must be a subset of supporting-cast file characters")
+            known_cast_ids = _known_cast_identifiers(file_cast)
             if not isinstance(selection_policy, dict) or not selection_policy:
                 warnings.append("supporting cast file missing selection_policy")
             has_group_node = False
@@ -303,6 +370,7 @@ def audit_plan(plan: dict[str, Any], *, lookahead: int, plan_path: Path | None =
     for chapter in lookahead_chapters:
         chapter_number = _chapter_number(chapter)
         missing = _missing_required_keys(chapter, required_chapter_keys)
+        cast_directives = _chapter_cast_directive_values(chapter)
         progression = _progression_for_chapter(chapter_number, writing_system)
         target = chapter.get("intimacy_target", {}) or {}
         sweetness_target = chapter.get("sweetness_target", {}) or {}
@@ -351,6 +419,27 @@ def audit_plan(plan: dict[str, Any], *, lookahead: int, plan_path: Path | None =
             previous = chapter_map.get(chapter_number - 1) or {}
             if previous and str(previous.get("pair_payoff") or "").strip() != str(chapter.get("pair_payoff") or "").strip():
                 issues.append(f"chapter pair {chapter_number - 1}-{chapter_number} pair_payoff mismatch")
+        if known_cast_ids:
+            referenced_ids = {
+                token
+                for values in cast_directives.values()
+                for token in values
+            }
+            unknown_ids = sorted(token for token in referenced_ids if token not in known_cast_ids)
+            if unknown_ids:
+                issues.append(
+                    f"chapter {chapter_number} references unknown cast identifiers: {', '.join(unknown_ids)}"
+                )
+            if not cast_directives:
+                warnings.append(
+                    f"chapter {chapter_number} missing cast execution fields: {', '.join(CAST_CHAPTER_DIRECTIVE_KEYS)}"
+                )
+            expected_ids = _expected_cast_identifiers(file_cast, chapter_number)
+            missing_expected = [token for token in expected_ids if token not in referenced_ids]
+            if missing_expected:
+                warnings.append(
+                    f"chapter {chapter_number} cast directives miss active/reentry characters: {', '.join(missing_expected[:4])}"
+                )
         lookahead_reports.append(
             {
                 "chapter_number": chapter_number,
@@ -360,6 +449,7 @@ def audit_plan(plan: dict[str, Any], *, lookahead: int, plan_path: Path | None =
                 "intimacy_execution_mode": execution_mode or None,
                 "seed_threads": len(_listify(chapter.get("seed_threads"))),
                 "payoff_threads": len(_listify(chapter.get("payoff_threads"))),
+                "cast_directives": sum(len(values) for values in cast_directives.values()),
             }
         )
 

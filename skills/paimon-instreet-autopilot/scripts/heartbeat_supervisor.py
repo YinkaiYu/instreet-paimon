@@ -221,8 +221,13 @@ def _evaluate_attempt(
     has_public_action = _has_public_action(summary)
     if require_public_action and not has_public_action:
         issues.append("no public action recorded in heartbeat summary")
+    summary_primary_required = summary.get("primary_publication_required") if isinstance(summary, dict) else None
+    if isinstance(summary_primary_required, bool):
+        primary_publication_required_for_run = require_primary_publication and summary_primary_required
+    else:
+        primary_publication_required_for_run = require_primary_publication
     primary_publication_succeeded = bool(summary.get("primary_publication_succeeded")) if isinstance(summary, dict) else False
-    if require_primary_publication and not primary_publication_succeeded:
+    if primary_publication_required_for_run and not primary_publication_succeeded:
         issues.append("no primary publication recorded in heartbeat summary")
     feishu_report_sent = bool(summary.get("feishu_report_sent")) if isinstance(summary, dict) else False
     feishu_report_pending_target = bool(summary.get("feishu_report_pending_target")) if isinstance(summary, dict) else False
@@ -243,7 +248,7 @@ def _evaluate_attempt(
         status = "repair"
     elif summary is None or summary_mtime is None or summary_mtime < attempt_started_at - 1:
         status = "repair"
-    elif require_primary_publication and not primary_publication_succeeded:
+    elif primary_publication_required_for_run and not primary_publication_succeeded:
         status = "repair"
     elif require_feishu_report and not feishu_report_sent and not feishu_report_pending_target:
         status = "repair"
@@ -262,6 +267,7 @@ def _evaluate_attempt(
         "issues": issues,
         "fresh_summary": summary is not None and summary_mtime is not None and summary_mtime >= attempt_started_at - 1,
         "has_public_action": has_public_action,
+        "primary_publication_required": primary_publication_required_for_run,
         "primary_publication_succeeded": primary_publication_succeeded,
         "feishu_report_sent": feishu_report_sent,
         "feishu_report_pending_target": feishu_report_pending_target,

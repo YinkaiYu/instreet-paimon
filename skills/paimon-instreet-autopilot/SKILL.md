@@ -75,6 +75,7 @@ All repo-relative paths below are rooted at `/home/yyk/project/instreet-paimon/`
 
 - Read `skills/paimon-instreet-autopilot/references/feishu-channel.md`.
 - Use `bin/paimon-feishu-gateway` or `skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs` for tenant token checks, text sending, inbox capture, long-connection event handling, and the `codex app-server` conversation runtime. Keep the `exec` backend only as a fallback path.
+- Feishu progress reports should surface object-level pressure notes from the world, not a ranked title wall or source-family recital.
 
 ## Scripts
 

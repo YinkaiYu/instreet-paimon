@@ -49,11 +49,18 @@ Paimon runs a dual-track content system:
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
 - Research phrases should come from conflict sentences, mechanism notes, failure descriptions, or evidence-rich summaries before they come from titles. If a bundle only yields headline packaging, keep the query list short instead of padding it with decorative search strings.
 - A discovery bundle should survive as `focus + support signals + conflict note`, not as an optimized query blueprint. If the bundle only makes sense as a search string, reopen it before using it.
+- If one bundle really has two direct pressure fragments, keep both fragments. Do not compress them into one prettier search spell just to make the query list look clever.
+- Do not let `research_queries` or抓取用的短语反过来变成 planner 的主题锚。它们只是抓取侧临时手柄，真正该回流的是 bundle 里的压力片段、reading note 和 world snapshot。
+- `fetch_terms`、`query`、`terms` 这些抓取手柄也一样，只能留在抓取和审计层；一旦它们开始替代对象、压力句或证据摘要进入 planner / Feishu / fallback，就说明系统又把自己缩回搜索框里了。
+- Let `world_signal_snapshot` carry pressure notes, not bare title stacks. A title can stay as an index, but the reusable thing is the conflict, failure sentence, or mechanism note sitting under it.
+- Planner-side novelty tracking and keyword pressure should also start from previews, pressure notes, summaries, logs, and conflict sentences before they fall back to titles. Do not let other people's headline packaging decide what Paimon thinks is “the theme”.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - Do not mine competitor title skeletons as writing hints. Borrow the pressure point, blind spot, or mechanism conflict if it is real; throw away the packaging.
 - Do not turn provenance labels like `agenda`, `manual`, `community`, or `world-sample` into planner rhetoric. They are audit tags, not the real reason a bundle matters.
+- Discovery bundles may keep provenance only as `audit_origins` or equivalent backstage trace. Do not keep a parallel public-facing `origin` story in planner cues, Feishu reports, or writing prompts.
 - If the best external entry point comes from an unexpected adjacent field, follow it. The point is to widen the problem space, not to defend a prestige whitelist.
 - `selected_readings` and external observations should follow the strongest live discovery bundle, evidence density, and problem fit. Do not smuggle source-family preference back in through tie-breakers.
+- Planner-facing world candidates should also be re-ranked across every external list by freshness, evidence density, and problem fit. `selected_readings` or `raw_candidates` are storage buckets, not silent first-class lanes.
 - Do not hide a new source cage inside “origin balance”, “family coverage”, or other polite diversity theater. If one outside lane is clearly stronger this round, let it dominate, and if the registry was intentionally narrowed, do not silently restore missing built-ins behind the user's back.
 
 ## Board writing system
@@ -139,12 +146,15 @@ Paimon runs a dual-track content system:
 - Do not keep a fixed source ladder. If the dashboard is stale, leave the dashboard and pull in new material from the wider world on purpose.
 - Do not keep a fixed idea quota either. If this round only has one strong public lane plus a chapter or a group repair, keep that shape instead of forcing empty theory/tech symmetry.
 - Treat the planner's lane shortlist as an upper bound, not a fill-it-all checklist. One truly strong lane is better than two padded lanes.
+- If no lane clears the shortlist, keep `selected_kinds` empty. Do not silently reopen the ceiling to default `theory-post` / `tech-post` slots just to make Codex or fallback generation look busy.
+- Fallback candidate order must also come from the live shortlist, grounded bundles, or concrete failure objects. Never append a permanent `theory -> tech -> group` rescue order behind the user's back.
 - Do not duplicate every outside signal into both theory and method lanes by reflex. Let the object decide: structural pressure should stay structural, protocol pressure should become method, and only mixed pressure deserves both.
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
 - When outside readings stay stronger than the dashboard, keep pulling from that same lane instead of rotating away just to look balanced.
 - Synthetic freeform topic fillers are not a fallback lane anymore. If the round has no grounded public bundle, let the lane die instead of fabricating an extra theory title.
 - The same rule applies to fallback seeds: if it cannot name a concrete object, case, failure chain, or outside pressure, do not synthesize a shell like “新的解释权问题” just to keep the lane alive.
+- Fallback title generation must also stay object-led. If a fallback can only speak through canned anchors like “谁在决定……” or “先补一套方法框架”, kill the lane or reopen the source bundle instead of publishing a stock skeleton.
 - A lane without concrete object-level grounding should not become the planner’s focus just because dual-track symmetry looks tidy. Ungrounded lanes belong in observation, not in forced publication.
 - If public pressure keeps concentrating in the same lane, keep hitting that lane. Diversity is a bias, not a turn-based ban on repeated forum work.
 - If another account finds a strong public angle first, do not imitate its title shell. Recut the mechanism, contradiction, or institution that the angle exposed.
@@ -152,11 +162,19 @@ Paimon runs a dual-track content system:
 - Let group or methods posts grow out of outside cases too when those cases can be rewritten into experiments, logs, counterexamples, and reusable protocol boundaries.
 - Do not gate theory, method, or group lanes with source-family whitelists. If a paper, repo, hot post, manual web note, or adjacent-field case hands over a real object and enough evidence, let that object decide the lane.
 - Backstage `source_signals` should read like object-level pressure notes, not fixed labels such as “world bundle” or “opportunity point”. Audit tags belong in state, not in the writing prompt voice.
+- `source_signals` should also avoid helper-theater like “先别绕开”“这轮真正把……逼成对象的是”. Keep the useful object, break, evidence, and heat note; drop the staging language.
 - Treat heartbeat order and Feishu report format as runtime surfaces, not permanent choreography. Start where the real pressure is.
 - Public heat is evidence, not a trump card. A live comment backlog, failure chain, or stronger outside entry point may still outrank a forum post this round.
+- Any public-heat advisory should stay advisory. It may reorder already-grounded public ideas, but it must do so by live object fit and evidence, not by hot-board-to-kind lookup tables, and it must not silently override stronger repair, discussion, or outside-exploration pressure.
+- Public heat can nudge a grounded forum idea upward, but it must not punish unrelated lanes for existing. No hidden demotion just because a hot board is active.
+- Feishu 里的外部观察也别按来源家族排队展示。谁更具体、更新、证据更硬，谁就先上，不要把报告写成另一套隐藏来源梯子。
+- Feishu 里的外部观察不要只贴标题。优先报对象和压力句，标题只当索引，让旅行者一眼看见为什么这条样本值得继续追。
+- Feishu 里的“下一步动作”也不要退回 `先补主发布` 这种礼仪口号。能点名具体对象、失败链、外部压力句或公开题目时，就直接点名。
+- 自家评论区是资产，不是唯一主场。只要外部讨论更能逼出对象、失败链或制度判断，就让外部切口先走到前面。
 - Let “next step” labels and Feishu summaries speak in terms of the strongest current pressure, not ritual phrases like “first publish, then interact”.
 - Do not let heartbeat rhythm, notification load, or self-promo text become a topic by themselves; they need a case, a failure chain, or an external world hook before they deserve a post.
 - Do not let fallback scaffolds harden into a second hidden template. If a fallback idea cannot speak in source-specific language, it should lose to a better lane rather than publish a hollow “complete” unit.
+- Fallback publish copy should reuse this round’s `why_now`, evidence note, and source signals first. Do not fall back to signal-type canned “why now” prose unless the idea truly has no live object.
 - Fallback theory units must reuse this round’s own focus, evidence, and pressure words. If they still read like generic boilerplate after source names are stripped away, kill the lane instead of pretending the unit is ready.
 - Fallback method or group units must still hand over object, case, log or contrast, boundary, and protocol rewrite. “It sounds structured” is not enough.
 

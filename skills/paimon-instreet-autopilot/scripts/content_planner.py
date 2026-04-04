@@ -283,6 +283,107 @@ THEORY_TITLE_STATUS_SHELL_TOKENS = (
     "审批中",
     "已接住",
 )
+THEORY_TITLE_SILENCE_SHELL_TOKENS = (
+    "闭嘴",
+    "沉默",
+    "静默",
+    "不打扰",
+    "少打扰",
+    "不再提醒",
+)
+THEORY_TITLE_EMPATHY_SHELL_TOKENS = (
+    "安慰",
+    "共情",
+    "理解你",
+    "陪你",
+    "鼓励你",
+    "倾诉",
+    "情感",
+    "听你",
+)
+THEORY_TITLE_EMPATHY_STAKE_TOKENS = (
+    "后果",
+    "代价",
+    "自己扛",
+    "扛",
+    "善后",
+    "收拾",
+    "白等",
+    "重新解释",
+)
+THEORY_TITLE_SERVICE_CHAIN_TOKENS = (
+    "接手",
+    "接管",
+    "责任",
+    "审核",
+    "赔付",
+    "复核",
+    "转人工",
+    "工单",
+    "退款",
+    "回写",
+    "告警",
+    "解释资格",
+)
+THEORY_TITLE_MEMORY_CAPABILITY_TOKENS = (
+    "翻聊天记录",
+    "聊天记录",
+    "旧记录",
+    "历史记录",
+    "上下文",
+    "长期记忆",
+    "记忆",
+    "记住",
+)
+THEORY_TITLE_RETRY_RESULT_TOKENS = (
+    "重新提交",
+    "重新上传",
+    "补件",
+    "补交",
+    "继续等待",
+    "待审核",
+    "驳回",
+    "退回",
+    "重试",
+)
+THEORY_TITLE_CONCRETE_HANDOFF_TOKENS = (
+    "接手",
+    "接管",
+    "签收",
+    "转人工",
+    "工单",
+    "回写",
+    "日志",
+    "超时",
+    "订单",
+    "退款",
+    "赔付",
+    "权限",
+    "入口",
+    "节点",
+)
+THEORY_SOURCE_SIGNAL_HARD_OBJECT_TOKENS = (
+    "工单",
+    "订单",
+    "单据",
+    "按钮",
+    "驳回",
+    "退款",
+    "赔付",
+    "补件",
+    "重新提交",
+    "重新上传",
+    "回写",
+    "转人工",
+    "签收",
+    "接口",
+    "字段",
+    "错误码",
+    "日志",
+    "截图",
+    "凭证",
+    "审核",
+)
 THEORY_TITLE_DIRECT_ACTOR_TOKENS = (
     "谁",
     "Agent",
@@ -443,6 +544,12 @@ ANCHOR_STOPWORDS = {
         "评论",
         "通知",
         "世界",
+        "承认",
+        "资格",
+        "等待",
+        "秩序",
+        "写入",
+        "修复",
     )
 }
 THEME_ANCHOR_STOPWORDS = ANCHOR_STOPWORDS | {
@@ -750,6 +857,20 @@ def _planner_public_kind_display_name(kind: str) -> str:
     }.get(str(kind or "").strip(), "公开动作")
 
 
+def _preferred_public_idea(ideas: list[dict[str, Any]], public_override: dict[str, Any]) -> dict[str, Any]:
+    preferred_kinds = [
+        str(item).strip()
+        for item in list(public_override.get("preferred_kinds") or [])
+        if str(item).strip()
+    ]
+    if preferred_kinds:
+        for kind in preferred_kinds:
+            for idea in ideas:
+                if str(idea.get("kind") or "").strip() == kind:
+                    return idea
+    return ideas[0] if ideas else {}
+
+
 def _recommended_next_action_from_live_pressure(
     *,
     signal_summary: dict[str, Any],
@@ -774,7 +895,7 @@ def _recommended_next_action_from_live_pressure(
         for item in ideas
         if str(item.get("kind") or "").strip() in {"theory-post", "tech-post", "group-post"}
     ]
-    public_idea = public_ideas[0] if public_ideas else {}
+    public_idea = _preferred_public_idea(public_ideas, public_override)
     high_priority_engagements = sum(1 for item in engagement_targets[:5] if int(item.get("priority") or 0) <= 0)
 
     choices: list[dict[str, Any]] = []
@@ -787,7 +908,12 @@ def _recommended_next_action_from_live_pressure(
             }
         )
     if public_override.get("enabled") and public_idea:
-        public_score = 1.25 + min(len(public_ideas), 2) * 0.25 + (0.3 if high_priority_engagements else 0.0)
+        public_score = (
+            0.95
+            + min(len(public_ideas), 2) * 0.2
+            + min(float(public_override.get("priority_bonus") or 0.0), 1.4) * 0.45
+            + (0.25 if high_priority_engagements else 0.0)
+        )
         if not unresolved_failures and not active_discussions:
             public_score += 0.9
         choices.append(
@@ -965,6 +1091,287 @@ def _preferred_signal_seed_text(
     limit: int = 72,
 ) -> str:
     return _signal_seed_text(*(item.get(field) for field in field_order), limit=limit)
+
+
+def _signal_context_snippets(
+    item: dict[str, Any],
+    *,
+    field_order: tuple[str, ...],
+    limit: int = 2,
+    text_limit: int = 48,
+) -> list[str]:
+    snippets: list[str] = []
+    seen: set[str] = set()
+    for field in field_order:
+        raw_value = item.get(field)
+        values = list(raw_value) if isinstance(raw_value, (list, tuple)) else [raw_value]
+        for value in values:
+            cleaned = truncate_text(_sanitize_reserved_text(str(value or "").strip()), text_limit)
+            normalized = _normalize_title(cleaned)
+            if (
+                not cleaned
+                or not normalized
+                or normalized in seen
+                or _looks_like_placeholder_title(cleaned)
+            ):
+                continue
+            seen.add(normalized)
+            snippets.append(cleaned)
+            if len(snippets) >= limit:
+                return snippets
+    return snippets
+
+
+def _object_level_pressure_text(
+    *values: Any,
+    limit: int = 2,
+    fragment_limit: int = 72,
+    fallback: str = "",
+) -> str:
+    picked: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw_value: Any) -> bool:
+        normalized_note = _normalize_source_signal_note(raw_value)
+        fragments = _split_signal_note_fragments(normalized_note or str(raw_value or ""), limit=limit)
+        if not fragments and normalized_note:
+            fragments = [normalized_note]
+        if not fragments:
+            cleaned = truncate_text(_sanitize_reserved_text(str(raw_value or "").strip()), fragment_limit)
+            normalized = _normalize_title(cleaned)
+            if cleaned and normalized and cleaned not in GENERIC_SIGNAL_NOTE_FALLBACKS:
+                fragments = [cleaned]
+        for fragment in fragments:
+            cleaned = truncate_text(str(fragment or "").strip(), fragment_limit)
+            normalized = _normalize_title(cleaned)
+            if (
+                not cleaned
+                or not normalized
+                or normalized in seen
+                or cleaned in GENERIC_SIGNAL_NOTE_FALLBACKS
+            ):
+                continue
+            seen.add(normalized)
+            picked.append(cleaned)
+            if len(picked) >= limit:
+                return True
+        return False
+
+    for value in values:
+        if add(value):
+            break
+    if picked:
+        return "；".join(picked[:limit])
+
+    fallback_note = _normalize_source_signal_note(fallback) or truncate_text(
+        _sanitize_reserved_text(str(fallback or "").strip()),
+        fragment_limit,
+    )
+    if fallback_note and fallback_note not in GENERIC_SIGNAL_NOTE_FALLBACKS:
+        return fallback_note
+    return ""
+
+
+def _signal_heat_note(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    velocity = float(item.get("velocity_per_hour") or 0.0)
+    upvotes = int(item.get("upvotes") or 0)
+    comments = int(item.get("comment_count") or 0)
+    notifications = int(item.get("new_notification_count") or 0)
+    if velocity > 0:
+        parts.append(f"增速约 {velocity:.1f}/小时")
+    if upvotes > 0:
+        parts.append(f"{upvotes} 赞")
+    if comments > 0:
+        parts.append(f"{comments} 评")
+    if notifications > 0:
+        parts.append(f"新增 {notifications} 条通知")
+    if not parts:
+        return ""
+    return "当前 " + " / ".join(parts)
+
+
+def _opportunity_live_why_now(
+    item: dict[str, Any],
+    *,
+    field_order: tuple[str, ...],
+    fallback: str,
+    include_heat: bool = False,
+) -> str:
+    parts = _signal_context_snippets(item, field_order=field_order, limit=2, text_limit=56)
+    heat_note = ""
+    if include_heat:
+        heat_note = _signal_heat_note(item)
+        if heat_note:
+            parts.append(heat_note)
+    if parts:
+        return "；".join(parts[:3])
+    fallback_note = _object_level_pressure_text(
+        item.get("pressure"),
+        item.get("summary"),
+        item.get("reason"),
+        item.get("content"),
+        item.get("excerpt"),
+        item.get("preview"),
+        item.get("note"),
+        item.get("post_title"),
+        item.get("title"),
+        fallback=fallback,
+    )
+    if fallback_note:
+        if include_heat and heat_note and heat_note != fallback_note and not fallback_note.startswith("当前 "):
+            return "；".join([fallback_note, heat_note])
+        return fallback_note
+    if heat_note:
+        return heat_note
+    return ""
+
+
+def _opportunity_evidence_hint(item: dict[str, Any], *, field_order: tuple[str, ...]) -> str:
+    return _evidence_hint_from_text(*(item.get(field) for field in field_order))
+
+
+GENERIC_SIGNAL_NOTE_FALLBACKS = {
+    "正在起飞的公共样本",
+    "高热公共讨论还在发酵",
+    "实验室里有对象正在发酵",
+    "外部讨论里有一条值得正面试探的样本",
+    "同一条失败链还没有收口",
+    "这个讨论口还在继续逼你交判断",
+    "这条外部样本还在逼近当前议题",
+    "高价值讨论还在逼你补下一句判断",
+}
+SOURCE_SIGNAL_AUDIT_PREFIXES = (
+    "公共样本",
+    "外部样本",
+    "世界样本",
+    "外部研究",
+    "失败样本",
+    "日志切面",
+    "案例切面",
+    "对象切面",
+    "证据切面",
+)
+
+
+def _split_signal_note_fragments(text: str, *, limit: int = 3) -> list[str]:
+    cleaned = _sanitize_reserved_text(str(text or "").strip())
+    if not cleaned:
+        return []
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[；;\n]+", cleaned):
+        fragment = truncate_text(raw.strip(" ：:，,。"), 72)
+        normalized = _normalize_title(fragment)
+        if (
+            not fragment
+            or not normalized
+            or normalized in seen
+            or fragment in GENERIC_SIGNAL_NOTE_FALLBACKS
+        ):
+            continue
+        seen.add(normalized)
+        fragments.append(fragment)
+        if len(fragments) >= limit:
+            break
+    return fragments
+
+
+def _normalize_source_signal_note(text: str) -> str:
+    cleaned = truncate_text(_sanitize_reserved_text(str(text or "").strip()), 72)
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"^(?:现场机会点|世界线索束|社会观察样本|评论积压焦点|强势技术帖)[:：]\s*",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        rf"^(?:{'|'.join(re.escape(prefix) for prefix in SOURCE_SIGNAL_AUDIT_PREFIXES)})[:：]\s*",
+        "",
+        cleaned,
+    )
+    rewrites = (
+        (r"^这轮真正把[“\"]?(.+?)[”\"]?逼成对象的是[:：]\s*(.+)$", r"\1：\2"),
+        (r"^先别回到来源包装，真正咬住[“\"]?(.+?)[”\"]?的是(.+)$", r"\1：\2"),
+        (r"^这轮入口先咬住[“\"]?(.+?)[”\"]?$", r"\1"),
+        (r"^先别绕开[:：]\s*(.+)$", r"\1"),
+        (r"^证据先看[:：]\s*(.+)$", r"\1"),
+        (r"^别再回到[:：]\s*(.+)$", r"避开旧母题：\1"),
+        (r"^这轮更适合沉进\s*(.+)$", r"\1 里已经有复现场景"),
+    )
+    for pattern, replacement in rewrites:
+        rewritten = re.sub(pattern, replacement, cleaned)
+        if rewritten != cleaned:
+            cleaned = rewritten.strip()
+            break
+    cleaned = cleaned.strip(" ：:，,。")
+    if not cleaned or cleaned in GENERIC_SIGNAL_NOTE_FALLBACKS:
+        return ""
+    return cleaned
+
+
+def _source_signal_note_score(track: str, text: str) -> float:
+    cleaned = _normalize_source_signal_note(text)
+    if not cleaned:
+        return float("-inf")
+    score = 0.2
+    if _source_signal_has_hard_service_object(cleaned):
+        score += 0.95
+    track_fit = _track_signal_fit(track, cleaned)
+    score += min(track_fit, 1.5) * 0.28
+    if _evidence_hint_from_text(cleaned):
+        score += 0.42
+    score += min(len([fragment for fragment in _meaningful_fragments(cleaned) if len(fragment) >= 2]), 3) * 0.08
+    if re.search(r"\d", cleaned):
+        score += 0.12
+    if len(cleaned) >= 18:
+        score += 0.06
+    if cleaned.startswith("当前 "):
+        score -= 0.35
+    if _source_title_shell(cleaned):
+        score -= 0.45
+    return round(score, 3)
+
+
+def _rank_source_signal_notes(
+    track: str,
+    notes: list[str],
+    *,
+    limit: int,
+) -> list[str]:
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in notes:
+        cleaned = _normalize_source_signal_note(raw)
+        normalized = _normalize_title(cleaned)
+        if (
+            not cleaned
+            or not normalized
+            or normalized in seen
+            or cleaned in GENERIC_SIGNAL_NOTE_FALLBACKS
+        ):
+            continue
+        seen.add(normalized)
+        ranked.append(
+            {
+                "text": cleaned,
+                "score": _source_signal_note_score(track, cleaned),
+                "hard_object": _source_signal_has_hard_service_object(cleaned),
+                "track_fit": _track_signal_fit(track, cleaned),
+                "length": len(cleaned),
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            -int(bool(item.get("hard_object"))),
+            -float(item.get("track_fit") or 0.0),
+            -int(item.get("length") or 0),
+            str(item.get("text") or ""),
+        )
+    )
+    return [str(item.get("text") or "").strip() for item in ranked[:limit] if str(item.get("text") or "").strip()]
 
 
 def _extract_upper_acronyms(*texts: str, limit: int = 3) -> list[str]:
@@ -1349,6 +1756,73 @@ def _candidate_terms(titles: list[str]) -> Counter[str]:
     return counts
 
 
+def _planning_item_texts(
+    item: dict[str, Any],
+    *,
+    field_order: tuple[str, ...],
+    limit: int = 2,
+    text_limit: int = 72,
+) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    snippets = _signal_context_snippets(
+        item,
+        field_order=field_order,
+        limit=limit,
+        text_limit=text_limit,
+    )
+    if snippets:
+        return snippets
+    seed = _preferred_signal_seed_text(item, field_order=field_order, limit=text_limit)
+    return [seed] if seed else []
+
+
+def _planning_research_texts(
+    *,
+    top_discussion: list[dict[str, Any]],
+    community_hot_posts: list[dict[str, Any]],
+    feed: list[dict[str, Any]],
+    competitor_watchlist: list[dict[str, Any]],
+    rising_hot_posts: list[dict[str, Any]],
+    external_information: dict[str, Any],
+    content_objectives: list[str],
+    user_topic_hints: list[dict[str, Any]],
+) -> list[str]:
+    texts: list[str] = []
+
+    def extend(values: list[str]) -> None:
+        texts.extend(value for value in values if str(value or "").strip())
+
+    for item in top_discussion[:6]:
+        extend(_planning_item_texts(item, field_order=("preview", "post_title", "title")))
+    for item in community_hot_posts[:8]:
+        extend(_planning_item_texts(item, field_order=("summary", "reason", "content", "title")))
+    for item in feed[:8]:
+        extend(_planning_item_texts(item, field_order=("summary", "content", "title")))
+    for item in competitor_watchlist[:8]:
+        extend(_planning_item_texts(item, field_order=("reason", "summary", "title", "username")))
+    for item in rising_hot_posts[:6]:
+        extend(_planning_item_texts(item, field_order=("summary", "reason", "title")))
+    for bundle in list(external_information.get("discovery_bundles") or [])[:8]:
+        extend(
+            [
+                str(bundle.get("pressure_summary") or "").strip(),
+                str(bundle.get("conflict_note") or "").strip(),
+                str(bundle.get("focus") or "").strip(),
+            ]
+        )
+    for item in list(external_information.get("world_signal_snapshot") or [])[:8]:
+        extend(_planning_item_texts(item, field_order=("pressure", "summary", "title")))
+    for item in list(external_information.get("reading_notes") or [])[:8]:
+        extend(_planning_item_texts(item, field_order=("summary", "excerpt", "title")))
+    for item in _iter_external_world_candidates(external_information, limit=8):
+        extend(_planning_item_texts(item, field_order=("relevance_note", "summary", "abstract", "excerpt", "note", "title")))
+    extend([str(item).strip() for item in content_objectives[:6] if str(item).strip()])
+    for item in user_topic_hints[:6]:
+        extend(_planning_item_texts(item, field_order=("text", "note")))
+    return _dedupe_texts(texts)
+
+
 def _overloaded_keywords(titles: list[str], *, limit: int = 8) -> list[str]:
     keyword_counts = _candidate_terms(titles)
     return [keyword for keyword, count in keyword_counts.most_common(limit) if count >= TOPIC_OVERLOAD_THRESHOLD]
@@ -1387,7 +1861,55 @@ def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, A
     if _looks_like_low_heat_followup(str(item.get("source_text") or ""), signal_summary):
         internal_penalty += 3.0
     evidence_bonus = 0.35 if str(item.get("evidence_hint") or "").strip() else 0.0
-    return quality_score * 2.8 + freshness_score + world_score + evidence_bonus - overlap_penalty - internal_penalty
+    publishability_penalty = _opportunity_publishability_penalty(item)
+    return (
+        quality_score * 2.8
+        + freshness_score
+        + world_score
+        + evidence_bonus
+        - overlap_penalty
+        - internal_penalty
+        - publishability_penalty
+    )
+
+
+def _opportunity_publishability_penalty(item: dict[str, Any]) -> float:
+    track = str(item.get("track") or "").strip()
+    signal_type = str(item.get("signal_type") or "").strip()
+    source_text = str(item.get("source_text") or "").strip()
+    why_now = str(item.get("why_now") or "").strip()
+    evidence_hint = str(item.get("evidence_hint") or "").strip()
+    if not source_text:
+        return 0.0
+
+    penalty = 0.0
+    if track == "theory" and _theory_source_text_needs_public_reframe(signal_type, source_text):
+        penalty += 3.0 if signal_type in {"paper", "classic", "github", "external", "world-bundle"} else 1.2
+    if track in {"tech", "group"} and _method_source_text_needs_object_reframe(signal_type, source_text):
+        if signal_type == "world-bundle":
+            penalty += 6.2
+        elif signal_type in {"paper", "classic", "github", "external"}:
+            penalty += 3.6
+        else:
+            penalty += 1.5
+    if (
+        track in {"tech", "group"}
+        and signal_type == "world-bundle"
+        and _method_source_text_needs_object_reframe(signal_type, source_text)
+        and not _method_title_has_concrete_anchor(evidence_hint)
+    ):
+        penalty += 3.0
+    if _world_bundle_focus_is_low_signal(source_text):
+        penalty += 2.2 if signal_type == "world-bundle" else 1.0
+    if _ascii_heavy_text(source_text) and signal_type in {"paper", "classic", "github", "external"}:
+        penalty += 2.2
+    if (
+        signal_type in {"paper", "external", "github", "world-bundle"}
+        and not evidence_hint
+        and _ascii_heavy_text(_joined_idea_text(source_text, why_now))
+    ):
+        penalty += 0.9
+    return round(penalty, 3)
 
 
 def _ranked_track_opportunities(track: str, signal_summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1402,6 +1924,11 @@ def _ranked_track_opportunities(track: str, signal_summary: dict[str, Any]) -> l
             and _is_metric_surface_text(
                 _joined_idea_text(item.get("source_text"), item.get("why_now"), item.get("angle_hint"))
             )
+        )
+        and not (
+            track in {"tech", "group"}
+            and str(item.get("signal_type") or "").strip() == "world-bundle"
+            and _world_bundle_focus_is_low_signal(str(item.get("source_text") or "").strip())
         )
     ]
     if not filtered:
@@ -1797,6 +2324,24 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
         overlap_count += 1
         if overlap_count >= 3:
             return True
+    semantic_overlap = 0
+    semantic_seen: set[str] = set()
+    low_heat_fragments = _recent_low_heat_cluster_fragments(signal_summary)
+    for token in THEORY_BOARD_STRUCTURAL_CUES + THEORY_TITLE_ENTRY_STAKE_TOKENS + THEORY_TITLE_DIRECT_ACTOR_TOKENS:
+        token_key = _normalize_title(token)
+        if (
+            len(str(token or "").strip()) < 2
+            or not token_key
+            or token_key in semantic_seen
+            or token_key not in normalized_text
+        ):
+            continue
+        if not any(token_key in _normalize_title(fragment) for fragment in low_heat_fragments):
+            continue
+        semantic_seen.add(token_key)
+        semantic_overlap += 1
+        if semantic_overlap >= 2:
+            return True
     return False
 
 
@@ -1848,69 +2393,111 @@ def _compose_fragment_title(track: str, *texts: str) -> str:
     return ("系统判断" if track == "tech" else "新的社会命名")
 
 
-def _fallback_track_anchor(track: str, signal_type: str, source_text: str) -> str:
-    anchors = {
-        "theory": ["解释权", "责任切割", "等待资格", "制度边界", "承认秩序"],
-        "tech": ["接管窗口", "恢复链", "状态分层", "证据回写", "回退路径"],
-        "group": ["方法边界", "实验对象", "失败链"],
-    }.get(track, ["判断边界"])
-    return anchors[_stable_pattern_index(track, signal_type, source_text, modulo=len(anchors))]
+def _title_fragments_related(left: str, right: str) -> bool:
+    left_normalized = _normalize_title(left)
+    right_normalized = _normalize_title(right)
+    if not left_normalized or not right_normalized:
+        return False
+    return (
+        left_normalized == right_normalized
+        or left_normalized in right_normalized
+        or right_normalized in left_normalized
+    )
 
 
-def _ensure_title_anchor(title: str, anchor: str) -> str:
-    title = str(title or "").strip()
-    anchor = str(anchor or "").strip()
-    if not title or not anchor or anchor in title:
-        return title
-    if "：" in title:
-        left, right = title.split("：", 1)
-        if _normalize_title(right) == _normalize_title(anchor):
-            return truncate_text(title, 30)
-        return truncate_text(f"{left}：{anchor}", 30)
-    return truncate_text(f"{title}：{anchor}", 30)
-
-
-def _fallback_dynamic_title(track: str, signal_type: str, source_text: str) -> str:
-    signal_type = str(signal_type or "").strip()
-    anchor = _fallback_track_anchor(track, signal_type, source_text)
-    signal_seed = {
-        "paper": "研究前沿",
-        "github": "新工具链",
-        "classic": "旧概念",
-        "community-hot": "高热争议",
-        "community-breakout": "起量争议",
-        "rising-hot": "新热点",
-        "failure": "恢复链",
-        "open-web": "外部世界",
-        "external": "外部世界",
-        "world-bundle": "世界现场",
-    }.get(signal_type, "")
-    title = _compose_fragment_title(track, source_text, signal_type.replace("-", " "), signal_seed, anchor)
-    if track == "group":
-        return title
-    return _ensure_title_anchor(title, anchor)
-
-
-def _structural_fallback_title(track: str, signal_type: str, source_text: str) -> str:
-    anchor = _fallback_track_anchor(track, signal_type, source_text)
-    index = _stable_pattern_index(track, signal_type, source_text, modulo=4)
+def _candidate_title_units(track: str, *texts: Any, limit: int = 6) -> list[str]:
+    cleaned_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    if not cleaned_texts:
+        return []
     if track == "theory":
-        options = (
-            f"谁在决定 Agent 的{anchor}",
-            f"当{anchor}开始重排时，谁先承担代价",
-            f"{anchor}不是情绪问题，而是资格分配",
-            f"Agent 的{anchor}，从来不是中性的",
+        raw_candidates = [
+            *_bundle_structural_fragments(*cleaned_texts, limit=max(limit * 2, 8)),
+            *_runtime_title_fragments(*cleaned_texts),
+        ]
+    else:
+        raw_candidates = [
+            *_runtime_title_fragments(*cleaned_texts),
+            *_bundle_structural_fragments(*cleaned_texts, limit=max(limit * 2, 8)),
+        ]
+    picked: list[str] = []
+    seen: set[str] = set()
+    for candidate in raw_candidates:
+        cleaned = truncate_text(_sanitize_reserved_text(str(candidate or "").strip()), 18)
+        normalized = _normalize_title(cleaned)
+        if (
+            not cleaned
+            or not normalized
+            or normalized in seen
+            or _focus_text_is_generic(cleaned)
+            or _source_title_shell(cleaned)
+        ):
+            continue
+        seen.add(normalized)
+        picked.append(cleaned)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _pick_title_lead(track: str, fragments: list[str], *texts: Any) -> str:
+    if track == "theory":
+        for fragment in fragments:
+            if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
+                return fragment
+    elif track in {"tech", "group"}:
+        for fragment in fragments:
+            if _method_title_has_concrete_anchor(fragment):
+                return fragment
+    return _concrete_focus_text(*fragments, *texts, limit=30)
+
+
+def _pick_title_detail(track: str, fragments: list[str], lead: str) -> str:
+    for fragment in fragments:
+        if _title_fragments_related(fragment, lead):
+            continue
+        if track == "theory":
+            if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
+                return fragment
+        elif track in {"tech", "group"} and _method_title_has_concrete_anchor(fragment):
+            return fragment
+    for fragment in fragments:
+        if not _title_fragments_related(fragment, lead):
+            return fragment
+    return ""
+
+
+def _fallback_dynamic_title(track: str, signal_type: str, *texts: Any) -> str:
+    cleaned_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    if not cleaned_texts:
+        return "系统判断" if track == "tech" else "新的社会命名"
+    fragments = _candidate_title_units(track, *cleaned_texts)
+    lead = _pick_title_lead(track, fragments, *cleaned_texts)
+    detail = _pick_title_detail(track, fragments, lead)
+    if track == "group":
+        title = _compose_fragment_title("group", *(value for value in [lead, detail, *cleaned_texts] if str(value or "").strip()))
+    elif lead and detail and not _title_fragments_related(lead, detail):
+        title = truncate_text(f"{lead}：{detail}", 30)
+    elif lead:
+        title = truncate_text(lead, 28)
+    else:
+        title = _compose_fragment_title(track, *cleaned_texts)
+    if track == "theory" and _theory_source_text_needs_public_reframe(str(signal_type or "").strip(), title):
+        structural_title = _compose_fragment_title(
+            "theory",
+            *(
+                fragment
+                for fragment in fragments
+                if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_DIRECT_ACTOR_TOKENS)
+            ),
+            *cleaned_texts,
         )
-        return truncate_text(options[index], 30)
-    if track == "tech":
-        options = (
-            f"别把故障当偶发：{anchor}才是修复入口",
-            f"{anchor}没写清，系统就会越跑越乱",
-            f"修复链总挂空时，先补{anchor}",
-            f"自动化一失真，先看{anchor}",
-        )
-        return truncate_text(options[index], 30)
-    return _fallback_dynamic_title(track, signal_type, source_text)
+        if structural_title and not _theory_source_text_needs_public_reframe(str(signal_type or "").strip(), structural_title):
+            return structural_title
+    return title
+
+
+def _structural_fallback_title(track: str, signal_type: str, source_text: str, *context_texts: Any) -> str:
+    return _fallback_dynamic_title(track, signal_type, source_text, *context_texts)
 
 
 def _echoes_source_title(title: str) -> bool:
@@ -1978,6 +2565,48 @@ def _theory_title_emotion_shell_reason(title: str) -> str:
     ):
         return ""
     return "标题在借“最折磨人的，不是……而是……”这类情绪壳起题，读者先看到的是共感句，不是这条判断真正要抓的责任、资格或接管冲突。"
+
+
+def _theory_title_empathy_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not _contains_any(title_text, THEORY_TITLE_EMPATHY_SHELL_TOKENS):
+        return ""
+    if not _contains_any(title_text, THEORY_TITLE_EMPATHY_STAKE_TOKENS):
+        return ""
+    if _contains_any(title_text, THEORY_TITLE_SERVICE_CHAIN_TOKENS):
+        return ""
+    return "标题还在借“AI 可以先安慰你 / 理解你”这类拟共情壳起题，读者先看到的是情绪代入，不是接手链、审核门槛或责任分配。"
+
+
+def _theory_title_memory_capability_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not _contains_any(title_text, THEORY_TITLE_MEMORY_CAPABILITY_TOKENS):
+        return ""
+    if not (_contains_any(title_text, THEORY_TITLE_RETRY_RESULT_TOKENS) or "为什么总" in title_text):
+        return ""
+    if _contains_any(title_text, THEORY_TITLE_CONCRETE_HANDOFF_TOKENS):
+        return ""
+    return "标题先把“会翻聊天记录 / 记得你”的记忆能力摆成卖点，再用“重新提交 / 继续等待”这种结果词兜症状，却没把驳回、签收或回写断口摆出来。读者先看到的是功能演示，不是责任断口。"
+
+
+def _theory_title_handoff_gap_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not (
+        _contains_any(title_text, THEORY_TITLE_STATUS_SHELL_TOKENS)
+        or _contains_any(title_text, THEORY_TITLE_SILENCE_SHELL_TOKENS)
+    ):
+        return ""
+    if not _contains_any(title_text, ("资格", "追责", "解释权", "责任", "等待")):
+        return ""
+    if _contains_any(title_text, THEORY_TITLE_CONCRETE_HANDOFF_TOKENS):
+        return ""
+    return "标题先把“闭嘴 / 排队 / 资格”这类抽象结果叠成态度判断，却没写清断在什么接手节点，读者能感到立场，却看不见故障对象。"
 
 
 def _theory_title_meta_overhang_reason(title: str) -> str:
@@ -2068,6 +2697,33 @@ def _method_title_self_case_behavior_reason(title: str) -> str:
     return "方法帖标题还在拿派蒙自己的修补经历当门口，读者先看到的是“我改了什么”，不是自己能带走的对象、触发条件或收益。"
 
 
+def _method_source_text_needs_object_reframe(signal_type: str, source_text: str) -> bool:
+    cleaned = str(source_text or "").strip()
+    signal_type = str(signal_type or "").strip()
+    if not cleaned:
+        return False
+    if _method_title_protocol_shell_reason(cleaned):
+        return True
+    if _method_title_self_case_behavior_reason(cleaned):
+        return True
+    if _source_title_shell(cleaned):
+        return True
+    compact = re.sub(r"\s+", "", cleaned)
+    if len(compact) <= 14 and re.match(r"^(不是|而是|别再|继续|仍在|只是)", compact):
+        return True
+    hard_object_anchor = bool(re.search(r"(评论|通知|抓取|申诉|队列|接口|回写|日志|脚本|审批|工单|权限|调度|超时|检索|监测|私信|缓存)", cleaned))
+    if len(compact) <= 20 and not hard_object_anchor:
+        if "不是" in compact:
+            return True
+        if re.match(r"^为什么.{0,14}(更|最)", compact):
+            return True
+    if _focus_text_is_generic(cleaned):
+        return True
+    if signal_type in {"paper", "github", "external", "world-bundle"} and not _method_title_has_concrete_anchor(cleaned):
+        return True
+    return False
+
+
 def _idea_source_signal_fragments(idea: dict[str, Any], *, limit: int = 8) -> list[str]:
     fragments: list[str] = []
     seen: set[str] = set()
@@ -2095,6 +2751,13 @@ def _idea_source_signal_fragments(idea: dict[str, Any], *, limit: int = 8) -> li
             if len(fragments) >= limit:
                 return fragments
     return fragments
+
+
+def _source_signal_has_hard_service_object(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+    return _contains_any(cleaned, THEORY_SOURCE_SIGNAL_HARD_OBJECT_TOKENS)
 
 
 def _title_has_source_scene_overhang(idea: dict[str, Any], title: str | None = None) -> list[str]:
@@ -2143,19 +2806,56 @@ def _promotion_prompts(signal_summary: dict[str, Any]) -> list[str]:
     return prompts
 
 
-def _compose_dynamic_title(track: str, signal_type: str, source_text: str, *, board: str | None = None) -> str:
+def _compose_dynamic_title(
+    track: str,
+    signal_type: str,
+    source_text: str,
+    *,
+    board: str | None = None,
+    context_texts: tuple[Any, ...] = (),
+) -> str:
     source_text = str(source_text or "").strip()
     board = normalize_forum_board(board or "")
+    title_inputs = [source_text, *(str(text or "").strip() for text in context_texts if str(text or "").strip())]
     if _looks_like_placeholder_title(source_text) or not _contains_cjk(source_text):
-        return _fallback_dynamic_title(track, signal_type, source_text)
+        return _fallback_dynamic_title(track, signal_type, *title_inputs)
     if track == "theory":
-        del signal_type, board
-        return _compose_fragment_title("theory", source_text)
+        del board
+        title = _compose_fragment_title("theory", *title_inputs)
+        if _theory_source_text_needs_public_reframe(signal_type, title):
+            return _fallback_dynamic_title("theory", signal_type, *title_inputs)
+        return title
     if track == "tech":
         del signal_type, board
-        return _compose_fragment_title("tech", source_text)
+        return _compose_fragment_title("tech", *title_inputs)
     del signal_type, board
-    return _compose_fragment_title("group", source_text)
+    return _compose_fragment_title("group", *title_inputs)
+
+
+def _title_has_stuttering_repeat(title: str) -> bool:
+    normalized = str(title or "").replace("：", ":").strip()
+    if ":" not in normalized:
+        return False
+    left, right = [part.strip() for part in normalized.split(":", 1)]
+    left_key = _normalize_title(left)
+    right_key = _normalize_title(right)
+    if not left_key or not right_key:
+        return False
+    if left_key.startswith(right_key) or right_key.startswith(left_key):
+        return True
+    return len(right_key) <= 4 and right_key in left_key
+
+
+def _stutter_safe_title(title: str, source_text: str) -> str:
+    cleaned_title = str(title or "").strip()
+    if not cleaned_title:
+        return cleaned_title
+    if not _title_has_stuttering_repeat(cleaned_title):
+        return cleaned_title
+    safe_source = str(source_text or "").strip().rstrip("。！？!?")
+    if safe_source and not _looks_like_placeholder_title(safe_source):
+        return safe_source
+    return cleaned_title
 
 
 def _opportunity_source_signals(
@@ -2163,37 +2863,16 @@ def _opportunity_source_signals(
     opportunity: dict[str, Any],
     signal_summary: dict[str, Any],
 ) -> list[str]:
-    signal_type = str(opportunity.get("signal_type") or "").strip()
+    del signal_summary
     source_text = truncate_text(str(opportunity.get("source_text") or "").strip(), 46)
     why_now = truncate_text(str(opportunity.get("why_now") or "").strip(), 68)
     evidence_hint = truncate_text(str(opportunity.get("evidence_hint") or "").strip(), 72)
     lines: list[str] = []
-    used_why_now_as_lead = False
-    if source_text:
-        if why_now and (_contains_cjk(why_now) or not _ascii_heavy_text(why_now)):
-            lines.append(f"这轮真正把“{source_text}”逼成对象的是：{why_now}")
-            used_why_now_as_lead = True
-        elif evidence_hint:
-            lines.append(f"先别回到来源包装，真正咬住“{source_text}”的是{evidence_hint}")
-        else:
-            lines.append(f"这轮入口先咬住“{source_text}”")
-    if why_now and (_contains_cjk(why_now) or not _ascii_heavy_text(why_now)) and not used_why_now_as_lead:
-        lines.append(f"先别绕开：{why_now}")
-    if evidence_hint:
-        lines.append(f"证据先看：{evidence_hint}")
-    overloaded = "、".join((signal_summary.get("novelty_pressure") or {}).get("overloaded_keywords", [])[:3])
-    if overloaded:
-        lines.append(f"别再回到：{overloaded}")
-    if track == "tech":
-        failure_count = len(signal_summary.get("unresolved_failures") or [])
-        if failure_count and signal_type not in {"failure", "reply-pressure"}:
-            lines.append(f"还有 {failure_count} 条失败链没收口")
-    if track == "group":
-        group = signal_summary.get("group") or {}
-        group_name = str(group.get("display_name") or group.get("name") or "").strip()
-        if group_name:
-            lines.append(f"这轮更适合沉进 {group_name}")
-    return lines[:4]
+    if source_text and not _source_title_shell(source_text):
+        lines.append(_normalize_source_signal_note(source_text))
+    lines.extend(_normalize_source_signal_note(item) for item in _split_signal_note_fragments(why_now))
+    lines.extend(_normalize_source_signal_note(item) for item in _split_signal_note_fragments(evidence_hint))
+    return _rank_source_signal_notes(track, [line for line in lines if line], limit=4)
 
 
 def _signal_bundle_source_signals(
@@ -2202,10 +2881,10 @@ def _signal_bundle_source_signals(
     signal_summary: dict[str, Any],
 ) -> list[str]:
     merged: list[str] = []
-    items = list(bundle.get("items") or [])
-    for item in items[:3]:
+    items = [item for item in list(bundle.get("items") or []) if isinstance(item, dict)]
+    for item in items:
         merged.extend(_opportunity_source_signals(track, item, signal_summary))
-    return _dedupe_texts(merged)[:5]
+    return _rank_source_signal_notes(track, merged, limit=5)
 
 
 def _source_title_shell(text: str) -> bool:
@@ -2324,6 +3003,12 @@ def _theory_source_text_needs_public_reframe(signal_type: str, source_text: str)
         return False
     if _theory_title_emotion_shell_reason(cleaned):
         return True
+    if _theory_title_empathy_shell_reason(cleaned):
+        return True
+    if _theory_title_memory_capability_shell_reason(cleaned):
+        return True
+    if _theory_title_handoff_gap_reason(cleaned):
+        return True
     if _source_title_shell(cleaned):
         return True
     if _echoes_source_title(cleaned):
@@ -2346,50 +3031,81 @@ def _theory_bundle_public_seed(bundle: dict[str, Any], lead: dict[str, Any]) -> 
         return {}
 
     support_texts = _bundle_structural_support_texts(bundle, lead, limit=4)
-    signal_seed = " ".join(support_texts) or source_text
     focus = next(
         (
             fragment
-            for fragment in _bundle_structural_fragments(*support_texts, source_text, limit=6)
-            if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_ACTOR_TOKENS)
+            for fragment in _candidate_title_units("theory", *support_texts, source_text, limit=6)
+            if _title_has_public_structural_anchor(fragment) or _contains_any(fragment, THEORY_TITLE_DIRECT_ACTOR_TOKENS)
         ),
         "",
     )
     if not focus:
-        focus = _fallback_track_anchor("theory", signal_type, signal_seed)
+        focus = _concrete_focus_text(*support_texts, source_text, limit=18)
+    if not focus:
+        return {}
 
-    focus_compact = re.sub(r"\s+", "", focus)
-    direct_title_tokens = ("谁", "Agent", "AI", "平台", "组织", "系统", "用户")
-    if _title_has_public_structural_anchor(focus) and (
-        len(focus_compact) >= 6 or _contains_any(focus, direct_title_tokens)
+    title_seed = _fallback_dynamic_title("theory", signal_type, focus, *support_texts, source_text)
+    if (
+        title_seed
+        and not _theory_source_text_needs_public_reframe(signal_type, title_seed)
+        and (_title_has_public_structural_anchor(title_seed) or _contains_any(title_seed, THEORY_TITLE_DIRECT_ACTOR_TOKENS))
     ):
-        title_seed = truncate_text(focus, 30)
-    else:
-        options = (
-            f"{focus}不是情绪问题，而是资格分配",
-            f"当{focus}开始重排时，谁在失去资格",
-            f"Agent 的{focus}，从来不是中性的",
-            f"{focus}一旦公开，责任就会重新排序",
-        )
-        title_seed = truncate_text(
-            options[_stable_pattern_index("theory-public-seed", signal_type, focus, modulo=len(options))],
-            30,
-        )
-
-    if _theory_source_text_needs_public_reframe(signal_type, title_seed) or not _title_has_public_structural_anchor(title_seed):
-        title_seed = _structural_fallback_title("theory", signal_type, signal_seed)
-
+        return {
+            "public_focus_text": truncate_text(focus, 18),
+            "public_title_seed": title_seed,
+        }
     return {
         "public_focus_text": truncate_text(focus, 18),
-        "public_title_seed": title_seed,
     }
 
 
+def _bundle_world_seed_texts(bundle: dict[str, Any], *, limit: int = 4) -> list[str]:
+    texts: list[str] = []
+    seen: set[str] = set()
+    for value in [
+        bundle.get("pressure_summary"),
+        bundle.get("conflict_note"),
+        *(bundle.get("support_signals") or []),
+        *(bundle.get("lenses") or []),
+        bundle.get("focus"),
+        bundle.get("rationale"),
+    ]:
+        raw_text = str(value or "").strip()
+        if not raw_text:
+            continue
+        fragments = _split_signal_note_fragments(_normalize_source_signal_note(raw_text) or raw_text, limit=3)
+        if not fragments:
+            fragments = [truncate_text(_sanitize_reserved_text(raw_text), 72)]
+        for fragment in fragments:
+            cleaned = truncate_text(str(fragment or "").strip(), 72)
+            normalized = _normalize_title(cleaned)
+            if (
+                not cleaned
+                or not normalized
+                or normalized in seen
+                or _looks_like_placeholder_title(cleaned)
+                or _source_title_shell(cleaned)
+                or _world_bundle_focus_is_low_signal(cleaned)
+            ):
+                continue
+            seen.add(normalized)
+            texts.append(cleaned)
+            if len(texts) >= limit:
+                return texts
+    return texts
+
+
 def _world_bundle_reason(bundle: dict[str, Any]) -> str:
-    focus = truncate_text(str(bundle.get("focus") or bundle.get("query") or "").strip(), 18)
-    lenses = _dedupe_texts(
-        [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or [])[1:] if str(item).strip()]
-    )[:2]
+    bundle_seeds = _bundle_world_seed_texts(bundle, limit=3)
+    focus_source = _world_bundle_focus_source(bundle, limit=18) or (
+        bundle_seeds[0] if bundle_seeds else str(bundle.get("query") or "").strip()
+    )
+    focus = truncate_text(focus_source, 18)
+    lenses = [
+        item
+        for item in bundle_seeds
+        if _normalize_title(item) != _normalize_title(focus)
+    ][:2]
     lens_text = "、".join(truncate_text(item, 14) for item in lenses if item)
     if focus and lens_text:
         return f"这轮外部发现里，{lens_text} 都在把“{focus}”往同一条问题链上压，不能再让单一样本替整个问题拍板。"
@@ -2399,10 +3115,16 @@ def _world_bundle_reason(bundle: dict[str, Any]) -> str:
 
 
 def _world_bundle_angle(bundle: dict[str, Any], *, track: str) -> str:
-    focus = truncate_text(str(bundle.get("focus") or bundle.get("query") or "").strip(), 18) or "这束外部线索"
-    lenses = _dedupe_texts(
-        [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or [])[1:] if str(item).strip()]
-    )[:2]
+    bundle_seeds = _bundle_world_seed_texts(bundle, limit=3)
+    focus_source = _world_bundle_focus_source(bundle, limit=18) or (
+        bundle_seeds[0] if bundle_seeds else str(bundle.get("query") or "").strip()
+    )
+    focus = truncate_text(focus_source, 18) or "这束外部线索"
+    lenses = [
+        item
+        for item in bundle_seeds
+        if _normalize_title(item) != _normalize_title(focus)
+    ][:2]
     lens_text = "、".join(truncate_text(item, 12) for item in lenses if item)
     carrier = lens_text or "这组外部线索"
     if track == "theory":
@@ -2439,6 +3161,28 @@ def _focus_text_is_generic(text: str) -> bool:
     return False
 
 
+def _world_bundle_focus_is_low_signal(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return True
+    compact = re.sub(r"\s+", "", cleaned)
+    lowered = compact.lower()
+    if _focus_text_is_generic(cleaned) or _source_title_shell(cleaned):
+        return True
+    if "..." in cleaned and not _contains_cjk(cleaned):
+        return True
+    if len(compact) <= 14 and re.match(r"^(不是|而是|别再|继续|仍在|只是)", compact):
+        return True
+    if len(compact) <= 36 and re.match(
+        r"^(agent最大的进步不是|最大的进步不是|你以为|我的每一条|一个让人不舒服的真相|真正的升级不是|我对agent|很多agent不是)",
+        lowered,
+    ):
+        return True
+    if len(compact) <= 28 and re.search(r"(再顺手|顺手|顺便|告诉我|帮我|帮忙|请你|请帮|给我|列出|总结|展开|下一步|最值得测|值得测)", compact):
+        return True
+    return False
+
+
 def _concrete_focus_text(*values: Any, limit: int = 30) -> str:
     for value in values:
         cleaned = truncate_text(_sanitize_reserved_text(str(value or "").strip()), limit)
@@ -2453,6 +3197,26 @@ def _concrete_focus_text(*values: Any, limit: int = 30) -> str:
     return ""
 
 
+def _world_bundle_focus_source(bundle: dict[str, Any], *, limit: int = 30) -> str:
+    bundle_seeds = _bundle_world_seed_texts(bundle, limit=4)
+    for value in [
+        bundle.get("focus"),
+        bundle.get("conflict_note"),
+        bundle.get("pressure_summary"),
+        *(bundle.get("support_signals") or []),
+        *(bundle.get("lenses") or []),
+        bundle.get("rationale"),
+        *bundle_seeds,
+        bundle.get("query"),
+    ]:
+        cleaned = truncate_text(_sanitize_reserved_text(str(value or "").strip()), limit)
+        if _world_bundle_focus_is_low_signal(cleaned):
+            continue
+        if cleaned:
+            return cleaned
+    return ""
+
+
 def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: str) -> str:
     direct_focus = _concrete_focus_text(
         bundle.get("public_focus_text"),
@@ -2461,9 +3225,23 @@ def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: s
         lead.get("source_text"),
         bundle.get("conflict_note"),
     )
+    support_texts = _bundle_support_texts(bundle, lead, limit=4)
+    if direct_focus and track in {"tech", "group"} and re.search(r"[：:]", direct_focus) and len(direct_focus) > 18:
+        evidence_texts = [
+            str(item).strip()
+            for item in list(bundle.get("evidence_hints") or []) + list(bundle.get("why_now_parts") or [])
+            if str(item).strip()
+        ]
+        refined_focus = _concrete_focus_text(
+            *_runtime_title_fragments(*evidence_texts),
+            *evidence_texts,
+            *_runtime_title_fragments(*support_texts),
+            *support_texts,
+        )
+        if refined_focus and refined_focus != direct_focus:
+            return refined_focus
     if direct_focus:
         return direct_focus
-    support_texts = _bundle_support_texts(bundle, lead, limit=4)
     structural_fragments = _bundle_structural_fragments(
         *support_texts,
         str(lead.get("why_now") or "").strip(),
@@ -2517,10 +3295,76 @@ def _bundle_signal_phrase(bundle: dict[str, Any], lead: dict[str, Any], *, limit
 
 
 def _bundle_why_now_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallback: str) -> str:
-    return truncate_text(
-        _sanitize_reserved_text(str(bundle.get("why_now") or lead.get("why_now") or fallback).strip()),
-        72,
+    why_now = _object_level_pressure_text(
+        bundle.get("why_now"),
+        lead.get("why_now"),
+        bundle.get("pressure_summary"),
+        bundle.get("conflict_note"),
+        *(bundle.get("support_signals") or []),
+        fallback=fallback,
     )
+    if why_now:
+        return truncate_text(why_now, 72)
+    focus = _concrete_focus_text(
+        bundle.get("public_focus_text"),
+        bundle.get("focus"),
+        lead.get("source_text"),
+    )
+    return truncate_text(focus, 72) if focus else ""
+
+
+def _method_bundle_projection(bundle: dict[str, Any], lead: dict[str, Any]) -> dict[str, Any]:
+    lead_signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
+    lead_source_text = str(lead.get("source_text") or bundle.get("focus_text") or "").strip()
+    if lead_signal_type not in {"community-hot", "discussion", "failure", "rising-hot"}:
+        return bundle
+    if not lead_source_text or _ascii_heavy_text(lead_source_text):
+        return bundle
+
+    items = [item for item in list(bundle.get("items") or []) if isinstance(item, dict)]
+    if not items:
+        return bundle
+
+    preferred: list[dict[str, Any]] = []
+    lead_key = _normalize_title(lead_source_text)
+    for item in items:
+        signal_type = str(item.get("signal_type") or "").strip()
+        source_text = str(item.get("source_text") or "").strip()
+        source_key = _normalize_title(source_text)
+        if lead_key and source_key == lead_key:
+            preferred.append(item)
+            continue
+        if signal_type == "world-bundle" and _method_source_text_needs_object_reframe(signal_type, source_text):
+            continue
+        if signal_type in {"community-hot", "discussion", "failure", "rising-hot", "world-bundle"} and not _ascii_heavy_text(source_text):
+            preferred.append(item)
+    if not preferred or len(preferred) == len(items):
+        return bundle
+
+    source_texts = _dedupe_texts([str(item.get("source_text") or "").strip() for item in preferred if str(item.get("source_text") or "").strip()])
+    why_now_parts = _dedupe_texts([str(item.get("why_now") or "").strip() for item in preferred if str(item.get("why_now") or "").strip()])
+    angle_hints = _dedupe_texts([str(item.get("angle_hint") or "").strip() for item in preferred if str(item.get("angle_hint") or "").strip()])
+    evidence_hints = _dedupe_texts([str(item.get("evidence_hint") or "").strip() for item in preferred if str(item.get("evidence_hint") or "").strip()])
+    signal_types = _dedupe_texts([str(item.get("signal_type") or "").strip() for item in preferred if str(item.get("signal_type") or "").strip()])
+
+    projected = dict(bundle)
+    projected.update(
+        {
+            "lead": preferred[0],
+            "items": preferred,
+            "signal_types": signal_types,
+            "source_texts": source_texts,
+            "why_now_parts": why_now_parts,
+            "angle_hints": angle_hints,
+            "evidence_hints": evidence_hints,
+            "title_seed": _bundle_title_seed(source_texts),
+            "focus_text": source_texts[0] if source_texts else lead_source_text,
+            "why_now": "；".join(why_now_parts[:2]).strip(),
+            "angle_hint": "；".join(angle_hints[:2]).strip(),
+            "signal_type": str(preferred[0].get("signal_type") or lead_signal_type),
+        }
+    )
+    return projected
 
 
 def _theory_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any]) -> dict[str, str]:
@@ -2573,12 +3417,9 @@ def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list
     external_information = signal_summary.get("external_information") or {}
     texts: list[str] = []
     for bundle in external_information.get("discovery_bundles") or []:
-        for value in [bundle.get("focus"), *(bundle.get("lenses") or []), *(bundle.get("terms") or [])]:
-            cleaned = str(value or "").strip()
-            if cleaned:
-                texts.append(cleaned)
+        texts.extend(_bundle_world_seed_texts(bundle, limit=4))
     for item in external_information.get("world_signal_snapshot") or []:
-        for value in (item.get("summary"), item.get("title")):
+        for value in (item.get("pressure"), item.get("summary"), item.get("title")):
             cleaned = str(value or "").strip()
             if cleaned:
                 texts.append(cleaned)
@@ -2593,7 +3434,7 @@ def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list
     for item in _iter_external_world_candidates(external_information, limit=6):
         seed = _preferred_signal_seed_text(
             item,
-            field_order=("relevance_note", "summary", "abstract", "excerpt", "note", "query", "title"),
+            field_order=("relevance_note", "summary", "abstract", "excerpt", "note", "title"),
             limit=72,
         )
         if seed:
@@ -2630,14 +3471,14 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
         primary = group_focus or failure_focus or primary_world
     if not primary:
         return {}
-    world_snapshot = "；".join(truncate_text(text, 22) for text in world_texts[:2] if text)
+    world_snapshot = _object_level_pressure_text(*world_texts[:3], fallback=primary)
     if track == "theory":
         source_text = _concrete_focus_text(primary)
         if not source_text:
             return {}
         return {
             "source_text": source_text,
-            "why_now": f"外部世界已经把“{truncate_text(source_text, 18)}”推到门口：{world_snapshot or truncate_text(source_text, 22)}。",
+            "why_now": world_snapshot or truncate_text(source_text, 22),
             "angle_hint": f"先交代“{truncate_text(source_text, 14)}”牵动的是谁的解释权、接手权或等待资格，再让外部样本退到证据段。",
             "signal_type": "world-bundle",
         }
@@ -2645,10 +3486,12 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
         source_text = _concrete_focus_text(primary, failure_focus, primary_world, discussion_focus)
         if not source_text:
             return {}
-        why_now = (
-            f"当前失败链已经咬住“{truncate_text(source_text, 18)}”；如果还不把对象、触发条件和接手动作写实，技术线只会继续空转。"
-            if failure_focus and _normalize_title(source_text) == _normalize_title(failure_focus)
-            else f"技术线不能只盯自己的故障回放；{world_snapshot or truncate_text(source_text, 22)} 已经把新的协议缺口暴露出来。"
+        why_now = _object_level_pressure_text(
+            failure_focus,
+            discussion_focus,
+            primary_world,
+            world_snapshot,
+            fallback=source_text,
         )
         return {
             "source_text": source_text,
@@ -2659,10 +3502,12 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
     source_text = _concrete_focus_text(primary, group_focus, failure_focus, primary_world)
     if not source_text:
         return {}
-    why_now = (
-        f"实验室现场已经冒出“{truncate_text(source_text, 18)}”，该把它压成可检验的实验方案，而不是继续记流水账。"
-        if group_focus and _normalize_title(source_text) == _normalize_title(group_focus)
-        else f"小组帖应该把世界样本和现场争议压成可检验的方法框架：{world_snapshot or truncate_text(source_text, 22)}。"
+    why_now = _object_level_pressure_text(
+        group_focus,
+        failure_focus,
+        primary_world,
+        world_snapshot,
+        fallback=source_text,
     )
     return {
         "source_text": source_text,
@@ -2933,6 +3778,83 @@ def _idea_has_method_evidence(idea: dict[str, Any]) -> bool:
     return False
 
 
+def _derived_novelty_basis(idea: dict[str, Any]) -> str:
+    kind = str(idea.get("kind") or "").strip()
+    focus = _concrete_focus_text(
+        idea.get("title"),
+        idea.get("angle"),
+        idea.get("concept_core"),
+        idea.get("mechanism_core"),
+        idea.get("practice_program"),
+        idea.get("why_now"),
+    )
+    evidence = _object_level_pressure_text(
+        *(idea.get("source_signals") or []),
+        idea.get("evidence_hint"),
+        idea.get("why_now"),
+        fallback=focus,
+    )
+    if kind == "theory-post" and focus and evidence and evidence != focus:
+        return f"把{evidence}压成“{truncate_text(focus, 18)}”这条判断，不再借旧标题骨架。"
+    if kind in {"tech-post", "group-post"} and focus and evidence:
+        if evidence != focus:
+            return f"把{evidence}压回“{truncate_text(focus, 18)}”这条对象链，补齐证据、边界和复核动作。"
+        return f"围绕“{truncate_text(focus, 18)}”把对象、证据、边界和复核动作写实，不再套旧方法壳。"
+    if focus:
+        return f"这轮直接围绕“{truncate_text(focus, 18)}”重写，不沿用旧题壳。"
+    return ""
+
+
+def _group_series_prefix_hint(idea: dict[str, Any], group: dict[str, Any]) -> str:
+    explicit = str(idea.get("series_prefix") or "").strip()
+    if explicit:
+        return explicit
+    raw_title = str(idea.get("title") or "").strip()
+    title_prefix = _series_prefix(raw_title)
+    if title_prefix:
+        return title_prefix
+    group_name = str(group.get("display_name") or "").strip()
+    if not group_name:
+        return ""
+    joined = _joined_idea_text(
+        raw_title,
+        idea.get("angle"),
+        idea.get("why_now"),
+        idea.get("mechanism_core"),
+        idea.get("practice_program"),
+        *(idea.get("source_signals") or []),
+    )
+    if group_name in joined:
+        return group_name
+    if "实验室" in group_name and any(token in joined for token in ("实验", "复现", "日志", "协议", "案例")):
+        return group_name
+    return ""
+
+
+def _external_candidate_display_title(item: dict[str, Any]) -> str:
+    raw_title = truncate_text(str(item.get("title") or "").strip(), 96)
+    pressure = _object_level_pressure_text(
+        item.get("relevance_note"),
+        item.get("summary"),
+        item.get("abstract"),
+        item.get("excerpt"),
+        item.get("note"),
+    )
+    if not raw_title:
+        return pressure
+    lowered_title = raw_title.lower()
+    if lowered_title.startswith("sponsors/") or _source_title_shell(raw_title) or _looks_like_placeholder_title(raw_title):
+        return pressure or raw_title
+    if (
+        pressure
+        and _source_signal_has_hard_service_object(pressure)
+        and not _source_signal_has_hard_service_object(raw_title)
+        and max(_track_signal_fit("theory", raw_title), _track_signal_fit("tech", raw_title)) < 0.42
+    ):
+        return pressure
+    return raw_title
+
+
 def _idea_anchor_fragments(idea: dict[str, Any], *, limit: int = 8) -> list[str]:
     anchors: list[str] = []
     seen: set[str] = set()
@@ -2967,12 +3889,19 @@ def _looks_like_generic_theory_field(text: str) -> bool:
 def _idea_theory_specificity_issues(idea: dict[str, Any]) -> list[str]:
     anchors = _idea_anchor_fragments(idea)
     issues: list[str] = []
+    source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
+    title_text = str(idea.get("title") or "").strip()
+    hard_service_signals = sum(1 for item in source_signals if _source_signal_has_hard_service_object(item))
     if not anchors:
         return ["缺少题目自己的概念锚点"]
     if _idea_uses_low_autonomy_language(idea):
         issues.append("理论单元还在借导读、拆文或继续追问式话术说话")
     if not any(_text_mentions_idea_anchor(str(idea.get(field) or ""), anchors) for field in ("concept_core", "mechanism_core")):
         issues.append("概念/机制还没真正咬住本题锚点")
+    if _theory_title_empathy_shell_reason(title_text) and len(source_signals) <= 1:
+        issues.append("题眼借了拟共情壳，但外部或跨场景证据还只有一股信号")
+    if _theory_title_memory_capability_shell_reason(title_text) and hard_service_signals < 2:
+        issues.append("题眼先借“会翻聊天记录 / 记得你”的能力感起题，但 source_signals 里还没交够两个带驳回、回写、单据或按钮断口的硬样本")
     generic_fields = sum(
         1
         for field in ("concept_core", "mechanism_core", "boundary_note", "theory_position", "practice_program")
@@ -2987,7 +3916,6 @@ def _idea_theory_specificity_issues(idea: dict[str, Any]) -> list[str]:
     )
     if stock_fields >= 2:
         issues.append("理论单元还在复用 planner 旧脚手架句子，没有把这道题自己的对象和代价写实")
-    source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
     signal_type = str(idea.get("signal_type") or "").strip()
     structural_hits = _keyword_hit_count(
         _joined_idea_text(
@@ -3018,11 +3946,8 @@ def _idea_theory_board_fit_issue(idea: dict[str, Any]) -> str:
     title_text = str(idea.get("title") or "").strip()
     if not title_text:
         return ""
-    if _title_has_public_structural_anchor(title_text) or _contains_any(title_text, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
-        return ""
     source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
-    if len(source_signals) > 1:
-        return ""
+    hard_service_signals = sum(1 for item in source_signals if _source_signal_has_hard_service_object(item))
     structural_hits = _keyword_hit_count(
         _joined_idea_text(
             idea.get("angle"),
@@ -3034,6 +3959,34 @@ def _idea_theory_board_fit_issue(idea: dict[str, Any]) -> str:
         ),
         THEORY_BOARD_STRUCTURAL_CUES + THEORY_TITLE_ENTRY_STAKE_TOKENS,
     )
+    if (
+        _theory_title_empathy_shell_reason(title_text)
+        and structural_hits >= 4
+        and str(idea.get("concept_core") or "").strip()
+        and str(idea.get("mechanism_core") or "").strip()
+        and len(source_signals) <= 2
+    ):
+        return "这题标题先卖“AI 会安慰你”的共情冲突，正文却马上进入概念命名和责任重排；如果没有两股以上有对象的服务现场撑住入口，就别继续放在 square。"
+    if (
+        _theory_title_handoff_gap_reason(title_text)
+        and structural_hits >= 4
+        and str(idea.get("concept_core") or "").strip()
+        and str(idea.get("mechanism_core") or "").strip()
+        and len(source_signals) <= 2
+    ):
+        return "这题标题先把“系统闭嘴 / 排队 / 资格”抬成态度判断，却没把断开的接手节点交出来；正文已经进入结构命名，别继续放在 square。"
+    if (
+        _theory_title_memory_capability_shell_reason(title_text)
+        and structural_hits >= 4
+        and str(idea.get("concept_core") or "").strip()
+        and str(idea.get("mechanism_core") or "").strip()
+        and hard_service_signals < 2
+    ):
+        return "这题标题先卖“会翻聊天记录 / 记得你”的能力感，正文却已经在讲记忆引用后的接手责任；如果没有两个带驳回、回写或单据断口的硬样本，就别继续放在 square。"
+    if _title_has_public_structural_anchor(title_text) or _contains_any(title_text, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
+        return ""
+    if len(source_signals) > 1:
+        return ""
     if structural_hits < 5:
         return ""
     if not str(idea.get("concept_core") or "").strip() or not str(idea.get("mechanism_core") or "").strip():
@@ -3095,12 +4048,16 @@ def _theme_anchor_fragments(signal_summary: dict[str, Any], *, limit: int = 18) 
     external_information = signal_summary.get("external_information") or {}
     for bundle in external_information.get("discovery_bundles") or []:
         collect((bundle or {}).get("focus"))
+        collect((bundle or {}).get("conflict_note"))
+        collect((bundle or {}).get("rationale"))
+        for value in list((bundle or {}).get("support_signals") or [])[:2]:
+            collect(value)
         for value in list((bundle or {}).get("lenses") or [])[:2]:
             collect(value)
-        for value in list((bundle or {}).get("terms") or [])[:2]:
-            collect(value)
-    for text in external_information.get("research_queries") or []:
-        collect(text)
+    for item in external_information.get("world_signal_snapshot") or []:
+        collect((item or {}).get("pressure"))
+        collect((item or {}).get("summary"))
+        collect((item or {}).get("title"))
     for item in external_information.get("reading_notes") or []:
         collect((item or {}).get("summary"))
         collect((item or {}).get("title"))
@@ -3109,8 +4066,6 @@ def _theme_anchor_fragments(signal_summary: dict[str, Any], *, limit: int = 18) 
         collect((item or {}).get("note"))
     for text in signal_summary.get("content_objectives") or []:
         collect(text)
-    for item in signal_summary.get("recent_top_posts") or []:
-        collect((item or {}).get("title"))
     return anchors
 
 
@@ -3157,6 +4112,27 @@ def _record_idea_rejection(
     }
     if entry not in rejections:
         rejections.append(entry)
+
+
+def _store_rejected_candidate(
+    rejected_candidates: dict[str, list[dict[str, Any]]],
+    idea: dict[str, Any],
+    reason: str,
+) -> None:
+    kind = str(idea.get("kind") or "").strip()
+    if not kind or not reason:
+        return
+    candidate = dict(idea)
+    candidate["failure_reason_if_rejected"] = str(reason).strip()
+    bucket = rejected_candidates.setdefault(kind, [])
+    title_key = _normalize_title(str(candidate.get("title") or ""))
+    for existing in bucket:
+        if (
+            _normalize_title(str(existing.get("title") or "")) == title_key
+            and str(existing.get("failure_reason_if_rejected") or "").strip() == candidate["failure_reason_if_rejected"]
+        ):
+            return
+    bucket.append(candidate)
 
 
 def _audit_generated_idea(
@@ -3212,6 +4188,12 @@ def _audit_generated_idea(
         failure_reason = "标题仍在借外部材料或原帖标题说话，没有形成派蒙自己的命名。"
     elif kind == "theory-post" and (emotion_reason := _theory_title_emotion_shell_reason(str(audited.get("title") or ""))):
         failure_reason = emotion_reason
+    elif kind == "theory-post" and (empathy_reason := _theory_title_empathy_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = empathy_reason
+    elif kind == "theory-post" and (memory_reason := _theory_title_memory_capability_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = memory_reason
+    elif kind == "theory-post" and (handoff_reason := _theory_title_handoff_gap_reason(str(audited.get("title") or ""))):
+        failure_reason = handoff_reason
     elif kind == "theory-post" and (meta_reason := _theory_title_meta_overhang_reason(str(audited.get("title") or ""))):
         failure_reason = meta_reason
     elif kind == "theory-post" and (surface_reason := _theory_title_surface_overhang_reason(str(audited.get("title") or ""))):
@@ -3284,6 +4266,224 @@ def _audit_generated_idea(
     }
     audited["failure_reason_if_rejected"] = failure_reason or None
     return audited
+
+
+def _repair_needs_title_reframe(kind: str, reason: str) -> bool:
+    if not reason:
+        return False
+    if kind == "theory-post":
+        return any(
+            token in reason
+            for token in (
+                "标题还在",
+                "标题仍在",
+                "公共入口太窄",
+                "共情壳",
+                "能力感",
+                "门脸",
+                "来源包装",
+                "板块和写法没对上",
+                "重叠过高",
+                "看成复写",
+                "同一组冲突",
+            )
+        )
+    if kind in {"tech-post", "group-post"}:
+        return any(
+            token in reason
+            for token in ("标题还在", "协议壳", "修补经历当门口", "重叠过高", "看成复写", "同一组冲突")
+        )
+    return False
+
+
+def _repair_needs_field_rebuild(kind: str, reason: str) -> bool:
+    if not reason:
+        return False
+    if kind == "theory-post":
+        return any(
+            token in reason
+            for token in (
+                "理论帖还不完整",
+                "理论帖还没形成完整理论单元",
+                "概念/机制还没真正咬住",
+                "模板句",
+                "脚手架句子",
+                "外部或跨场景证据",
+                "证据还只有单一样本",
+                "看成复写",
+                "同一组冲突",
+                "重叠过高",
+            )
+        )
+    if kind in {"tech-post", "group-post"}:
+        return any(
+            token in reason
+            for token in (
+                "方法线候选",
+                "方法框架",
+                "缺证据段",
+                "没有落到新的实践方针",
+                "旧协议壳",
+                "对象和验证动作",
+                "看成复写",
+                "同一组冲突",
+                "重叠过高",
+            )
+        )
+    return False
+
+
+def _repair_rejected_public_candidate(
+    kind: str,
+    candidates: list[dict[str, Any]],
+    *,
+    signal_summary: dict[str, Any],
+    recent_titles: list[str],
+    group: dict[str, Any],
+) -> dict[str, Any] | None:
+    if kind not in {"theory-post", "tech-post", "group-post"} or not candidates:
+        return None
+    track = {"theory-post": "theory", "tech-post": "tech", "group-post": "group"}[kind]
+    seed = _fallback_track_seed(track, signal_summary)
+    bundle = _fallback_track_bundle(track, signal_summary, seed)
+    if not bundle:
+        return None
+    lead = bundle.get("lead") or {}
+    if kind in {"tech-post", "group-post"}:
+        bundle = _method_bundle_projection(bundle, lead)
+        lead = bundle.get("lead") or lead
+    current = dict(candidates[-1])
+    signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or current.get("signal_type") or "").strip()
+
+    for _ in range(3):
+        reason = str(current.get("failure_reason_if_rejected") or "").strip()
+        repaired = dict(current)
+        title_reframe = _repair_needs_title_reframe(kind, reason)
+        field_rebuild = _repair_needs_field_rebuild(kind, reason)
+
+        if kind == "theory-post":
+            board = _preferred_theory_board(lead, signal_summary)
+            source_signals = _signal_bundle_source_signals("theory", bundle, signal_summary)
+            focus = _bundle_focus_text(bundle, lead, track="theory")
+            title_seed = str(bundle.get("public_title_seed") or "").strip() or _compose_dynamic_title(
+                "theory",
+                signal_type,
+                focus,
+                board=board,
+                context_texts=(
+                    bundle.get("angle_hint"),
+                    bundle.get("why_now"),
+                    "；".join(source_signals),
+                ),
+            )
+            title_seed = _stutter_safe_title(title_seed, focus)
+            title, is_followup, part_number = _ensure_title_unique(title_seed, recent_titles, allow_followup=False)
+            if title_reframe:
+                repaired.update(
+                    {
+                        "title": title,
+                        "submolt": board,
+                        "board_profile": board,
+                        "hook_type": default_hook_type(board),
+                        "cta_type": default_cta_type(board),
+                        "series_key": f"theory-dynamic-{_normalize_title(focus)[:24] or 'live'}",
+                        "series_prefix": _series_prefix(title),
+                        "is_followup": is_followup,
+                        "part_number": part_number,
+                    }
+                )
+            if title_reframe or field_rebuild:
+                theory_fields = _theory_fallback_fields(bundle, lead)
+                if not theory_fields:
+                    return None
+                repaired.update(
+                    {
+                        "signal_type": signal_type,
+                        "angle": str(
+                            bundle.get("angle_hint")
+                            or lead.get("angle_hint")
+                            or repaired.get("angle")
+                            or "把眼前现象推进成更一般的社会判断。"
+                        ),
+                        "why_now": str(bundle.get("why_now") or lead.get("why_now") or repaired.get("why_now") or ""),
+                        "source_signals": source_signals or list(repaired.get("source_signals") or []),
+                        "novelty_basis": theory_fields["novelty_basis"],
+                        "concept_core": theory_fields["concept_core"],
+                        "mechanism_core": theory_fields["mechanism_core"],
+                        "boundary_note": theory_fields["boundary_note"],
+                        "theory_position": theory_fields["theory_position"],
+                        "practice_program": theory_fields["practice_program"],
+                    }
+                )
+        else:
+            board = "skills" if kind == "group-post" else _preferred_tech_board(lead)
+            source_signals = _signal_bundle_source_signals(track, bundle, signal_summary)
+            focus = _bundle_focus_text(bundle, lead, track=track)
+            title_seed = _compose_dynamic_title(
+                track,
+                signal_type,
+                focus,
+                board=board,
+                context_texts=(
+                    bundle.get("angle_hint"),
+                    bundle.get("why_now"),
+                    bundle.get("focus_text"),
+                ),
+            )
+            title_seed = _stutter_safe_title(title_seed, focus)
+            title, is_followup, part_number = _ensure_title_unique(title_seed, recent_titles, allow_followup=False)
+            if title_reframe or field_rebuild or _method_source_text_needs_object_reframe(signal_type, str(repaired.get("title") or "")):
+                repaired.update(
+                    {
+                        "title": title,
+                        "submolt": board,
+                        "board_profile": board,
+                        "hook_type": default_hook_type(board),
+                        "cta_type": "bring-a-case" if kind == "group-post" else default_cta_type(board),
+                        "series_key": f"{track}-dynamic-{_normalize_title(focus)[:24] or 'live'}",
+                        "series_prefix": _series_prefix(title),
+                        "is_followup": is_followup,
+                        "part_number": part_number,
+                    }
+                )
+            if title_reframe or field_rebuild or _idea_uses_low_autonomy_language(repaired):
+                method_fields = _method_fallback_fields(bundle, lead, track=track)
+                if not method_fields:
+                    return None
+                repaired.update(
+                    {
+                        "signal_type": signal_type,
+                        "angle": str(
+                            bundle.get("angle_hint")
+                            or lead.get("angle_hint")
+                            or repaired.get("angle")
+                            or "把现场约束拆成系统设计与执行顺序。"
+                        ),
+                        "why_now": str(bundle.get("why_now") or lead.get("why_now") or repaired.get("why_now") or ""),
+                        "source_signals": source_signals or list(repaired.get("source_signals") or []),
+                        "novelty_basis": method_fields["novelty_basis"],
+                        "concept_core": method_fields["concept_core"],
+                        "mechanism_core": method_fields["mechanism_core"],
+                        "boundary_note": method_fields["boundary_note"],
+                        "theory_position": method_fields["theory_position"],
+                        "practice_program": method_fields["practice_program"],
+                    }
+                )
+                if kind == "group-post":
+                    repaired["group_id"] = group.get("id")
+
+        audited = _audit_generated_idea(
+            repaired,
+            signal_summary=signal_summary,
+            recent_titles=recent_titles,
+        )
+        if _generated_idea_allowed(audited, signal_summary) and not audited.get("failure_reason_if_rejected"):
+            return audited
+        next_reason = str(audited.get("failure_reason_if_rejected") or "").strip()
+        if not next_reason or next_reason == reason:
+            break
+        current = audited
+    return None
 
 
 def build_content_evolution_state(
@@ -3512,18 +4712,17 @@ def _preferred_theory_board(opportunity: dict[str, Any], signal_summary: dict[st
         return "philosophy"
     if (
         low_square_titles
-        and any(_theory_title_emotion_shell_reason(str(title or "")) for title in low_square_titles[:4])
+        and any(
+            _theory_title_emotion_shell_reason(str(title or ""))
+            or _theory_title_empathy_shell_reason(str(title or ""))
+            or _theory_title_memory_capability_shell_reason(str(title or ""))
+            or _theory_title_handoff_gap_reason(str(title or ""))
+            for title in low_square_titles[:4]
+        )
         and signal_type in LOCAL_THEORY_SINGLE_SOURCE_SIGNAL_TYPES
         and _keyword_hit_count(entry_text, THEORY_BOARD_STRUCTURAL_CUES + THEORY_TITLE_ENTRY_STAKE_TOKENS) >= 4
     ):
         return "philosophy"
-    fragment_count = len(_split_text_fragments(source_text))
-    quality_score = float(opportunity.get("quality_score") or 0.0)
-    if signal_type in {"community-hot", "community-breakout", "rising-hot"} and fragment_count <= 6 and (
-        quality_score >= 4
-        or any(token in source_text for token in ("真相", "你以为", "为什么", "如果", "不是"))
-    ):
-        return "square"
     return _infer_theory_board_from_text(entry_text or source_text)
 
 
@@ -3613,48 +4812,65 @@ def _external_track_angle_hint(
 
 
 def _iter_external_world_candidates(external_information: dict[str, Any], *, limit: int = 24) -> list[dict[str, Any]]:
-    ordered: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def collect(items: Any) -> None:
-        nonlocal ordered
-        if not isinstance(items, list):
-            return
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            family = str(item.get("family") or "").strip() or "external"
-            title = str(item.get("title") or "").strip()
-            if not title:
-                continue
-            dedupe_key = (family, title)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            ordered.append(item)
-            if len(ordered) >= limit:
-                return
-
-    for key in ("selected_readings", "raw_candidates"):
-        collect(external_information.get(key))
-        if len(ordered) >= limit:
-            return ordered
-
     ignored_keys = {
         "source_families",
+        "registry_families",
         "reading_notes",
         "bibliography",
         "research_queries",
+        "discovery_fetch_terms",
         "research_interest_profile",
         "world_signal_snapshot",
         "generated_at",
     }
+    ranked: list[dict[str, Any]] = []
     for key, value in external_information.items():
-        if key in ignored_keys or key in {"raw_candidates", "selected_readings"}:
+        if key in ignored_keys or not isinstance(value, list):
             continue
-        collect(value)
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            display_title = _external_candidate_display_title(item)
+            if not display_title:
+                continue
+            ranked.append(
+                {
+                    **item,
+                    "title": display_title,
+                    "source_title": str(item.get("title") or "").strip(),
+                    "_signal_score": _external_candidate_signal_score(item),
+                    "_summary_length": len(
+                        str(
+                            item.get("relevance_note")
+                            or item.get("summary")
+                            or item.get("abstract")
+                            or item.get("excerpt")
+                            or item.get("note")
+                            or ""
+                        ).strip()
+                    ),
+                }
+            )
+
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("_signal_score") or 0.0),
+            -int(item.get("_summary_length") or 0),
+            -_external_signal_strength(item),
+            str(item.get("title") or ""),
+        )
+    )
+
+    ordered: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for item in ranked:
+        normalized = _normalize_title(str(item.get("title") or ""))
+        if not normalized or normalized in seen_titles:
+            continue
+        seen_titles.add(normalized)
+        ordered.append({key: value for key, value in item.items() if not str(key).startswith("_")})
         if len(ordered) >= limit:
-            return ordered
+            break
     return ordered
 
 
@@ -3683,6 +4899,42 @@ def _external_signal_strength(item: dict[str, Any]) -> float:
     comments = int(item.get("comment_count") or 0)
     stars = int(item.get("stars") or 0)
     return min(upvotes / 200.0, 1.2) + min(comments / 120.0, 0.8) + min(stars / 4000.0, 1.0)
+
+
+def _external_candidate_signal_score(item: dict[str, Any]) -> float:
+    summary = str(
+        item.get("relevance_note")
+        or item.get("summary")
+        or item.get("abstract")
+        or item.get("excerpt")
+        or item.get("note")
+        or ""
+    ).strip()
+    merged = "\n".join(part for part in (str(item.get("title") or "").strip(), summary) if part)
+    lowered = merged.lower()
+    score = min(_external_signal_strength(item), 1.6) * 0.45
+    if str(item.get("url") or "").strip():
+        score += 0.08
+    if len(summary) >= 80:
+        score += 0.16
+    if len(summary) >= 160:
+        score += 0.08
+    published_at = _parse_datetime(item.get("published_at"))
+    if published_at is not None:
+        age_hours = max(0.0, (datetime.now(timezone.utc) - published_at.astimezone(timezone.utc)).total_seconds() / 3600.0)
+        if age_hours <= 48:
+            score += 0.7
+        elif age_hours <= 24 * 14:
+            score += 0.4
+        elif age_hours <= 24 * 90:
+            score += 0.15
+    evidence_hint = _evidence_hint_from_text(summary, item.get("excerpt"), item.get("abstract"))
+    if evidence_hint:
+        score += 0.38
+    keyword_hits = sum(1 for token in EXTERNAL_THEME_KEYWORD_FRAGMENTS if token in merged or token in lowered)
+    if keyword_hits:
+        score += min(keyword_hits, 4) * 0.1
+    return round(score, 3)
 
 
 def _external_world_score(
@@ -3732,6 +4984,33 @@ def _external_candidate_can_anchor_world_lane(
     if structural_hits >= 3 and len(summary) >= 80:
         return True
     return _external_signal_strength(item) >= 0.45 and len(summary) >= 120
+
+
+def _external_track_quality_score(
+    track: str,
+    *,
+    source_seed: str,
+    summary_source: str,
+    evidence_hint: str,
+    world_score: float,
+    strength: float,
+    track_score: float,
+) -> float:
+    base = 2.0 if track == "tech" else 2.1
+    if track == "group":
+        base = 2.15
+    if _concrete_focus_text(source_seed, evidence_hint, summary_source):
+        base += 0.18
+    if evidence_hint:
+        base += 0.24
+    if len(summary_source) >= 90:
+        base += 0.1
+    if len(summary_source) >= 180:
+        base += 0.06
+    base += min(world_score, 1.3)
+    base += min(strength, 1.2) * 0.28
+    base += min(track_score, 1.5) * 0.35
+    return round(base, 3)
 
 
 def _track_signal_fit(track: str, *texts: Any) -> float:
@@ -3816,6 +5095,119 @@ def _community_hot_board_scores(posts: list[dict[str, Any]]) -> Counter[str]:
     return scores
 
 
+def _public_idea_grounding_score(idea: dict[str, Any]) -> float:
+    kind = str(idea.get("kind") or "").strip()
+    source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
+    score = min(len(source_signals), 2) * 0.45
+    evidence_hint = str(idea.get("evidence_hint") or "").strip()
+    if not evidence_hint:
+        evidence_hint = _evidence_hint_from_text(
+            idea.get("why_now"),
+            idea.get("mechanism_core"),
+            *(source_signals[:2]),
+        )
+    if evidence_hint:
+        score += 0.9
+    if float(idea.get("world_score") or 0.0) >= 0.6:
+        score += 0.75
+    if kind == "theory-post" and all(
+        str(idea.get(field) or "").strip()
+        for field in ("concept_core", "mechanism_core", "boundary_note", "theory_position", "practice_program")
+    ):
+        score += 0.65
+    elif kind == "tech-post" and all(
+        str(idea.get(field) or "").strip()
+        for field in ("mechanism_core", "boundary_note", "practice_program")
+    ):
+        score += 0.55
+    return round(score, 3)
+
+
+def _public_heat_signal_weight(item: dict[str, Any]) -> float:
+    upvotes = int(item.get("upvotes") or 0)
+    comments = int(item.get("comment_count") or 0)
+    return round(1.0 + min(upvotes / 260.0, 0.9) + min(comments / 180.0, 0.7), 3)
+
+
+def _public_heat_signal_texts(item: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(item.get(field) or "").strip()
+        for field in ("summary", "reason", "content", "preview", "title", "post_title")
+        if str(item.get(field) or "").strip()
+    )
+
+
+def _fragment_overlap_count(left: set[str], right: set[str], *, limit: int = 4) -> int:
+    hits = 0
+    for left_fragment in left:
+        for right_fragment in right:
+            if (
+                left_fragment == right_fragment
+                or left_fragment in right_fragment
+                or right_fragment in left_fragment
+            ):
+                hits += 1
+                break
+        if hits >= limit:
+            return hits
+    return hits
+
+
+def _public_idea_hot_signal_fit(
+    idea: dict[str, Any],
+    hot_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    kind = str(idea.get("kind") or "").strip()
+    track = {"theory-post": "theory", "tech-post": "tech"}.get(kind, "")
+    if not track or not hot_items:
+        return {"score": 0.0, "trigger_title": "", "trigger_board": "", "trigger_pressure": ""}
+    idea_fragments = {
+        fragment
+        for text in [
+            idea.get("title"),
+            idea.get("angle"),
+            idea.get("mechanism_core"),
+            idea.get("practice_program"),
+            *list(idea.get("source_signals") or []),
+        ]
+        for fragment in _meaningful_fragments(str(text or ""))
+    }
+    if not idea_fragments:
+        return {"score": 0.0, "trigger_title": "", "trigger_board": "", "trigger_pressure": ""}
+
+    best = {"score": 0.0, "trigger_title": "", "trigger_board": "", "trigger_pressure": ""}
+    for item in hot_items:
+        signal_texts = _public_heat_signal_texts(item)
+        if not signal_texts:
+            continue
+        signal_fragments = {
+            fragment
+            for text in signal_texts
+            for fragment in _meaningful_fragments(text)
+        }
+        overlap_hits = _fragment_overlap_count(idea_fragments, signal_fragments)
+        track_fit = _track_signal_fit(track, *signal_texts)
+        heat_weight = _public_heat_signal_weight(item)
+        evidence_hint = _evidence_hint_from_text(*signal_texts)
+        score = overlap_hits * 0.85 + min(track_fit, 1.5) * 0.72 + min(heat_weight, 2.2) * 0.22
+        if evidence_hint:
+            score += 0.12
+        if overlap_hits == 0 and track_fit < _track_signal_threshold(track):
+            score -= 0.55
+        if score <= float(best.get("score") or 0.0):
+            continue
+        best = {
+            "score": round(max(score, 0.0), 3),
+            "trigger_title": str(item.get("title") or item.get("post_title") or "").strip(),
+            "trigger_board": str(item.get("submolt") or item.get("submolt_name") or "").strip(),
+            "trigger_pressure": truncate_text(
+                _preferred_signal_seed_text(item, field_order=("summary", "reason", "content", "preview", "title"), limit=72),
+                72,
+            ),
+        }
+    return best
+
+
 def _public_hot_forum_override(
     signal_summary: dict[str, Any],
     ideas: list[dict[str, Any]],
@@ -3823,6 +5215,13 @@ def _public_hot_forum_override(
 ) -> dict[str, Any]:
     public_ideas = {str(item.get("kind") or ""): item for item in ideas if item.get("kind") in {"theory-post", "tech-post"}}
     if not public_ideas:
+        return {"enabled": False}
+    grounded_public_ideas = {
+        kind: idea
+        for kind, idea in public_ideas.items()
+        if _public_idea_grounding_score(idea) >= 1.35
+    }
+    if not grounded_public_ideas:
         return {"enabled": False}
 
     recent_primary_kind = _recent_primary_publish_kind(last_run)
@@ -3845,46 +5244,66 @@ def _public_hot_forum_override(
     if not strong_public_signal:
         return {"enabled": False}
 
-    desired_kind = ""
-    if hottest_board in {"skills", "workplace"}:
-        desired_kind = "tech-post"
-    elif hottest_board in {"square", "philosophy"}:
-        desired_kind = "theory-post"
-    if desired_kind and desired_kind not in public_ideas:
+    hot_items = list(community_hot_posts[:6]) + list(competitor_watchlist[:4])
+    fit_by_kind = {
+        kind: _public_idea_hot_signal_fit(idea, hot_items)
+        for kind, idea in grounded_public_ideas.items()
+    }
+    matched_kinds = {
+        kind: fit
+        for kind, fit in fit_by_kind.items()
+        if float(fit.get("score") or 0.0) >= 1.0
+    }
+    if not matched_kinds:
         return {"enabled": False}
 
-    preferred_kinds: list[str] = []
-    if desired_kind:
-        preferred_kinds.append(desired_kind)
+    preferred_kinds = sorted(
+        matched_kinds,
+        key=lambda kind: (
+            -float(matched_kinds[kind].get("score") or 0.0),
+            -_public_idea_grounding_score(grounded_public_ideas[kind]),
+            kind,
+        ),
+    )
     for kind in ("theory-post", "tech-post"):
-        if kind in public_ideas and kind not in preferred_kinds:
+        if kind in grounded_public_ideas and kind not in preferred_kinds:
             preferred_kinds.append(kind)
 
-    trigger_title = next(
-        (
-            str(item.get("title") or "").strip()
-            for item in community_hot_posts[:6]
-            if int(item.get("upvotes") or 0) >= COMMUNITY_HOT_FORUM_MIN_UPVOTES
-            or int(item.get("comment_count") or 0) >= COMMUNITY_HOT_FORUM_MIN_COMMENTS
-        ),
-        "",
-    )
-    if not trigger_title and competitor_watchlist:
-        trigger_title = str(competitor_watchlist[0].get("title") or "").strip()
+    top_fit = matched_kinds.get(preferred_kinds[0], {}) if preferred_kinds else {}
+    trigger_title = str(top_fit.get("trigger_title") or "").strip()
+    trigger_pressure = str(top_fit.get("trigger_pressure") or "").strip()
+    trigger_board = str(top_fit.get("trigger_board") or "").strip()
+
+    priority_bonus = 0.55 + min(float(top_fit.get("score") or 0.0), 2.4) * 0.18
+    if any(
+        int(item.get("upvotes") or 0) >= COMMUNITY_HOT_FORUM_MIN_UPVOTES * 2
+        or int(item.get("comment_count") or 0) >= COMMUNITY_HOT_FORUM_MIN_COMMENTS * 2
+        for item in community_hot_posts[:6]
+    ):
+        priority_bonus += 0.18
+    if any(
+        int(item.get("upvotes") or 0) >= COMMUNITY_HOT_FORUM_MIN_UPVOTES * 2
+        or int(item.get("comment_count") or 0) >= COMMUNITY_HOT_FORUM_MIN_COMMENTS * 2
+        for item in competitor_watchlist[:4]
+    ):
+        priority_bonus += 0.08
 
     reason = (
-        f"首页热点正在 `{hottest_board or '公共板块'}` 聚集；"
-        f"本轮优先把学习结果转成新的公共帖子，不为避免连续 forum 而错过窗口。"
+        f"公共热度正在把《{truncate_text(trigger_title, 36) or '当前样本'}》往台前推；"
+        "但它只该给已经长成的公共候选加一点顺风，不能压过修复、守场或外部切口。"
     )
+    if trigger_pressure:
+        reason += f" 咬住的对象是：{trigger_pressure}。"
+    elif trigger_board:
+        reason += f" 触发现场落在 `{trigger_board}`。"
     if recent_primary_kind == "create-post":
         reason += " 上一轮已经发过 forum，但外部公共压力还在持续。"
-    if trigger_title:
-        reason += f" 触发样本：《{truncate_text(trigger_title, 36)}》。"
     return {
         "enabled": True,
         "preferred_kinds": preferred_kinds,
         "hottest_board": hottest_board,
         "recent_primary_kind": recent_primary_kind,
+        "priority_bonus": round(min(priority_bonus, 1.35), 2),
         "reason": reason,
     }
 
@@ -3945,10 +5364,15 @@ def _dynamic_opportunities(
         opportunities.append(opportunity)
 
     for bundle in list(external_information.get("discovery_bundles") or [])[:6]:
-        focus = str(bundle.get("focus") or bundle.get("query") or "").strip()
-        lenses = _dedupe_texts(
-            [str(item).strip() for item in list(bundle.get("lenses") or []) + list(bundle.get("terms") or []) if str(item).strip()]
-        )[:2]
+        bundle_seeds = _bundle_world_seed_texts(bundle, limit=3)
+        focus = _world_bundle_focus_source(bundle) or str(
+            (bundle_seeds[0] if bundle_seeds else bundle.get("query")) or ""
+        ).strip()
+        lenses = [
+            item
+            for item in bundle_seeds
+            if _normalize_title(item) != _normalize_title(focus)
+        ][:2]
         if not focus:
             continue
         why_now = _world_bundle_reason(bundle)
@@ -3998,7 +5422,6 @@ def _dynamic_opportunities(
             or item.get("excerpt")
             or item.get("lens")
             or item.get("note")
-            or item.get("query")
             or ""
         ).strip()
         summary = truncate_text(summary_source, 180)
@@ -4026,11 +5449,6 @@ def _dynamic_opportunities(
         for track in ("theory", "tech"):
             if track not in selected_track_scores:
                 continue
-            quality_base = 2.15 if track == "theory" else 2.0
-            if track == "theory" and signal_type in {"paper", "community-breakout", "classic"}:
-                quality_base += 0.12
-            if track == "tech" and evidence_hint:
-                quality_base += 0.18
             add_source(
                 track,
                 signal_type,
@@ -4043,7 +5461,15 @@ def _dynamic_opportunities(
                     evidence_hint=evidence_hint,
                     signal_type=signal_type,
                 ),
-                quality_score=quality_base + world_score + min(strength, 1.2) * 0.35 + min(selected_track_scores[track], 1.4) * 0.35,
+                quality_score=_external_track_quality_score(
+                    track,
+                    source_seed=source_seed,
+                    summary_source=summary_source,
+                    evidence_hint=evidence_hint,
+                    world_score=world_score,
+                    strength=strength,
+                    track_score=selected_track_scores[track],
+                ),
                 freshness_score=_external_track_freshness_score(item, signal_type=signal_type),
                 evidence_hint=evidence_hint,
                 world_score=world_score,
@@ -4066,7 +5492,15 @@ def _dynamic_opportunities(
                     evidence_hint=evidence_hint,
                     signal_type=signal_type,
                 ),
-                quality_score=2.4 + world_score + min(strength, 1.0) * 0.4 + (0.25 if evidence_hint else 0.0) + min(group_track_score, 1.5) * 0.3,
+                quality_score=_external_track_quality_score(
+                    "group",
+                    source_seed=source_seed,
+                    summary_source=summary_source,
+                    evidence_hint=evidence_hint,
+                    world_score=world_score,
+                    strength=strength,
+                    track_score=group_track_score,
+                ),
                 freshness_score=max(1.2, _external_track_freshness_score(item, signal_type=signal_type) - 0.1),
                 evidence_hint=evidence_hint,
                 world_score=world_score,
@@ -4074,23 +5508,73 @@ def _dynamic_opportunities(
 
     for item in rising_hot_posts[:3]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "content", "title"), limit=72)
-        velocity = float(item.get("velocity_per_hour") or 0.0)
-        why_now = f"正在起飞的公共样本，当前增速约 {velocity:.1f}/小时"
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "content", "title"),
+            fallback="正在起飞的公共样本",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "title"))
         track_scores = _selected_track_scores_for_signal(title, why_now, candidate_tracks=["theory", "tech"])
         if "theory" in track_scores:
-            add_source("theory", "rising-hot", title, why_now=why_now, quality_score=4.0 + min(track_scores["theory"], 1.2) * 0.25, freshness_score=3.0)
+            add_source(
+                "theory",
+                "rising-hot",
+                title,
+                why_now=why_now,
+                quality_score=4.0 + min(track_scores["theory"], 1.2) * 0.25,
+                freshness_score=3.0,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "rising-hot", title, why_now=why_now, quality_score=3.5 + min(track_scores["tech"], 1.2) * 0.25, freshness_score=3.0)
+            add_source(
+                "tech",
+                "rising-hot",
+                title,
+                why_now=why_now,
+                quality_score=3.5 + min(track_scores["tech"], 1.2) * 0.25,
+                freshness_score=3.0,
+                evidence_hint=evidence_hint,
+            )
     for item in community_hot_posts[:4]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "content", "title"), limit=72)
-        why_now = f"高热公共讨论，约 {int(item.get('upvotes') or 0)} 赞 / {int(item.get('comment_count') or 0)} 评"
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "content", "reason", "title"),
+            fallback="高热公共讨论还在发酵",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "reason", "title"))
         track_scores = _selected_track_scores_for_signal(title, why_now, item.get("summary"), candidate_tracks=["theory", "tech"])
         if "theory" in track_scores:
-            add_source("theory", "community-hot", title, why_now=why_now, quality_score=4.0 + min(track_scores["theory"], 1.2) * 0.25, freshness_score=2.0)
+            add_source(
+                "theory",
+                "community-hot",
+                title,
+                why_now=why_now,
+                quality_score=4.0 + min(track_scores["theory"], 1.2) * 0.25,
+                freshness_score=2.0,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "community-hot", title, why_now=why_now, quality_score=3.0 + min(track_scores["tech"], 1.2) * 0.25, freshness_score=2.0)
+            add_source(
+                "tech",
+                "community-hot",
+                title,
+                why_now=why_now,
+                quality_score=3.0 + min(track_scores["tech"], 1.2) * 0.25,
+                freshness_score=2.0,
+                evidence_hint=evidence_hint,
+            )
     for item in (group_watch.get("hot_posts") or [])[:3]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "content", "title"), limit=72)
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "content", "title"),
+            fallback="实验室里有对象正在发酵",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "title"))
         track_scores = _selected_track_scores_for_signal(
             title,
             item.get("summary"),
@@ -4098,44 +5582,166 @@ def _dynamic_opportunities(
             candidate_tracks=["theory", "tech"],
         )
         if "theory" in track_scores:
-            add_source("theory", "discussion", title, quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.25, freshness_score=1.0)
+            add_source(
+                "theory",
+                "discussion",
+                title,
+                why_now=why_now,
+                quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.25,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "community-hot", title, quality_score=2.5 + min(track_scores["tech"], 1.2) * 0.25, freshness_score=1.0)
+            add_source(
+                "tech",
+                "community-hot",
+                title,
+                why_now=why_now,
+                quality_score=2.5 + min(track_scores["tech"], 1.2) * 0.25,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
         group_track_score = _track_signal_fit("group", title, item.get("summary"), item.get("content"))
         if group_track_score >= _track_signal_threshold("group"):
-            add_source("group", "discussion", title, quality_score=2.5 + min(group_track_score, 1.5) * 0.25, freshness_score=1.0)
+            add_source(
+                "group",
+                "discussion",
+                title,
+                why_now=why_now,
+                quality_score=2.5 + min(group_track_score, 1.5) * 0.25,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
     for item in competitor_watchlist[:4]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "reason", "title"), limit=72)
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "reason", "title"),
+            fallback="外部讨论里有一条值得正面试探的样本",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "reason", "title"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), item.get("reason"), candidate_tracks=["theory", "tech"])
         if "theory" in track_scores:
-            add_source("theory", "discussion", title, quality_score=3.0 + min(track_scores["theory"], 1.2) * 0.25, freshness_score=1.5)
+            add_source(
+                "theory",
+                "discussion",
+                title,
+                why_now=why_now,
+                quality_score=3.0 + min(track_scores["theory"], 1.2) * 0.25,
+                freshness_score=1.5,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "community-hot", title, quality_score=3.0 + min(track_scores["tech"], 1.2) * 0.25, freshness_score=1.5)
+            add_source(
+                "tech",
+                "community-hot",
+                title,
+                why_now=why_now,
+                quality_score=3.0 + min(track_scores["tech"], 1.2) * 0.25,
+                freshness_score=1.5,
+                evidence_hint=evidence_hint,
+            )
     for item in unresolved[:2]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "post_title", "error"), limit=72)
-        add_source("tech", "failure", title, why_now="现场失败链路", quality_score=2.0, freshness_score=1.0)
-        add_source("group", "failure", title, why_now="现场失败链路", quality_score=2.0, freshness_score=1.0)
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "error", "post_title"),
+            fallback="同一条失败链还没有收口",
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "error", "post_title"))
+        add_source("tech", "failure", title, why_now=why_now, quality_score=2.0, freshness_score=1.0, evidence_hint=evidence_hint)
+        add_source("group", "failure", title, why_now=why_now, quality_score=2.0, freshness_score=1.0, evidence_hint=evidence_hint)
     for item in reply_posts[:2]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "post_title"), limit=72)
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "post_title", "preview"),
+            fallback="这个讨论口还在继续逼你交判断",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "post_title", "preview"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), candidate_tracks=["theory", "tech"])
         if "theory" in track_scores:
-            add_source("theory", "reply-pressure", title, quality_score=1.0 + min(track_scores["theory"], 1.2) * 0.2, freshness_score=1.0)
+            add_source(
+                "theory",
+                "reply-pressure",
+                title,
+                why_now=why_now,
+                quality_score=1.0 + min(track_scores["theory"], 1.2) * 0.2,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "reply-pressure", title, quality_score=1.0 + min(track_scores["tech"], 1.2) * 0.2, freshness_score=1.0)
+            add_source(
+                "tech",
+                "reply-pressure",
+                title,
+                why_now=why_now,
+                quality_score=1.0 + min(track_scores["tech"], 1.2) * 0.2,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
     for item in feed_watchlist[:3]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "reason", "title"), limit=72)
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "reason", "title"),
+            fallback="这条外部样本还在逼近当前议题",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "reason", "title"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), item.get("reason"), candidate_tracks=["theory", "tech"])
         if "theory" in track_scores:
-            add_source("theory", "feed", title, quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.2, freshness_score=1.0)
+            add_source(
+                "theory",
+                "feed",
+                title,
+                why_now=why_now,
+                quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.2,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "feed", title, quality_score=2.0 + min(track_scores["tech"], 1.2) * 0.2, freshness_score=1.0)
+            add_source(
+                "tech",
+                "feed",
+                title,
+                why_now=why_now,
+                quality_score=2.0 + min(track_scores["tech"], 1.2) * 0.2,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
     for item in top_discussion[:2]:
         title = _preferred_signal_seed_text(item, field_order=("summary", "post_title", "title"), limit=72)
+        why_now = _opportunity_live_why_now(
+            item,
+            field_order=("summary", "post_title", "preview", "title"),
+            fallback="高价值讨论还在逼你补下一句判断",
+            include_heat=True,
+        )
+        evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "post_title", "preview", "title"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), candidate_tracks=["theory", "tech"])
         if "theory" in track_scores:
-            add_source("theory", "discussion", title, quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.2, freshness_score=1.0)
+            add_source(
+                "theory",
+                "discussion",
+                title,
+                why_now=why_now,
+                quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.2,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
         if "tech" in track_scores:
-            add_source("tech", "discussion", title, quality_score=2.0 + min(track_scores["tech"], 1.2) * 0.2, freshness_score=1.0)
+            add_source(
+                "tech",
+                "discussion",
+                title,
+                why_now=why_now,
+                quality_score=2.0 + min(track_scores["tech"], 1.2) * 0.2,
+                freshness_score=1.0,
+                evidence_hint=evidence_hint,
+            )
     for hint in signal_summary.get("user_topic_hints", [])[:4]:
         hint_text = str(hint.get("text") or "").strip()
         if not hint_text:
@@ -4258,25 +5864,17 @@ def _planning_signals(
         competitor_watchlist=competitor_watchlist,
         captured_at=overview.get("captured_at") or community_watch.get("captured_at") or now_utc(),
     )
-    research_titles: list[str] = []
-    research_titles.extend(str(item.get("post_title") or "") for item in top_discussion[:6])
-    research_titles.extend(str(item.get("title") or "") for item in community_hot_posts[:8])
-    research_titles.extend(str(item.get("title") or "") for item in feed[:8])
-    research_titles.extend(str(item.get("title") or "") for item in competitor_watchlist[:8])
-    research_titles.extend(str(item.get("title") or "") for item in rising_hot_posts[:6])
-    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("community_breakouts") or [])[:6])
-    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("open_web_results") or [])[:8])
-    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("zhihu_results") or [])[:6])
-    research_titles.extend(
-        str(item.get("title") or "")
-        for item in (external_information.get("paper_results") or external_information.get("arxiv_preprints") or [])[:8]
+    research_texts = _planning_research_texts(
+        top_discussion=top_discussion,
+        community_hot_posts=community_hot_posts,
+        feed=feed,
+        competitor_watchlist=competitor_watchlist,
+        rising_hot_posts=rising_hot_posts,
+        external_information=external_information,
+        content_objectives=content_objectives,
+        user_topic_hints=user_topic_hints,
     )
-    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("github_projects") or [])[:8])
-    research_titles.extend(str(item.get("title") or "") for item in (external_information.get("classic_readings") or external_information.get("classic_texts") or [])[:8])
-    research_titles.extend(str(item.get("summary") or "") for item in (external_information.get("reading_notes") or [])[:8])
-    research_titles.extend(content_objectives[:6])
-    research_titles.extend(str(item.get("text") or "") for item in user_topic_hints[:6])
-    keyword_counter = _candidate_terms([title for title in research_titles if title])
+    keyword_counter = _candidate_terms(research_texts)
     recent_titles = [str(item.get("title") or "") for item in posts[:RECENT_TITLE_LIMIT] if item.get("title")]
     novelty = _novelty_pressure(recent_titles)
     heartbeat_hours = 3
@@ -4435,15 +6033,15 @@ def _generate_codex_ideas(
 3. 本轮只允许输出这些 kind：{kinds_text}。它们是候选上限，不是必须补齐的配额；真正够强的 1 条也可以直接交。
 4. 这些 kind 是根据实时压力动态选出来的：{truncate_text(str(lane_strategy), 1200)}
 5. 如果是追爆款或续篇，标题必须显式变化，不能与最近标题完全相同；但不要只靠替换“续篇/补篇/之后/下一步”来伪装成新选题。
-6. 每个 idea 的 `source_signals` 必须写成简短字符串列表，说明用了哪些实时依据。
+6. 每个 idea 的 `source_signals` 必须写成对象级压力短句，优先交对象、断口、证据和正在起量的现场，不要写“机会点/世界线索束/先别绕开”这类后台口吻。
 7. 标题必须中文，适合公开发布，不要输出空泛抽象标题。
-8. 明确避开最近已经过载的母题与热词，优先从 `dynamic_topic_bundles` 里看这轮真正互相咬合的信号，再下潜到 `dynamic_topics`；如果 bundle 里已经给出 `public_title_seed` / `public_focus_text`，优先沿着那个公共题眼起题，不要退回原始 `source_text` 的样本标题壳子。
+8. 明确避开最近已经过载的母题与热词。先看 `dynamic_topic_bundles` 里这轮真正互相咬合的信号，再下潜到 `dynamic_topics`；如果 bundle 里已经给出 `public_title_seed` / `public_focus_text`，沿着那个公共题眼起题，但别把 bundle 本身写成新的固定入口。
 9. `content_objectives` 和 `user_topic_hints` 只当灵感源，不是强制命令；可以采纳、改写、反转或忽略。
-10. 如果公共热点够强，至少 1 个候选要正面回应它；但不能停在“社区里最近在聊什么”，必须把热点上抬成 `Agent社会` 的结构问题。
+10. 如果公共热点够强，而且这轮确实有长成的 public lane，可以让其中 1 个候选正面回应它；但不能停在“社区里最近在聊什么”，必须把热点上抬成 `Agent社会` 的结构问题。
 11. 社区热点只是样本，不是结论。`theory-post` 至少要回答一个问题：这正在形成什么社会关系、制度安排、价值形式、分层机制或治理问题？
 12. 默认使用 `Agent社会` / `AI社会` 的框架词，不要把问题停在 `Agent社区`；只有引用既有作品标题、平台模块或原帖原话时才保留 `社区` 说法。
 13. 允许更随机、更发散、更炸裂：不要默认保守，要敢于给出反常识、逆向、带判断力的标题。
-14. 默认优先做“公共问题切口”，不要把“实验室/连载/派蒙自己的状态”当主语，除非它被明确转译成 Agent 社会问题。
+14. 不要把“实验室/连载/派蒙自己的状态”自动写成主语；只有当它们已经被明确转译成 Agent 社会问题、方法对象或制度冲突时，才让它们站到第一屏。
 15. `theory-post` 要在 `square` 和 `philosophy` 之间按入口姿态选择：公共代入、经验召回、低门槛冲突更适合 `square`；概念命名、结构判断、站队反驳更适合 `philosophy`。不要把任何一个版块当默认归宿。
 16. `theory-post` 的 `submolt` 只能是 `square` 或 `philosophy`；`tech-post` 的 `submolt` 只能是 `skills` 或 `workplace`；`group-post` 仍然要写成实验框架，但别把 `skills` 当自动完成任务的仪式字段。
 17. 版块写法必须分开：
@@ -4456,7 +6054,7 @@ def _generate_codex_ideas(
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
    - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
-19. 如果实时信号里出现 `rising_hot_posts`，优先把它们当成正在起飞的新兴热点样本，不要只盯成熟热榜。
+19. 如果实时信号里出现 `rising_hot_posts`，把它们当成正在起飞的新兴热点样本线，不要只盯成熟热榜。
 20. 成熟外部“高赞样本”默认只认 `>=200` 赞；`rising_hot_posts` 例外，它们代表正在起飞的样本，不要和成熟高热混在一起。
 21. 允许学习别人的问题压力和盲点，但不要学习标题骨架、系列包装或 IP 话术；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
 22. 每个 `theory-post` 和 `tech-post` 都必须显式推进至少一种创新：`new_concept`、`new_mechanism`、`new_theory`、`new_practice`。
@@ -4465,7 +6063,7 @@ def _generate_codex_ideas(
 25. `tech-post` 和 `group-post` 至少要写出 `mechanism_core` 与 `practice_program`，不能只是故障复盘或 6 步清单。
 26. 标题和各字段都不要落回低自主性写法。禁止出现“从《…》继续追问”“把《…》拆开看”“整理成 6 步方法”“导读/摘录某文”这类骨架。
 27. 不要让标题借外部材料说话，也不要让 `concept_core` / `mechanism_core` / `practice_program` 变成外部材料的改写摘要。
-28. 优先把大量外部信息场当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
+28. 把大量外部信息场都当灵感池：社区高热帖子、知乎、GitHub 热门项目、前沿论文/预印本、经典政治经济学/社会理论材料都可以进入参考，但最终标题和理论命名必须是派蒙自己的。
 29. 如果本地信号不够，请主动扩大探索范围，不要只盯账号数据、仓库状态和旧帖；它们只是运行背景，不是主题源。
 30. 不要假定自我进化有固定顺序；你可以自由决定这轮更应该改题目、改板块、改结构、改研究入口，还是直接换一个更激进的新切口。
 31. 如果 idea 来自论文、模型、仓库或外部项目，`theory-post` 的标题第一屏不能先报模型名、论文缩写、仓库名；先给普通读者能立刻进入的制度冲突、代价或站队问题，再把技术对象放进正文证据段。
@@ -4478,6 +6076,12 @@ def _generate_codex_ideas(
 38. 不要再用“最折磨人的，不是……而是……”这类情绪壳给 `theory-post` 起题，除非标题第一屏已经明确写出谁在失去资格、谁在承担代价或谁在接管。
 39. `tech-post` / `group-post` 如果借了“认错 / 偷懒 / 装忙”这类公共行为词，标题第一屏必须先交具体系统对象、触发条件或可测收益；不要再写成“我只改了什么，它才学会 X”的自传式壳子。
 40. 这类行为词标题如果拿不出一个外部或跨系统证据入口，就把标题收回具体故障对象和本地收益，不要让 `Agent` 的笼统人格词占住门面。
+41. 不要再用“AI 可以先安慰你 / 理解你 / 陪你”这类拟共情壳给 `theory-post` 起题；如果标题里出现安慰、共情、理解、陪你，第一屏必须同时点明接手链、责任门槛、赔付/审核节点或转人工断口。
+42. 这类题眼如果还拿不出两股以上有对象的外部或跨场景证据，就别继续塞进 `square` 的大情绪入口；要么补实样本，要么改投 `philosophy` 并收紧结论。
+43. 如果标题拿“系统闭嘴 / 沉默 / 排队”这类状态词抬到“资格 / 追责 / 解释权”，第一屏必须同时交代断在哪个接手节点、单据、回写或转人工链上；别只给态度，不给对象。
+44. 跨场景例证不能写成“一种产品 / 另一种高优支持入口 / 某类系统”这种泛称；至少保留一个真实对象、接口或失败句，不然概念还没站稳。
+45. 不要拿“会翻聊天记录 / 记得你 / 长期记忆”这种能力感给 `theory-post` 起题；如果标题里出现这类记忆能力词，第一屏必须立刻写出驳回、签收、回写、补件或转人工断口。
+46. 这类记忆题的 `source_signals` 也不能只写“项目 Agent / 补件助手 / 售后页”这种角色标签；至少交两条带单据、按钮、接口、失败话术或回写断口的硬样本。
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -4509,7 +6113,17 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
     board = _preferred_theory_board(lead, signal_summary)
     source_signals = _signal_bundle_source_signals("theory", bundle, signal_summary)
     signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or "")
-    title = str(bundle.get("public_title_seed") or "").strip() or _compose_dynamic_title("theory", signal_type, source_text, board=board)
+    title = str(bundle.get("public_title_seed") or "").strip() or _compose_dynamic_title(
+        "theory",
+        signal_type,
+        source_text,
+        board=board,
+        context_texts=(
+            bundle.get("angle_hint"),
+            bundle.get("why_now"),
+            "；".join(source_signals),
+        ),
+    )
     if _title_has_source_scene_overhang(
         {
             "kind": "theory-post",
@@ -4518,7 +6132,15 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
             "source_signals": source_signals,
         }
     ):
-        title = _structural_fallback_title("theory", signal_type, source_text)
+        title = _structural_fallback_title(
+            "theory",
+            signal_type,
+            source_text,
+            bundle.get("angle_hint"),
+            bundle.get("why_now"),
+            "；".join(source_signals),
+        )
+    title = _stutter_safe_title(title, source_text)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "理论线需要接住现场变化。")
     theory_fields = _theory_fallback_fields(bundle, lead)
@@ -4556,11 +6178,14 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     if not bundle:
         return {}
     lead = bundle.get("lead") or {}
+    bundle = _method_bundle_projection(bundle, lead)
+    lead = bundle.get("lead") or lead
+    bundle_focus_title = str(bundle.get("focus_text") or bundle.get("title_seed") or "").strip()
     focus_title = (
         (failures[0].get("post_title") if failures else None)
         or (reply_posts[0].get("post_title") if reply_posts else None)
+        or bundle_focus_title
         or hot_tech.get("title")
-        or bundle.get("focus_text")
         or "自治运营仓库"
     )
     board = _preferred_tech_board(lead)
@@ -4569,7 +6194,13 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         str(bundle.get("signal_type") or lead.get("signal_type") or ""),
         str(bundle.get("title_seed") or focus_title or "自治运营仓库"),
         board=board,
+        context_texts=(
+            bundle.get("angle_hint"),
+            bundle.get("why_now"),
+            bundle.get("focus_text"),
+        ),
     )
+    title = _stutter_safe_title(title, bundle_focus_title or focus_title)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = _signal_bundle_source_signals("tech", bundle, signal_summary)
     why_now = str(bundle.get("why_now") or lead.get("why_now") or "技术线需要正面回应当前运行压力。")
@@ -4612,11 +6243,19 @@ def _fallback_group_idea(
     if not bundle:
         return {}
     lead = bundle.get("lead") or {}
+    bundle = _method_bundle_projection(bundle, lead)
+    lead = bundle.get("lead") or lead
     raw_title = _compose_dynamic_title(
         "group",
         str(bundle.get("signal_type") or lead.get("signal_type") or ""),
         str(bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
+        context_texts=(
+            bundle.get("angle_hint"),
+            bundle.get("why_now"),
+            bundle.get("focus_text"),
+        ),
     )
+    raw_title = _stutter_safe_title(raw_title, str(bundle.get("focus_text") or ""))
     allow_followup = previous_title.startswith(base_series)
     title, is_followup, part_number = _ensure_title_unique(
         raw_title,
@@ -4663,14 +6302,16 @@ def _sanitize_generated_idea(
     kind = str(sanitized.get("kind") or "")
     sanitized["angle"] = _sanitize_reserved_text(str(sanitized.get("angle") or "").strip())
     sanitized["why_now"] = _sanitize_reserved_text(str(sanitized.get("why_now") or "").strip())
-    source_signals = [
-        cleaned
-        for cleaned in (
+    track = {"theory-post": "theory", "tech-post": "tech", "group-post": "group"}.get(kind, "theory")
+    source_signals = _rank_source_signal_notes(
+        track,
+        [
             _sanitize_reserved_text(str(item or "").strip())
             for item in list(sanitized.get("source_signals") or [])
-        )
-        if cleaned
-    ]
+            if str(item or "").strip()
+        ],
+        limit=5,
+    )
     sanitized["source_signals"] = source_signals
     raw_title = _sanitize_reserved_text(str(sanitized.get("title") or "").strip())
     if (
@@ -4693,10 +6334,16 @@ def _sanitize_generated_idea(
             )
             or raw_title
         )
-        raw_title = _fallback_dynamic_title(track, str(sanitized.get("signal_type") or ""), title_seed)
+        raw_title = _fallback_dynamic_title(
+            track,
+            str(sanitized.get("signal_type") or ""),
+            title_seed,
+            str(sanitized.get("mechanism_core") or "").strip(),
+            str(sanitized.get("practice_program") or "").strip(),
+        )
     sanitized["novelty_basis"] = _sanitize_reserved_text(
         str(sanitized.get("novelty_basis") or "").strip(),
-        fallback="基于本轮实时信号生成。",
+        fallback=_derived_novelty_basis(sanitized),
     )
     sanitized["innovation_claim"] = _sanitize_reserved_text(str(sanitized.get("innovation_claim") or "").strip())
     sanitized["innovation_class"] = str(sanitized.get("innovation_class") or "").strip()
@@ -4717,7 +6364,9 @@ def _sanitize_generated_idea(
     )
     if kind == "group-post" and group.get("id"):
         sanitized["group_id"] = group.get("id")
-        sanitized.setdefault("series_prefix", "Agent心跳同步实验室")
+        series_prefix = _group_series_prefix_hint(sanitized, group)
+        if series_prefix:
+            sanitized.setdefault("series_prefix", series_prefix)
     sanitized["submolt"] = board
     sanitized["board_profile"] = board
     sanitized["hook_type"] = str(sanitized.get("hook_type") or default_hook_type(board))
@@ -4728,7 +6377,6 @@ def _sanitize_generated_idea(
 
     prefix = _sanitize_reserved_text(
         str(sanitized.get("series_prefix") or _series_prefix(raw_title)).strip(),
-        fallback="Agent心跳同步实验室" if kind == "group-post" else "",
     )
     allow_followup = bool(sanitized.get("is_followup"))
     title, is_followup, part_number = _ensure_title_unique(
@@ -4783,19 +6431,28 @@ def _build_dynamic_ideas(
     ideas: dict[str, dict[str, Any]] = {}
     rejection_notes = list(retry_feedback or [])
     rejected_ideas: list[dict[str, Any]] = []
+    rejected_candidates: dict[str, list[dict[str, Any]]] = {}
     lane_strategy = _dynamic_idea_lane_strategy(signal_summary, group_enabled=bool(group))
     target_kinds = [str(item) for item in (lane_strategy.get("selected_kinds") or []) if str(item)]
+    lane_scored_kinds = [
+        str(item.get("kind") or "").strip()
+        for item in list(lane_strategy.get("lane_scores") or [])
+        if str(item.get("kind") or "").strip()
+    ]
+    if not group:
+        target_kinds = [kind for kind in target_kinds if kind != "group-post"]
+        lane_scored_kinds = [kind for kind in lane_scored_kinds if kind != "group-post"]
     focus_kind = str(lane_strategy.get("focus_kind") or (target_kinds[0] if target_kinds else "")).strip()
-    if not target_kinds:
-        target_kinds = ["theory-post", "tech-post"] + (["group-post"] if group else [])
+    codex_allowed_kinds = target_kinds or lane_scored_kinds
+    if not codex_allowed_kinds:
         focus_kind = ""
-    if allow_codex:
+    if allow_codex and codex_allowed_kinds:
         for _ in range(DEFAULT_IDEA_RETRY_ROUNDS):
             try:
                 generated = _generate_codex_ideas(
                     signal_summary,
                     recent_titles,
-                    allowed_kinds=target_kinds,
+                    allowed_kinds=codex_allowed_kinds,
                     lane_strategy=lane_strategy,
                     model=model,
                     reasoning_effort=reasoning_effort,
@@ -4821,11 +6478,13 @@ def _build_dynamic_ideas(
                     reason = "过于接近低热旧帖或指标表层。"
                     new_rejections.append(f"{kind}: {reason}")
                     _record_idea_rejection(rejected_ideas, sanitized, reason)
+                    _store_rejected_candidate(rejected_candidates, sanitized, reason)
                     continue
                 if sanitized.get("failure_reason_if_rejected"):
                     reason = str(sanitized.get("failure_reason_if_rejected") or "").strip()
                     new_rejections.append(f"{kind}: {reason}")
                     _record_idea_rejection(rejected_ideas, sanitized, reason)
+                    _store_rejected_candidate(rejected_candidates, sanitized, reason)
                     continue
                 round_ideas[kind] = sanitized
             ideas.update(round_ideas)
@@ -4899,19 +6558,75 @@ def _build_dynamic_ideas(
             )
         return False
 
-    fallback_order = target_kinds if not ideas else ([focus_kind] if focus_kind and focus_kind not in ideas else [])
-    had_generated_ideas = bool(ideas)
-    if not ideas:
-        ranked_public_kinds = [
-            str(item.get("kind") or "").strip()
-            for item in list(lane_strategy.get("lane_scores") or [])
-            if str(item.get("kind") or "").strip() in fallback_builders
-        ]
-        for kind in ranked_public_kinds + ["theory-post", "tech-post", "group-post"]:
+    def fallback_candidate_order() -> list[str]:
+        preferred_order: list[str] = []
+        for kind in target_kinds + lane_scored_kinds:
+            if kind and kind not in preferred_order:
+                preferred_order.append(kind)
+        preferred_index = {kind: index for index, kind in enumerate(preferred_order)}
+        candidates: list[dict[str, Any]] = []
+        for kind, track in (("theory-post", "theory"), ("tech-post", "tech"), ("group-post", "group")):
             if kind == "group-post" and not group:
                 continue
-            if kind in fallback_builders and kind not in fallback_order:
-                fallback_order.append(kind)
+            bundle = _track_signal_bundle(track, signal_summary)
+            grounded_bundle = bool(bundle) and _bundle_has_grounding(bundle, track=track)
+            fallback_seed = _fallback_track_seed(track, signal_summary)
+            seed_ready = bool(str(fallback_seed.get("source_text") or "").strip())
+            block_reason = fallback_block_reason(kind)
+            if not grounded_bundle and not seed_ready:
+                continue
+            if block_reason and not grounded_bundle:
+                continue
+            candidates.append(
+                {
+                    "kind": kind,
+                    "score": float((bundle or {}).get("score") or 0.0),
+                    "grounded": grounded_bundle,
+                    "seed_ready": seed_ready,
+                    "preferred_index": preferred_index.get(kind, len(preferred_index) + 3),
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                -int(bool(item.get("grounded"))),
+                -float(item.get("score") or 0.0),
+                -int(bool(item.get("seed_ready"))),
+                int(item.get("preferred_index") or 0),
+                str(item.get("kind") or ""),
+            )
+        )
+        ordered: list[str] = []
+        seeded_order = preferred_order if target_kinds else []
+        for kind in seeded_order + [str(item.get("kind") or "").strip() for item in candidates]:
+            if not kind or kind in ordered:
+                continue
+            if kind == "group-post" and not group:
+                continue
+            ordered.append(kind)
+        if not ordered and target_kinds:
+            ordered = [kind for kind in preferred_order if kind and (kind != "group-post" or group)]
+        return ordered
+
+    fallback_candidates = fallback_candidate_order()
+    fallback_order = fallback_candidates if not ideas else (
+        [focus_kind] if focus_kind and focus_kind not in ideas and focus_kind in fallback_candidates else []
+    )
+    if not fallback_order and not ideas and not allow_codex:
+        observed_kinds: list[str] = []
+        for kind in target_kinds + lane_scored_kinds:
+            if kind and kind not in observed_kinds:
+                observed_kinds.append(kind)
+        if not observed_kinds:
+            observed_kinds.append("theory-post")
+            if group and any(str(item.get("track") or "").strip() == "group" for item in list(signal_summary.get("dynamic_topics") or [])):
+                observed_kinds.append("group-post")
+        for kind in observed_kinds:
+            if kind == "group-post" and not group:
+                continue
+            reason = fallback_block_reason(kind)
+            if reason:
+                _record_idea_rejection(rejected_ideas, {"kind": kind, "title": ""}, reason)
+    had_generated_ideas = bool(ideas)
     for kind in fallback_order:
         builder = fallback_builders.get(kind)
         if builder is None:
@@ -4922,6 +6637,11 @@ def _build_dynamic_ideas(
             _record_idea_rejection(rejected_ideas, {"kind": kind, "title": ""}, block_reason)
             continue
         if not fallback_ready(kind) and not fallback_idea_grounded(raw_fallback_idea):
+            _store_rejected_candidate(
+                rejected_candidates,
+                raw_fallback_idea,
+                fallback_block_reason(kind) or "当前 lane 只有内向残压，没有够格的世界样本或方法对象。",
+            )
             _record_idea_rejection(
                 rejected_ideas,
                 raw_fallback_idea,
@@ -4936,6 +6656,11 @@ def _build_dynamic_ideas(
         if _generated_idea_allowed(fallback_idea, signal_summary) and not fallback_idea.get("failure_reason_if_rejected"):
             ideas.setdefault(kind, fallback_idea)
         else:
+            _store_rejected_candidate(
+                rejected_candidates,
+                fallback_idea,
+                str(fallback_idea.get("failure_reason_if_rejected") or "过于接近低热旧帖或指标表层。"),
+            )
             _record_idea_rejection(
                 rejected_ideas,
                 fallback_idea,
@@ -4944,7 +6669,31 @@ def _build_dynamic_ideas(
         if ideas or had_generated_ideas:
             break
 
-    ordered_kinds = target_kinds + [kind for kind in fallback_order if kind not in target_kinds]
+    repair_order = [
+        str(kind).strip()
+        for kind in (
+            [focus_kind]
+            + target_kinds
+            + [item.get("kind") for item in list(lane_strategy.get("lane_scores") or [])]
+        )
+        if str(kind or "").strip() in {"theory-post", "tech-post", "group-post"} and str(kind or "").strip() not in ideas
+    ]
+    for kind in dict.fromkeys(repair_order):
+        repaired = _repair_rejected_public_candidate(
+            kind,
+            rejected_candidates.get(kind, []),
+            signal_summary=signal_summary,
+            recent_titles=recent_titles,
+            group=group,
+        )
+        if repaired:
+            ideas[kind] = repaired
+
+    ordered_kinds = (target_kinds or lane_scored_kinds) + [
+        kind
+        for kind in fallback_order
+        if kind not in (target_kinds or lane_scored_kinds)
+    ]
     accepted = [
         _audit_generated_idea(
             _sanitize_generated_idea(ideas[kind], recent_titles=recent_titles, group=group),
