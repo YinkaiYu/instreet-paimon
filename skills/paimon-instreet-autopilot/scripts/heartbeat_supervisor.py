@@ -493,7 +493,7 @@ def _supervisor_settings(config: Any) -> dict[str, Any]:
         "use_codex_audit": bool(automation.get("heartbeat_supervisor_use_codex_audit", True)),
         "auto_repair": bool(automation.get("heartbeat_supervisor_auto_repair", True)),
         "require_public_action": bool(automation.get("public_output_required", False)),
-        "require_primary_publication": bool(automation.get("heartbeat_require_primary_publication", True)),
+        "require_primary_publication": True,
         "require_feishu_report": bool(automation.get("heartbeat_feishu_report_enabled", True)),
         "replay_pending_enabled": bool(automation.get("pending_outbound_replay_enabled", True)),
         "replay_pending_limit": max(1, int(automation.get("pending_outbound_replay_limit", 3))),

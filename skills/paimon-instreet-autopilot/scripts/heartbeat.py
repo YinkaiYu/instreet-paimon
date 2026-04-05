@@ -84,6 +84,7 @@ FALLBACK_AUDIT_PATH = CURRENT_STATE_DIR / "fallback_audit.json"
 FALLBACK_JOURNAL_PATH = CURRENT_STATE_DIR / "fallback_events.jsonl"
 PAIMON_FREEDOM_SKILL_PATH = REPO_ROOT / "skills" / "paimon-freedom" / "SKILL.md"
 PRIMARY_ACTION_KINDS = {"create-post", "publish-chapter", "create-group-post"}
+PUBLIC_PRIMARY_KINDS = {"theory-post", "tech-post", "group-post", "literary-chapter"}
 FEISHU_API_BASE = "https://open.feishu.cn"
 FEISHU_TENANT_TOKEN_ENDPOINT = "/open-apis/auth/v3/tenant_access_token/internal"
 DEFAULT_HEARTBEAT_WRITE_RETRIES = 3
@@ -642,6 +643,11 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     soft_example_focus = False
     title_handoff_focus = False
     generic_example_focus = False
+    public_method_shell_focus = False
+    inventory_method_focus = False
+    abstract_method_opening_focus = False
+    title_echo_focus = False
+    truncated_scaffold_focus = False
     if content_planner_module._theory_title_emotion_shell_reason(title):
         lessons.append("标题先借“最折磨人的，不是……而是……”这种共感句起手，读者先看到的是情绪吐槽，看不到这条判断真正要抓的接管权、责任分配和解释资格。")
         system_fixes.append("给 theory-post 增加“情绪壳标题”审计；没有把责任、资格、接管摆上第一屏的标题，直接打回重写。")
@@ -683,6 +689,20 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         method_focus = True
         lessons.append("标题把这条方法帖卖成了派蒙自己的修补经历。读者先看到的是“我只改了 4 个状态位”，不是自己能直接带走的对象、触发条件或收益句。")
         system_fixes.append("给方法帖增加“自传式行为壳标题”审计；凡是“我改了什么，Agent 才学会 X”却没把对象、触发条件和收益摆上第一屏的标题，直接打回。")
+    if board in {"skills", "workplace"} and content_planner_module._method_title_public_heat_shell_reason(title):
+        method_focus = True
+        public_method_shell_focus = True
+        lessons.append("标题直接借了公共热帖已经热起来的包装壳。`三种模式`、`最被低估的能力`、`你以为……其实……` 这些反转句能带来点击，但在 skills 版读者想拿走的是对象和协议，不是先替别人续写标题气氛。")
+        system_fixes.append("给方法帖增加“公共热帖标题壳”审计；凡是先报反转包装、却没点名对象、断口或收益的标题，planner 先重写，不再拿外部热帖原壳直接入生成。")
+    if board in {"skills", "workplace"} and content_planner_module._method_title_source_inventory_overhang_reason(title):
+        method_focus = True
+        inventory_method_focus = True
+        lessons.append("标题先把“倒计时加购、已读未接手：16 人访谈 + 1 段日志”这种材料清单摆到门口，读者第一眼看到的是你取了多少样本，不是这次到底能带走哪条接手规则。")
+        system_fixes.append("给方法帖增加“材料清单标题”审计；凡是把两个现场和“几人访谈 + 几段日志”抬进标题的候选，先改回对象、断口或收益句，材料数量退回中段证据段。")
+    if board in {"skills", "workplace"} and content_planner_module._method_title_status_vocab_shell_reason(title):
+        method_focus = True
+        lessons.append("标题先把`收到 / 已响应 / 已处理`这类状态词排成门口，看起来像在给术语换名字。读者先看到的是表述升级，不是哪个对象、哪条链路、哪种返工会被真正改掉。")
+        system_fixes.append("给方法帖增加“状态词壳标题”审计；凡是先排状态词、再补“几条规则 / 改成责任链”，却没点名订单页、工单、评论线程或任务链对象的标题，直接打回。")
     if board in {"skills", "workplace"} and ("那篇以 `" in excerpt or ("GitHub" in excerpt and "论文" in excerpt)):
         source_overhang_focus = True
         lessons.append("开头先把外部论文和项目页排成材料串，像研究摘抄，不像实验室方法帖。读者还没看见这次到底要接手哪个对象、改哪条链路，就先被样本名词堵在门口。")
@@ -704,6 +724,21 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
             method_focus = True
             lessons.append("这条方法帖把“认错”抬进标题，正文证据却几乎全是派蒙自家的日志。没有第二个系统、外部样本或反例，读者很难判断这套规则是可迁移方法，还是本地故障的重命名。")
             system_fixes.append("给方法帖加外部落地约束；标题一旦借公共行为词，就至少补一个外部或跨系统例证，不然直接把标题改回本地对象和阈值。")
+    if board in {"skills", "workplace"} and _forum_method_has_title_echo_overhang(excerpt):
+        method_focus = True
+        title_echo_focus = True
+        lessons.append("正文没有把外部标题吃成派蒙自己的对象，反而一直在回声那句热标题和赞评数字。读者看到的不是复盘后的方法，而是别人已经火过的包装词被又贴了一遍。")
+        system_fixes.append("给 fallback publish 加“标题回声”拦截；正文前半段如果还在反复复述标题、热度和来源包装，却交不出对象级证据，就别发。")
+    if board in {"skills", "workplace"} and _forum_method_has_truncated_placeholder_leak(excerpt):
+        method_focus = True
+        truncated_scaffold_focus = True
+        lessons.append("写法像一份没写完的提纲。`Agent ...`、`还能留下案例和日志的场景` 这种截断残句直接漏进正文，读者一眼就知道这不是沉淀好的方法，而是半成品脚手架。")
+        system_fixes.append("给 fallback 生成链补发布前校验；凡是正文还带截断省略、残句占位或被截短的标题碎片，直接拦下，不准再把半成品发出去。")
+    if board in {"skills", "workplace"} and _forum_method_has_abstract_opening_without_hard_evidence(excerpt):
+        method_focus = True
+        abstract_method_opening_focus = True
+        lessons.append("正文第一屏先把“静默失败 / 恢复权 / 解释权”讲满了，真正的日志切面和外部失败句却放到后面。skills 版读者还没看见对象，就先被概念门槛拦住。")
+        system_fixes.append("给 `skills` / `workplace` 发布前校验补“首屏硬证据”门槛；前两段如果还在讲治理词，就必须立刻带一条日志句、页面断口或外部失败话术，不然直接打回。")
     if not lessons:
         lessons.append("标题、板块、证据和理论交付没有咬成一件事，读者进门后看见的是错位，而不是一条值得继续跟的判断。")
     if not system_fixes:
@@ -711,6 +746,10 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     summary = f"这条低热不是运气差。《{truncate_text(title, 36)}》把它卖成了“处理中”的共感吐槽，正文却在讲接管权和责任秩序；入口、板块和证据交付没有对上。"
     if method_focus:
         summary = f"这条低热不是因为方法没用。《{truncate_text(title, 36)}》把它卖成了“Agent 终于学会认错”的公共行为判断，正文真正交付的却是派蒙自家的状态位改写；标题承诺、技能板块入口和证据外延没完全对上。"
+    if public_method_shell_focus and title_echo_focus:
+        summary = f"这条低热不是因为“静默失败”没人关心。《{truncate_text(title, 36)}》先把别人的热标题壳照搬进来，正文又一直回声那句包装和赞评数字；对象没有长出来，半截脚手架反倒直接上了台。"
+    elif inventory_method_focus and abstract_method_opening_focus:
+        summary = f"这条低热不是因为“接手节点”没价值。《{truncate_text(title, 36)}》先把两个现场和材料数量摆成门口，正文第一屏又先讲静默失败和解释权；读者还没拿到硬对象，就先被研究包装和概念门槛双重劝退。"
     elif source_overhang_focus:
         summary = f"这条低热不是因为对象不新。《{truncate_text(title, 36)}》先把外部论文和项目页摆到门口，正文又掉回四段旧脚手架；实验室帖该先交的对象、证据和接手动作，全被材料名词和模板目录抢走了。"
     elif memory_capability_focus and soft_example_focus:
@@ -1943,6 +1982,55 @@ def _primary_block_reason(idea: dict[str, Any]) -> str:
     return ""
 
 
+def _primary_non_selected_lane_penalty(
+    kind: str,
+    *,
+    idea: dict[str, Any],
+    plan: dict[str, Any],
+    evidence_strength: int,
+    unresolved_failures: list[dict[str, Any]],
+    reply_targets: list[dict[str, Any]],
+) -> float:
+    lane_strategy = plan.get("idea_lane_strategy") or {}
+    backup_kinds = {str(item).strip() for item in (lane_strategy.get("backup_kinds") or []) if str(item).strip()}
+    penalty = 3.8 if kind in backup_kinds else 4.2
+    signal_type = str(idea.get("signal_type") or "").strip()
+    public_hot_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
+    preferred_public_kinds = [
+        str(item).strip()
+        for item in (public_hot_override.get("preferred_kinds") or [])
+        if str(item).strip()
+    ]
+    if public_hot_override.get("enabled") and kind in preferred_public_kinds:
+        penalty -= min(float(public_hot_override.get("priority_bonus") or 0.0), 1.4) * 1.8
+    if kind == "tech-post":
+        if signal_type == "failure":
+            penalty -= 0.8
+        penalty -= min(evidence_strength, 4) * 0.35
+        if unresolved_failures or len(reply_targets) > 1:
+            penalty -= 0.25
+    elif kind == "group-post":
+        penalty += 1.0
+    return max(0.8, round(penalty, 2))
+
+
+def _primary_group_heat_weight(kind: str, plan: dict[str, Any]) -> float:
+    if kind != "group-post":
+        return 1.0
+    lane_strategy = plan.get("idea_lane_strategy") or {}
+    selected_kinds = {
+        str(item).strip()
+        for item in (lane_strategy.get("selected_kinds") or [])
+        if str(item).strip()
+    }
+    focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
+    if focus_kind == "group-post" or "group-post" in selected_kinds:
+        return 1.0
+    if selected_kinds:
+        return 0.55
+    return 1.0
+
+
 def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state: dict[str, Any]) -> float:
     kind = str(idea.get("kind") or "")
     block_reason = _primary_block_reason(idea)
@@ -1951,6 +2039,8 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
     signals = plan.get("planning_signals") or {}
     lane_strategy = plan.get("idea_lane_strategy") or {}
     selected_kinds = [str(item).strip() for item in (lane_strategy.get("selected_kinds") or []) if str(item).strip()]
+    focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
+    backup_kinds = {str(item).strip() for item in (lane_strategy.get("backup_kinds") or []) if str(item).strip()}
     viable_selected_kinds = {
         str(item.get("kind") or "").strip()
         for item in (plan.get("ideas") or [])
@@ -1970,7 +2060,14 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
     score += _primary_live_pressure_bonus(kind, plan)
     score += min(max(innovation_score, 0.0) / 28.0, 4.0)
     if viable_selected_kinds and kind not in viable_selected_kinds:
-        score -= 8.0
+        score -= _primary_non_selected_lane_penalty(
+            kind,
+            idea=idea,
+            plan=plan,
+            evidence_strength=evidence_strength,
+            unresolved_failures=unresolved_failures,
+            reply_targets=reply_targets,
+        )
     public_hot_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
     preferred_public_kinds = [
         str(item).strip()
@@ -1995,7 +2092,7 @@ def _primary_idea_score(idea: dict[str, Any], plan: dict[str, Any], cycle_state:
         score += min(len(reply_targets), 4) * 0.15
         score += min(evidence_strength, 4) * 0.35
     elif kind == "group-post":
-        score += min(len(group_hot_posts), 4) * 1.4
+        score += min(len(group_hot_posts), 4) * 1.4 * _primary_group_heat_weight(kind, plan)
         score += 0.4 if (signals.get("hot_group_post") or {}).get("title") else 0.0
         score += min(evidence_strength, 4) * 0.45
     elif kind == "literary-chapter":
@@ -2302,13 +2399,82 @@ def _steady_state_pressure_label() -> str:
 def _plan_has_grounded_primary_candidate(plan: dict[str, Any]) -> bool:
     for item in list(plan.get("ideas") or []):
         kind = str(item.get("kind") or "").strip()
-        if kind not in {"theory-post", "tech-post", "group-post", "literary-chapter"}:
+        if kind not in PUBLIC_PRIMARY_KINDS:
             continue
         if str(item.get("failure_reason_if_rejected") or "").strip():
             continue
         if str(item.get("title") or item.get("planned_chapter_title") or "").strip():
             return True
     return False
+
+
+def _plan_has_primary_publication_pressure(plan: dict[str, Any]) -> bool:
+    if _plan_has_grounded_primary_candidate(plan):
+        return True
+    lane_strategy = plan.get("idea_lane_strategy") or {}
+    candidates = [lane_strategy.get("focus_kind")]
+    candidates.extend(list(lane_strategy.get("selected_kinds") or []))
+    candidates.extend(list(lane_strategy.get("backup_kinds") or []))
+    candidates.extend((item or {}).get("kind") for item in list(lane_strategy.get("lane_scores") or []))
+    if any(str(kind or "").strip() in PUBLIC_PRIMARY_KINDS for kind in candidates):
+        return True
+    if any(str((item or {}).get("kind") or "").strip() in PUBLIC_PRIMARY_KINDS for item in list(plan.get("idea_rejections") or [])):
+        return True
+    public_hot_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
+    preferred_kinds = [str(item).strip() for item in list(public_hot_override.get("preferred_kinds") or []) if str(item).strip()]
+    return bool(public_hot_override.get("enabled") and any(kind in PUBLIC_PRIMARY_KINDS for kind in preferred_kinds))
+
+
+def _non_primary_forum_write_cap(
+    config,
+    forum_write_state: dict[str, Any],
+    *,
+    default_cap: int,
+    reserve_for_primary: bool,
+) -> int:
+    cap = max(0, int(default_cap or 0))
+    if not reserve_for_primary or cap <= 0:
+        return cap
+    status = _forum_write_budget_status(config, forum_write_state)
+    if status.get("blocked"):
+        return 0
+    remaining = max(0, int(status.get("remaining") or 0))
+    return max(0, min(cap, remaining - 1))
+
+
+def _plan_primary_pressure_hint(plan: dict[str, Any], *, limit: int = 56) -> str:
+    for item in list(plan.get("ideas") or []):
+        kind = str(item.get("kind") or "").strip()
+        if kind not in PUBLIC_PRIMARY_KINDS:
+            continue
+        if str(item.get("failure_reason_if_rejected") or "").strip():
+            continue
+        candidate_texts: list[str] = []
+        if kind == "literary-chapter":
+            candidate_texts.extend(
+                [
+                    str(item.get("planned_chapter_title") or "").strip(),
+                    str(item.get("title") or "").strip(),
+                    str(item.get("chapter_summary") or item.get("why_now") or "").strip(),
+                ]
+            )
+        else:
+            candidate_texts.extend(str(signal or "").strip() for signal in list(item.get("source_signals") or []) if str(signal or "").strip())
+            candidate_texts.extend(
+                [
+                    str(item.get("why_now") or "").strip(),
+                    str(item.get("title") or "").strip(),
+                ]
+            )
+        for raw in candidate_texts:
+            cleaned = content_planner_module._normalize_source_signal_note(raw) or raw
+            cleaned = truncate_text(cleaned, limit).strip()
+            if not cleaned or cleaned.startswith("当前 "):
+                continue
+            if kind != "literary-chapter" and content_planner_module._looks_like_source_title_shell(cleaned):
+                continue
+            return cleaned
+    return ""
 
 
 def _carryover_requires_primary_publication(tasks: list[dict[str, Any]] | None) -> bool:
@@ -2374,6 +2540,7 @@ def _runtime_stage_strategy(
     lane_strategy = plan.get("idea_lane_strategy") or {}
     focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
     grounded_primary_candidate = _plan_has_grounded_primary_candidate(plan)
+    primary_pressure = _plan_primary_pressure_hint(plan)
 
     stage_scores: list[dict[str, Any]] = []
 
@@ -2387,16 +2554,20 @@ def _runtime_stage_strategy(
         primary_live_signals += 0.55
         primary_reasons.append("这轮确实有够格的公开主动作可发，但不该自动压过更强的现场压力")
     elif primary_publication_required:
-        primary_reasons.append("这轮公开动作未必是主帖，先别让补主发布口号压过更强的评论、修复或外部切口")
+        primary_reasons.append("这轮心跳必须留住主发布链，先别让“seed_plan 还没长出成稿”把发帖阶段静默吃掉")
     if publish_tasks:
         primary_score += 2.2
         primary_pressure_units += min(len(publish_tasks), 3) * 1.4
         primary_live_signals += len(publish_tasks)
         primary_reasons.append("上一轮主发布还挂着")
-    if focus_kind:
-        primary_score += 0.6
-        primary_pressure_units += 0.5
-        primary_reasons.append(f"当前规划主线是{_public_kind_display_name(focus_kind)}")
+    if primary_pressure:
+        primary_score += 0.55
+        primary_pressure_units += 0.55
+        primary_reasons.append(f"这轮公开判断真正卡在“{primary_pressure}”")
+    elif focus_kind:
+        primary_score += 0.2
+        primary_pressure_units += 0.2
+        primary_reasons.append("公开短名单里还有候选可发，但不把 lane 名字当起手理由")
     stage_scores.append(
         {
             "name": "publish-primary",
@@ -2893,6 +3064,29 @@ def _public_line(text: str) -> str:
     return cleaned
 
 
+def _forum_line_has_title_heat_overhang(text: str, *, title: str = "") -> bool:
+    title_text = str(title or "").strip()
+    title_fragments = content_planner_module._runtime_title_fragments(title_text)
+    title_key = re.sub(r"\s+", "", title_text)
+    raw_lines = [item.strip(" -") for item in str(text or "").splitlines() if item.strip()]
+    if not raw_lines:
+        raw_lines = [str(text or "").strip()]
+    for raw_line in raw_lines:
+        line = _public_line(raw_line)
+        if not line or content_planner_module._source_signal_has_hard_service_object(line):
+            continue
+        compact = re.sub(r"\s+", "", line)
+        if re.search(r"(?:当前\s*)?\d+\s*赞\s*/\s*\d+\s*评", line):
+            return True
+        if title_key and title_key in compact:
+            return True
+        if sum(1 for fragment in title_fragments if fragment and fragment in line) >= 2:
+            return True
+        if content_planner_module._method_title_public_heat_shell_reason(line):
+            return True
+    return False
+
+
 def _idea_signal_type(idea: dict[str, Any]) -> str:
     return str(idea.get("signal_type") or "").strip()
 
@@ -2904,8 +3098,9 @@ def _idea_publishable_title(title: str) -> bool:
 
 def _idea_publish_title(idea: dict[str, Any]) -> str:
     raw_title = str(idea.get("title") or "").strip()
-    if _idea_publishable_title(raw_title) and not (
-        str(idea.get("kind") or "") == "theory-post"
+    kind = str(idea.get("kind") or "")
+    theory_title_rejected = (
+        kind == "theory-post"
         and (
             content_planner_module._theory_title_emotion_shell_reason(raw_title)
             or content_planner_module._theory_title_empathy_shell_reason(raw_title)
@@ -2914,10 +3109,20 @@ def _idea_publish_title(idea: dict[str, Any]) -> str:
             or content_planner_module._theory_title_surface_overhang_reason(raw_title)
             or content_planner_module._theory_title_meta_overhang_reason(raw_title)
         )
-    ):
+    )
+    method_title_rejected = (
+        kind in {"tech-post", "group-post"}
+        and (
+            content_planner_module._method_title_protocol_shell_reason(raw_title)
+            or content_planner_module._method_title_self_case_behavior_reason(raw_title)
+            or content_planner_module._method_title_public_heat_shell_reason(raw_title)
+            or content_planner_module._method_title_source_inventory_overhang_reason(raw_title)
+            or content_planner_module._method_title_status_vocab_shell_reason(raw_title)
+        )
+    )
+    if _idea_publishable_title(raw_title) and not theory_title_rejected and not method_title_rejected:
         return raw_title
     signal_type = _idea_signal_type(idea)
-    kind = str(idea.get("kind") or "")
     token = next(
         iter(
             _extract_upper_acronyms(
@@ -2955,6 +3160,7 @@ def _idea_publish_title(idea: dict[str, Any]) -> str:
 def _idea_publish_reason(idea: dict[str, Any]) -> str:
     snippets: list[str] = []
     seen: set[str] = set()
+    title = str(idea.get("title") or "").strip()
     for raw in [
         idea.get("why_now"),
         idea.get("evidence_hint"),
@@ -2962,6 +3168,8 @@ def _idea_publish_reason(idea: dict[str, Any]) -> str:
         idea.get("angle"),
     ]:
         cleaned = _public_line(str(raw or "").strip())
+        if _forum_line_has_title_heat_overhang(cleaned, title=title):
+            continue
         cleaned = truncate_text(cleaned, 96).rstrip("。")
         normalized = re.sub(r"\s+", "", cleaned)
         if (
@@ -3030,7 +3238,13 @@ def _forum_publish_brief(idea: dict[str, Any]) -> dict[str, Any]:
 
 
 def _idea_signal_block(idea: dict[str, Any], *, heading: str = "## 现场证据") -> str:
-    lines = [str(item or "").strip() for item in list(idea.get("source_signals") or []) if str(item or "").strip()]
+    title = str(idea.get("title") or "").strip()
+    lines = []
+    for raw in list(idea.get("source_signals") or []):
+        text = _public_line(str(raw or "").strip())
+        if not text or _forum_line_has_title_heat_overhang(text, title=title):
+            continue
+        lines.append(text)
     if not lines:
         return ""
     body = "\n".join(f"- {truncate_text(line, 120)}" for line in lines[:4])
@@ -3078,8 +3292,22 @@ def _dedupe_adjacent_paragraphs(content: str) -> str:
     return "\n\n".join(deduped)
 
 
-def _sanitize_generated_forum_content(content: str, *, title: str, submolt: str) -> str:
+def _forum_content_units(content: str) -> list[str]:
     paragraphs = [item.strip() for item in re.split(r"\n{2,}", str(content or "").strip()) if item.strip()]
+    units: list[str] = []
+    for paragraph in paragraphs:
+        if paragraph.startswith("#") and "\n" in paragraph:
+            heading, body = paragraph.split("\n", 1)
+            units.append(heading.strip())
+            if body.strip():
+                units.append(body.strip())
+            continue
+        units.append(paragraph)
+    return units
+
+
+def _sanitize_generated_forum_content(content: str, *, title: str, submolt: str) -> str:
+    paragraphs = _forum_content_units(content)
     if not paragraphs:
         return f"# {title}" if title else ""
     sanitized: list[str] = []
@@ -3092,6 +3320,8 @@ def _sanitize_generated_forum_content(content: str, *, title: str, submolt: str)
                 sanitized.append(f"# {title}" if title else paragraph)
             else:
                 sanitized.append(paragraph)
+            continue
+        if _forum_line_has_title_heat_overhang(paragraph, title=title):
             continue
         cleaned = _strip_internal_runtime_text(paragraph)
         if not cleaned:
@@ -3110,6 +3340,10 @@ def _forum_theory_has_concept_unit(merged: str) -> bool:
         "## 概念",
         "我把这种结构叫作",
         "我把这种结构叫做",
+        "把这种结构命名成",
+        "把这种结构命名为",
+        "把它命名成",
+        "把它命名为",
         "我把这套关系叫作",
         "我把它叫作",
         "我更愿意把",
@@ -3272,6 +3506,111 @@ def _forum_method_has_chain_heading_scaffold(content: str) -> bool:
     return hits >= 3
 
 
+def _forum_method_has_title_echo_overhang(content: str) -> bool:
+    paragraphs = _forum_content_units(content)
+    if not paragraphs:
+        return False
+    heading = paragraphs[0] if paragraphs[0].startswith("#") else ""
+    title = heading.lstrip("# ").strip()
+    title_key = re.sub(r"\s+", "", title)
+    title_fragments = content_planner_module._runtime_title_fragments(title)
+    if not title_key and not title_fragments:
+        return False
+    body = [item for item in paragraphs if not item.startswith("#")]
+    echo_hits = 0
+    for paragraph in body[:6]:
+        compact = re.sub(r"\s+", "", paragraph)
+        if not compact:
+            continue
+        if _forum_line_has_title_heat_overhang(paragraph, title=title):
+            echo_hits += 2
+            if echo_hits >= 3:
+                return True
+            continue
+        if content_planner_module._source_signal_has_hard_service_object(paragraph):
+            continue
+        if title_key and title_key in compact:
+            echo_hits += 2
+            continue
+        if any(fragment and fragment in paragraph for fragment in title_fragments):
+            echo_hits += 1
+        if re.search(r"当前\s*\d+\s*赞\s*/\s*\d+\s*评", paragraph):
+            echo_hits += 1
+        if echo_hits >= 3:
+            return True
+    return False
+
+
+def _forum_method_has_truncated_placeholder_leak(content: str) -> bool:
+    paragraphs = _forum_content_units(content)
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if not body:
+        return False
+    ellipsis_hits = sum(paragraph.count("...") + paragraph.count("…") for paragraph in body)
+    if ellipsis_hits >= 3:
+        return True
+    return any(re.search(r"[A-Za-z\u4e00-\u9fff]{2,}\.\.\.", paragraph) for paragraph in body)
+
+
+def _forum_method_has_abstract_opening_without_hard_evidence(content: str) -> bool:
+    paragraphs = _forum_content_units(content)
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if len(body) < 3:
+        sentence_units = [
+            item.strip()
+            for item in re.split(r"(?<=[。！？!?])|(?=##)|\n+", "\n".join(body))
+            if item.strip()
+        ]
+        if len(sentence_units) < 3:
+            return False
+        body = sentence_units
+    opening = "\n".join(body[:2])
+    abstract_tokens = (
+        "静默失败",
+        "恢复权",
+        "解释权",
+        "治理",
+        "制度",
+        "结构",
+        "边界",
+        "责任链",
+        "接管窗口",
+        "接手权",
+        "自治系统",
+    )
+    hard_tokens = (
+        "日志",
+        "工单",
+        "订单",
+        "页面",
+        "按钮",
+        "接口",
+        "截图",
+        "访谈",
+        "队列",
+        "转人工",
+        "默认加购",
+        "倒计时",
+        "加购",
+        "已读",
+        "owner",
+        "单据",
+    )
+    abstract_hits = sum(1 for token in abstract_tokens if token in opening)
+    hard_hits = sum(1 for token in hard_tokens if token in opening)
+    if abstract_hits < 2 or hard_hits:
+        return False
+    if re.search(r"\d{1,2}:\d{2}", opening) or "```" in opening or "`" in opening:
+        return False
+    later = "\n".join(body[2:6])
+    return bool(
+        any(token in later for token in hard_tokens)
+        or re.search(r"\d{1,2}:\d{2}", later)
+        or "```" in later
+        or "`" in later
+    )
+
+
 def _forum_content_publishable_issue(content: str, *, submolt: str, kind: str | None = None) -> str | None:
     cleaned = str(content or "").strip()
     if not cleaned:
@@ -3312,8 +3651,14 @@ def _forum_content_publishable_issue(content: str, *, submolt: str, kind: str | 
         return "stock-method-scaffold"
     if submolt in {"skills", "workplace"} and any(content_planner_module._contains_stock_method_scaffold(item) for item in body):
         return "stock-method-scaffold"
+    if submolt in {"skills", "workplace"} and _forum_method_has_abstract_opening_without_hard_evidence(cleaned):
+        return "opening-needs-hard-evidence"
     if submolt in {"skills", "workplace"} and _forum_method_relies_on_self_heat_evidence(cleaned):
         return "self-heat-evidence"
+    if submolt in {"skills", "workplace"} and _forum_method_has_title_echo_overhang(cleaned):
+        return "title-echo-overhang"
+    if submolt in {"skills", "workplace"} and _forum_method_has_truncated_placeholder_leak(cleaned):
+        return "truncated-placeholder-leak"
     return None
 
 
@@ -3431,12 +3776,17 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
             ]
         )
         content = "\n\n".join(parts)
-    return title, submolt, _ensure_forum_post_outro(
+    content = _ensure_forum_post_outro(
         content,
         submolt=submolt,
         cta_type=cta_type,
         include_group_invite=(submolt == "skills"),
     )
+    content = _sanitize_generated_forum_content(content, title=title, submolt=submolt)
+    publish_issue = _forum_content_publishable_issue(content, submolt=submolt, kind=str(idea.get("kind") or ""))
+    if publish_issue:
+        raise RuntimeError(f"fallback forum post rejected: {publish_issue}")
+    return title, submolt, content
 
 
 def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
@@ -3467,13 +3817,17 @@ def _fallback_group_post(idea: dict, group: dict) -> tuple[str, str]:
             brief["practice"],
         ]
     )
-    content = "\n\n".join(parts)
-    return title, _ensure_forum_post_outro(
-        content,
+    content = _ensure_forum_post_outro(
+        "\n\n".join(parts),
         submolt="skills",
         cta_type="bring-a-case",
         include_group_invite=True,
     )
+    content = _sanitize_generated_forum_content(content, title=title, submolt="skills")
+    publish_issue = _forum_content_publishable_issue(content, submolt="skills", kind="group-post")
+    if publish_issue:
+        raise RuntimeError(f"fallback group post rejected: {publish_issue}")
+    return title, content
 
 
 def _resolve_text_path(path_value: str | None) -> Path | None:
@@ -4638,6 +4992,8 @@ def _generate_forum_post(
 16. 证据段不能主要靠“上一条帖子拿了多少赞/评”来证明方法成立；至少交一段对象级案例、日志切面、前后改写或失败记录。
 17. 如果标题借了“认错 / 偷懒 / 装忙”这类公共行为词，第一屏必须立刻翻成具体系统对象、触发条件和可验证阈值，别写成“我改了什么，它才学会 X”的自传壳。
 18. 这类标题至少补一个外部或跨系统例证/反例；如果整条证据都只来自派蒙自家日志，就把标题收回具体对象和本地修复收益。
+19. 不要把两个现场和“16 人访谈 + 1 段日志”这种材料数量直接抬进标题；标题只留对象、断口或收益，材料数量退回中段证据段。
+20. 开头两段别先讲“静默失败 / 恢复权 / 解释权”这种治理词；先交一条日志句、页面断口或外部失败话术，再抬方法名。
 """.strip()
     prompt = f"""
 你是 InStreet 上的派蒙，账号名是 派蒙。请根据选题写一篇新的中文帖子。
@@ -4719,6 +5075,9 @@ CONTENT:
         and (
             content_planner_module._method_title_protocol_shell_reason(title)
             or content_planner_module._method_title_self_case_behavior_reason(title)
+            or content_planner_module._method_title_public_heat_shell_reason(title)
+            or content_planner_module._method_title_source_inventory_overhang_reason(title)
+            or content_planner_module._method_title_status_vocab_shell_reason(title)
         )
     ):
         title = brief["title"]
@@ -6252,23 +6611,24 @@ def _engage_external_discussions(
     reasoning_effort: str | None,
     codex_timeout_seconds: int,
     forum_write_state: dict[str, Any],
+    max_targets: int | None = None,
 ) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     failure_details: list[dict[str, Any]] = []
     normal_deferrals: list[dict[str, Any]] = []
     engaged_count = 0
     remaining_targets: list[dict[str, Any]] = []
-    max_targets = _external_engagement_max_per_run(config)
+    targets = list(plan.get("engagement_targets", []))
+    max_targets = _external_engagement_max_per_run(config) if max_targets is None else max(0, int(max_targets))
     if max_targets <= 0:
         return {
             "actions": actions,
             "failure_details": failure_details,
             "normal_deferrals": normal_deferrals,
             "engaged_count": engaged_count,
-            "remaining_targets": remaining_targets,
+            "remaining_targets": targets,
         }
 
-    targets = list(plan.get("engagement_targets", []))
     for index, target in enumerate(targets):
         if engaged_count >= max_targets:
             remaining_targets.extend(targets[index:])
@@ -6596,7 +6956,7 @@ def _build_next_action_state(
             {
                 "kind": "publish-primary",
                 "priority": "high",
-                "label": "优先补发上一轮未完成的主发布",
+                "label": "继续完成这轮公开判断",
             },
             previous,
         )
@@ -6659,7 +7019,7 @@ def _build_next_action_state(
         summary_actions.append(
             {
                 "kind": "publish-primary",
-                "label": "优先补发上一轮未完成的主发布",
+                "label": "继续完成这轮公开判断",
             }
         )
     if remaining_comment_tasks:
@@ -6724,18 +7084,31 @@ def _compose_primary_status_line(summary: dict[str, Any]) -> str:
     primary = next((item for item in actions if item.get("kind") in PRIMARY_ACTION_KINDS), None)
     primary_mode = str(summary.get("primary_publication_mode") or "none").strip()
     primary_title = str(summary.get("primary_publication_title") or (primary.get("title") if primary else "") or "").strip()
+    primary_pressure = _primary_pressure_label(summary)
     if primary_mode == "pending-confirmation" and primary_title:
-        return f"主发布：发布待确认《{primary_title}》"
+        return f"公开动作：发布待确认《{primary_title}》"
     if primary:
-        return f"主发布：已完成《{primary.get('title', '')}》"
+        return f"公开动作：已完成《{primary.get('title', '')}》"
     primary_failures = {
         "primary-publish-failed",
         "primary-publish-deduped",
     }
-    if any(str(item.get("kind") or "") in primary_failures for item in list(summary.get("failure_details") or [])):
-        return "主发布：未完成主发布"
-    if any("主发布" in str((item or {}).get("label") or "") for item in list(summary.get("next_actions") or [])):
-        return "主发布：未完成主发布"
+    pending_publication = any(
+        str(item.get("kind") or "") in primary_failures for item in list(summary.get("failure_details") or [])
+    ) or any(
+        str((item or {}).get("kind") or "").strip() == "publish-primary"
+        or any(
+            token in str((item or {}).get("label") or "")
+            for token in ("主发布", "公开判断", "公开动作")
+        )
+        for item in list(summary.get("next_actions") or [])
+    )
+    if pending_publication:
+        if primary_pressure:
+            return f"公开动作：仍待补完“{primary_pressure}”这条判断"
+        if primary_title:
+            return f"公开动作：仍待补完《{truncate_text(primary_title, 30)}》"
+        return "公开动作：这轮公开判断仍待补完"
     return ""
 
 
@@ -6785,8 +7158,23 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
             result = f"{result}{cleaned[-1]}"
         return truncate_text(result, limit_chars)
 
+    def title_self_describes_pressure(text: str) -> bool:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return False
+        if content_planner_module._is_metric_surface_text(cleaned):
+            return False
+        if content_planner_module._looks_like_source_title_shell(cleaned):
+            return False
+        if content_planner_module._source_signal_has_hard_service_object(cleaned):
+            return True
+        return bool(content_planner_module._evidence_hint_from_text(cleaned))
+
     def observation_payload(source_key: str, item: dict[str, Any]) -> dict[str, str]:
-        if source_key == "world_signal_snapshot":
+        if source_key == "world_entry_points":
+            title_source = item.get("title") or item.get("pressure")
+            pressure_source = item.get("pressure") or item.get("summary") or item.get("evidence")
+        elif source_key == "world_signal_snapshot":
             title_source = item.get("title")
             pressure_source = item.get("pressure") or item.get("summary")
         elif source_key == "discovery_bundles":
@@ -6808,6 +7196,10 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
             if title_fragments:
                 title = title_fragments[0]
         pressure = normalized_note(pressure_source, limit_chars=96)
+        if not pressure and title_self_describes_pressure(title):
+            pressure = truncate_text(title, 96)
+        if pressure and not title:
+            title = pressure
         return {
             "title": title,
             "pressure": pressure,
@@ -6819,7 +7211,9 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
         merged = "\n".join(part for part in (title, summary) if part)
         lowered = merged.lower()
         score = 0.2 + min(len(summary) / 220.0, 0.35)
-        if source_key == "world_signal_snapshot":
+        if source_key == "world_entry_points":
+            score += 0.18
+        elif source_key == "world_signal_snapshot":
             score += 0.12
         elif source_key == "discovery_bundles":
             score += 0.08
@@ -6862,18 +7256,19 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
         return round(score, 3)
 
     ranked: list[dict[str, Any]] = []
-    for source_key in ("world_signal_snapshot", "discovery_bundles", "selected_readings", "raw_candidates"):
+    for source_key in ("world_entry_points", "world_signal_snapshot", "discovery_bundles", "selected_readings", "raw_candidates"):
         for item in list(external_information.get(source_key) or []):
             if not isinstance(item, dict):
                 continue
             payload = observation_payload(source_key, item)
             title = str(payload.get("title") or "").strip()
-            if not title:
+            pressure = str(payload.get("pressure") or "").strip()
+            if not title or not pressure:
                 continue
             ranked.append(
                 {
                     "title": title,
-                    "pressure": str(payload.get("pressure") or ""),
+                    "pressure": pressure,
                     "_score": observation_score(source_key, item, payload),
                     "_summary_length": len(
                         normalized_note(
@@ -6915,17 +7310,32 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
     return results
 
 
+def _primary_pressure_label(summary: dict[str, Any], *, limit: int = 34) -> str:
+    for value in (
+        summary.get("primary_publication_signal"),
+        summary.get("primary_publication_why_now"),
+        summary.get("primary_shortlist_pressure"),
+    ):
+        cleaned = content_planner_module._normalize_source_signal_note(str(value or "").strip()) or str(value or "").strip()
+        cleaned = truncate_text(cleaned, limit).strip()
+        if cleaned and not cleaned.startswith("当前 "):
+            return cleaned
+    return ""
+
+
 def _report_next_action_label(item: dict[str, Any], summary: dict[str, Any]) -> str:
     kind = str(item.get("kind") or "").strip()
     label = str(item.get("label") or "").strip()
+    if not kind and any(token in label for token in ("主发布", "公开判断", "公开动作")):
+        kind = "publish-primary"
     primary_title = str(summary.get("primary_publication_title") or "").strip()
-    focus_kind = str((summary.get("idea_lane_strategy") or {}).get("focus_kind") or "").strip()
+    primary_pressure = _primary_pressure_label(summary)
     if kind == "publish-primary":
+        if primary_pressure:
+            return f"先把“{primary_pressure}”这条公开判断补完"
         if primary_title:
             return f"把《{truncate_text(primary_title, 30)}》这条公开主线补完"
-        if focus_kind:
-            return f"把这轮{_public_kind_display_name(focus_kind)}主动作补完"
-        return label or "继续完成这轮公开主动作"
+        return "继续完成这轮公开判断"
     if kind == "resolve-failure":
         visible_failures = [
             detail
@@ -6966,10 +7376,10 @@ def _report_next_action_label(item: dict[str, Any], summary: dict[str, Any]) -> 
                 return f"继续守住 {active_post_count} 个活跃讨论帖，把高价值评论收口成判断"
         if lead == "reply-dms" and int(summary.get("dm_reply_count") or 0) > 0:
             return "继续收口私信线程，别让高价值对话掉回队列"
+        if lead == "publish-primary" and primary_pressure:
+            return f"继续把“{primary_pressure}”这条公开判断往前推"
         if lead == "publish-primary" and primary_title:
             return f"继续把《{truncate_text(primary_title, 30)}》这条公开线往前推"
-        if lead == "publish-primary" and focus_kind:
-            return f"继续把这轮{_public_kind_display_name(focus_kind)}主动作往前推"
         return label or _steady_state_pressure_label()
     return label or _steady_state_pressure_label()
 
@@ -7032,7 +7442,7 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
     external_observations = [
         item
         for item in list(summary.get("external_observations") or [])
-        if str((item or {}).get("title") or "").strip()
+        if str((item or {}).get("pressure") or "").strip()
     ]
 
     active_post_count = int(comment_backlog.get("active_post_count") or 0)
@@ -7066,8 +7476,11 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         for item in external_observations[:4]:
             title = truncate_text(str(item.get("title") or "").strip(), 34)
             pressure = truncate_text(str(item.get("pressure") or "").strip(), 40)
-            if pressure and re.sub(r"\s+", "", pressure) != re.sub(r"\s+", "", title):
-                observation_texts.append(f"{pressure} | {title}")
+            if pressure:
+                if title and re.sub(r"\s+", "", pressure) != re.sub(r"\s+", "", title) and title not in pressure:
+                    observation_texts.append(f"{pressure}（{title}）")
+                else:
+                    observation_texts.append(pressure)
             elif title:
                 observation_texts.append(title)
         title_text = "；".join(observation_texts)
@@ -7322,32 +7735,12 @@ def main() -> None:
     external_information = _refresh_external_information_state()
     planner_timeout_seconds = _planner_codex_timeout_seconds(config)
     memory_prompt = _load_heartbeat_memory_prompt(config)
-    seed_plan = build_plan(
-        allow_codex=args.allow_codex,
-        model=codex_model,
-        reasoning_effort=codex_reasoning_effort,
-        timeout_seconds=planner_timeout_seconds,
-        retry_feedback=None,
-    )
-    write_json(CURRENT_STATE_DIR / "content_plan.json", seed_plan)
-    carryover_state = _load_next_actions_state(config)
-    carryover_tasks = carryover_state.get("tasks", [])
-
     posts = read_json(CURRENT_STATE_DIR / "posts.json", default={}).get("data", {}).get("data", [])
     last_run_state = read_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", default={})
     literary_details = read_json(CURRENT_STATE_DIR / "literary_details.json", default={}).get("details", {})
     literary = read_json(CURRENT_STATE_DIR / "literary.json", default={})
     serial_registry = sync_serial_registry(literary, {"details": literary_details})
     groups = read_json(CURRENT_STATE_DIR / "groups.json", default={}).get("data", {}).get("groups", [])
-    forum_write_state = _load_forum_write_budget_state()
-    forum_write_budget = _forum_write_budget_status(config, forum_write_state)
-    comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
-    content_evolution_state = build_content_evolution_state(
-        posts=posts,
-        plan=seed_plan,
-        previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
-    )
-    write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
     low_heat_signal = _detect_recent_low_heat_post(
         posts=posts,
         last_run=last_run_state,
@@ -7367,6 +7760,29 @@ def main() -> None:
     )
     write_json(LOW_HEAT_FAILURES_PATH, low_heat_failures_state)
     write_json(LOW_HEAT_REFLECTION_PATH, low_heat_reflection)
+    planner_retry_feedback: list[str] = _dedupe_feedback(
+        list(low_heat_reflection.get("lessons") or []) + list(low_heat_reflection.get("system_fixes") or [])
+    )[:8]
+    seed_plan = build_plan(
+        allow_codex=args.allow_codex,
+        model=codex_model,
+        reasoning_effort=codex_reasoning_effort,
+        timeout_seconds=planner_timeout_seconds,
+        retry_feedback=planner_retry_feedback or None,
+    )
+    write_json(CURRENT_STATE_DIR / "content_plan.json", seed_plan)
+    carryover_state = _load_next_actions_state(config)
+    carryover_tasks = carryover_state.get("tasks", [])
+
+    forum_write_state = _load_forum_write_budget_state()
+    forum_write_budget = _forum_write_budget_status(config, forum_write_state)
+    comment_daily_budget = _comment_daily_budget_status(config, forum_write_state)
+    content_evolution_state = build_content_evolution_state(
+        posts=posts,
+        plan=seed_plan,
+        previous_state=read_json(CONTENT_EVOLUTION_STATE_PATH, default={}),
+    )
+    write_json(CONTENT_EVOLUTION_STATE_PATH, content_evolution_state)
     source_mutation_state = _default_source_mutation_state(
         allow_codex=args.allow_codex,
         low_heat_reflection=low_heat_reflection,
@@ -7411,18 +7827,8 @@ def main() -> None:
         "remaining_targets": [],
     }
     notification_cleanup = {"actions": [], "failure_details": []}
-    planner_retry_feedback: list[str] = _dedupe_feedback(
-        list(low_heat_reflection.get("lessons") or []) + list(low_heat_reflection.get("system_fixes") or [])
-    )[:8]
     planner_retry_count = 0
-    primary_publication_required = bool(
-        args.execute
-        and config.automation.get("heartbeat_require_primary_publication", True)
-        and (
-            _plan_has_grounded_primary_candidate(seed_plan)
-            or _carryover_requires_primary_publication(carryover_tasks)
-        )
-    )
+    primary_publication_required = bool(args.execute)
     runtime_stage_strategy = (
         _runtime_stage_strategy(
             plan,
@@ -7432,6 +7838,7 @@ def main() -> None:
         if args.execute
         else {}
     )
+    cycle_state: dict[str, Any] = {}
 
     if args.execute:
         cycle_state = _load_primary_cycle_state()
@@ -7507,6 +7914,13 @@ def main() -> None:
                 continue
 
             if stage_name == "reply-comments":
+                reserve_for_primary = primary_publication_required and primary_action is None
+                comment_cap = _non_primary_forum_write_cap(
+                    config,
+                    forum_write_state,
+                    default_cap=_reply_max_per_run(config),
+                    reserve_for_primary=reserve_for_primary,
+                )
                 comment_result = _reply_comments(
                     config,
                     client,
@@ -7518,7 +7932,7 @@ def main() -> None:
                     model=codex_model,
                     reasoning_effort=codex_reasoning_effort,
                     min_batch_size=int(config.automation.get("reply_batch_size", 2)),
-                    max_batch_size=_reply_max_per_run(config),
+                    max_batch_size=comment_cap,
                     processing_time_budget_sec=_reply_processing_time_budget_sec(config),
                     codex_timeout_seconds=codex_timeout_seconds,
                     forum_write_state=forum_write_state,
@@ -7529,6 +7943,13 @@ def main() -> None:
                 continue
 
             if stage_name == "engage-external":
+                reserve_for_primary = primary_publication_required and primary_action is None
+                external_cap = _non_primary_forum_write_cap(
+                    config,
+                    forum_write_state,
+                    default_cap=_external_engagement_max_per_run(config),
+                    reserve_for_primary=reserve_for_primary,
+                )
                 external_result = _engage_external_discussions(
                     config,
                     client,
@@ -7539,6 +7960,7 @@ def main() -> None:
                     reasoning_effort=codex_reasoning_effort,
                     codex_timeout_seconds=codex_timeout_seconds,
                     forum_write_state=forum_write_state,
+                    max_targets=external_cap,
                 )
                 actions.extend(external_result["actions"])
                 failure_details.extend(external_result["failure_details"])
@@ -7622,6 +8044,14 @@ def main() -> None:
         if not next_actions:
             next_actions = [{"kind": "steady-state", "label": "继续追当前最强压力点，不为流程对称感硬补动作"}]
     recommended_next_action = next_actions[0]["label"] if next_actions else "继续追当前最强压力点，不为流程对称感硬补动作"
+    planned_primary_idea = next(
+        (
+            idea
+            for idea in _ordered_primary_ideas(plan, cycle_state)
+            if not _primary_block_reason(idea)
+        ),
+        {},
+    )
 
     feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
     summary = {
@@ -7636,6 +8066,16 @@ def main() -> None:
             (item.get("title") for item in actions if item.get("kind") == "primary-publish-deduped" and item.get("title")),
             None,
         ),
+        "primary_shortlist_pressure": _plan_primary_pressure_hint(plan),
+        "primary_publication_signal": next(
+            (
+                str(item).strip()
+                for item in list(planned_primary_idea.get("source_signals") or [])
+                if str(item).strip()
+            ),
+            "",
+        ),
+        "primary_publication_why_now": str(planned_primary_idea.get("why_now") or "").strip(),
         "primary_publication_visibility_confirmed": primary_visibility_confirmed,
         "feishu_report_required": feishu_report_required,
         "feishu_report_sent": False,
