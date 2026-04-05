@@ -166,6 +166,29 @@ PRESSURE_DISCOVERY_MARKERS = (
     "coordination",
     "write path",
 )
+DISCOVERY_OUTSIDE_ORIGINS = {"community", "competitor", "world-sample", "outside-memory"}
+DISCOVERY_INTERNAL_ORIGINS = {"agenda", "objective", "manual", "hint", "interest"}
+DISCOVERY_ROOT_OBJECT_MARKERS = (
+    "工单",
+    "接口",
+    "回写",
+    "日志",
+    "队列",
+    "权限",
+    "审批",
+    "评论",
+    "通知",
+    "按钮",
+    "单据",
+    "退款",
+    "状态位",
+    "卡片",
+    "protocol",
+    "queue",
+    "handoff",
+    "audit",
+    "log",
+)
 
 DEFAULT_AI_VENUES = ["NeurIPS", "ICLR", "ICML", "CVPR", "ACL", "AAAI", "KDD", "WWW"]
 DEFAULT_ARXIV_CATEGORIES = ["cs.AI", "cs.LG", "cs.HC", "cs.MA", "cs.CY"]
@@ -276,6 +299,7 @@ def ensure_external_information_files() -> None:
                 "generated_at": legacy_state.get("generated_at"),
                 "raw_candidates": [],
                 "selected_readings": [],
+                "world_entry_points": [],
                 "reading_notes": [],
                 "bibliography": [],
                 "discovery_bundles": [],
@@ -804,7 +828,19 @@ def _discovery_origin_convergence_bonus(origins: list[str]) -> float:
     return 0.0
 
 
-def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
+def _discovery_outside_anchor_adjustment(origins: list[str], *, outside_available: bool) -> float:
+    origin_set = {str(item).strip() for item in origins if str(item).strip()}
+    if not origin_set:
+        return 0.0
+    outside_hits = len(origin_set & DISCOVERY_OUTSIDE_ORIGINS)
+    if outside_hits:
+        return 0.18 + min(outside_hits, 2) * 0.12
+    if outside_available and origin_set <= DISCOVERY_INTERNAL_ORIGINS:
+        return -0.18
+    return 0.0
+
+
+def _discovery_fragment_score(fragment: str, origins: list[str], *, outside_available: bool) -> float:
     compact = re.sub(r"\s+", "", str(fragment or ""))
     lowered = compact.lower()
     score = _fragment_specificity_score(fragment)
@@ -813,6 +849,7 @@ def _discovery_fragment_score(fragment: str, origins: list[str]) -> float:
     if re.search(r"\d", compact):
         score += 0.12
     score += _discovery_origin_convergence_bonus(origins)
+    score += _discovery_outside_anchor_adjustment(origins, outside_available=outside_available)
     if any(
         token in compact or token in lowered
         for token in (
@@ -864,11 +901,50 @@ def _fragments_overlap(left: str, right: str) -> bool:
     )
 
 
+def _discovery_fragment_terms(fragment: str, *, limit: int = 6) -> set[str]:
+    terms: set[str] = set()
+    for candidate in _query_term_fragments(fragment, limit=max(limit, 4)) or [fragment]:
+        normalized = _normalize_query_fragment(_clean_query_text(candidate))
+        if not normalized or normalized in QUERY_FRAGMENT_STOPWORDS:
+            continue
+        terms.add(normalized)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def _discovery_bundle_relatedness(root: dict[str, Any], candidate: dict[str, Any]) -> float:
+    root_fragment = str(root.get("fragment") or "").strip()
+    candidate_fragment = str(candidate.get("fragment") or "").strip()
+    if (
+        not root_fragment
+        or not candidate_fragment
+        or _fragments_overlap(root_fragment, candidate_fragment)
+    ):
+        return float("-inf")
+    root_terms = _discovery_fragment_terms(root_fragment)
+    candidate_terms = _discovery_fragment_terms(candidate_fragment)
+    shared_term_count = len(root_terms & candidate_terms)
+    score = shared_term_count * 0.55
+    score += min(float(candidate.get("score") or 0.0), 2.4) * 0.12
+    root_origins = {str(item).strip() for item in list(root.get("origins") or []) if str(item).strip()}
+    candidate_origins = {str(item).strip() for item in list(candidate.get("origins") or []) if str(item).strip()}
+    if candidate_origins & DISCOVERY_OUTSIDE_ORIGINS and not root_origins & DISCOVERY_OUTSIDE_ORIGINS:
+        score += 0.18
+    if _pressure_fragment_score(candidate_fragment) > _pressure_fragment_score(root_fragment):
+        score += 0.08
+    return round(score, 3)
+
+
 def _ranked_discovery_fragments(
     origin_pools: dict[str, list[str]],
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
+    outside_available = any(
+        origin in DISCOVERY_OUTSIDE_ORIGINS and any(_clean_query_text(value) for value in list(values or [])[:12])
+        for origin, values in origin_pools.items()
+    )
     grouped: dict[str, dict[str, Any]] = {}
     for origin, values in origin_pools.items():
         seen_within_origin: set[str] = set()
@@ -900,7 +976,7 @@ def _ranked_discovery_fragments(
         fragment = _pick_representative_fragment(list(entry.get("fragments") or []))
         if not fragment:
             continue
-        score = _discovery_fragment_score(fragment, origins)
+        score = _discovery_fragment_score(fragment, origins, outside_available=outside_available)
         ranked.append(
             {
                 "fragment": fragment,
@@ -931,6 +1007,64 @@ def _prioritize_root_fragments(ranked_fragments: list[dict[str, Any]]) -> list[d
     )
 
 
+def _discovery_fragment_has_case_object(fragment: str) -> bool:
+    compact = re.sub(r"\s+", "", str(fragment or ""))
+    lowered = str(fragment or "").lower()
+    if not compact:
+        return False
+    return any(_marker_in_pressure_text(marker, compact, lowered) for marker in DISCOVERY_ROOT_OBJECT_MARKERS)
+
+
+def _discovery_root_priority_score(item: dict[str, Any], *, world_pressure_available: bool) -> float:
+    fragment = str(item.get("fragment") or "").strip()
+    origins = {str(origin).strip() for origin in list(item.get("origins") or []) if str(origin).strip()}
+    pressure = _pressure_fragment_score(fragment)
+    specificity = _fragment_specificity_score(fragment)
+    has_case_object = _discovery_fragment_has_case_object(fragment)
+    outside_grounded = bool(origins & DISCOVERY_OUTSIDE_ORIGINS and (has_case_object or pressure >= 1.0))
+
+    score = float(item.get("score") or 0.0)
+    score += min(pressure, 2.4) * 0.6
+    score += min(specificity, 1.6) * 0.12
+    if has_case_object:
+        score += 0.35
+    if outside_grounded:
+        score += 0.55
+    if origins & DISCOVERY_OUTSIDE_ORIGINS and not has_case_object and pressure < 1.2:
+        score -= 0.8
+    if world_pressure_available and origins and origins <= DISCOVERY_INTERNAL_ORIGINS:
+        if not has_case_object:
+            score -= 3.25
+        elif pressure < 1.0:
+            score -= 0.85
+    if _looks_like_source_title_shell(fragment):
+        score -= 0.35
+    return round(score, 3)
+
+
+def _prioritize_bundle_roots(ranked_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prioritized = _prioritize_root_fragments(ranked_fragments)
+    world_pressure_available = any(
+        (set(str(origin).strip() for origin in list(item.get("origins") or []) if str(origin).strip()) & DISCOVERY_OUTSIDE_ORIGINS)
+        and (
+            _discovery_fragment_has_case_object(str(item.get("fragment") or ""))
+            or _pressure_fragment_score(str(item.get("fragment") or "")) >= 1.0
+        )
+        for item in prioritized
+    )
+    return sorted(
+        prioritized,
+        key=lambda item: (
+            -_discovery_root_priority_score(item, world_pressure_available=world_pressure_available),
+            -float(item.get("score") or 0.0),
+            -_pressure_fragment_score(str(item.get("fragment") or "")),
+            -_fragment_specificity_score(str(item.get("fragment") or "")),
+            len(str(item.get("fragment") or "")),
+            str(item.get("fragment") or ""),
+        ),
+    )
+
+
 def _build_discovery_bundle(
     root: dict[str, Any],
     candidates: list[dict[str, Any]],
@@ -944,10 +1078,21 @@ def _build_discovery_bundle(
     root_origins = list(root.get("origins") or [])
     support_signals: list[str] = []
     support_origins: list[str] = []
-    for candidate in candidates:
+    ranked_support_candidates = sorted(
+        candidates,
+        key=lambda candidate: (
+            -_discovery_bundle_relatedness(root, candidate),
+            -float(candidate.get("score") or 0.0),
+            -_pressure_fragment_score(str(candidate.get("fragment") or "")),
+            str(candidate.get("fragment") or ""),
+        ),
+    )
+    for candidate in ranked_support_candidates:
         fragment = str(candidate.get("fragment") or "").strip()
+        relatedness = _discovery_bundle_relatedness(root, candidate)
         if (
             not fragment
+            or relatedness < 0.16
             or _fragments_overlap(root_fragment, fragment)
             or any(_fragments_overlap(fragment, existing) for existing in support_signals)
         ):
@@ -1001,6 +1146,54 @@ def _build_discovery_bundle(
     return bundle
 
 
+def _bundle_fragment_priority_score(fragment: str, *, seen_queries: set[str]) -> float:
+    cleaned = _clean_query_text(fragment)
+    normalized = _normalize_query_fragment(cleaned)
+    if not cleaned or not normalized:
+        return float("-inf")
+    score = _pressure_fragment_score(cleaned) * 0.78
+    score += _fragment_specificity_score(cleaned) * 0.36
+    if _discovery_fragment_has_case_object(cleaned):
+        score += 0.42
+    if any(token in cleaned for token in ("失败", "报错", "回写", "日志", "超时", "工单", "单据", "接口")):
+        score += 0.24
+    if _looks_like_source_title_shell(cleaned):
+        score -= 0.7
+    if normalized in seen_queries:
+        score -= 0.22
+    return round(score, 3)
+
+
+def _rank_bundle_query_fragments(
+    values: list[Any],
+    *,
+    seen_queries: set[str],
+    limit: int,
+) -> list[str]:
+    candidates: list[str] = []
+    local_seen: set[str] = set()
+    for value in values:
+        direct_fragments = _query_term_fragments(value, limit=3) or [_clean_query_text(value)]
+        for fragment in direct_fragments:
+            cleaned = _clean_query_text(fragment)
+            normalized = _normalize_query_fragment(cleaned)
+            if not cleaned or not normalized or normalized in local_seen:
+                continue
+            local_seen.add(normalized)
+            candidates.append(cleaned)
+    candidates.sort(
+        key=lambda item: (
+            0 if _normalize_query_fragment(item) not in seen_queries else 1,
+            -_bundle_fragment_priority_score(item, seen_queries=seen_queries),
+            -_pressure_fragment_score(item),
+            -_fragment_specificity_score(item),
+            len(item),
+            item,
+        )
+    )
+    return candidates[:limit]
+
+
 def _bundle_direct_queries(
     root_fragment: str,
     support_signals: list[str],
@@ -1010,33 +1203,24 @@ def _bundle_direct_queries(
     picked: list[str] = []
     local_seen: set[str] = set()
     limit = max(2, min(3, DISCOVERY_QUERY_MAX_TERMS))
-    for value in [root_fragment, *support_signals]:
-        direct_fragments = _query_term_fragments(value, limit=3) or [_clean_query_text(value)]
-        for fragment in direct_fragments:
-            cleaned = _clean_query_text(fragment)
-            normalized = _normalize_query_fragment(cleaned)
-            if (
-                not cleaned
-                or not normalized
-                or normalized in local_seen
-                or not _query_candidate_strong_enough(cleaned)
-            ):
-                continue
-            local_seen.add(normalized)
-            picked.append(cleaned)
-            if len(picked) >= limit:
-                break
+    ranked_fragments = _rank_bundle_query_fragments(
+        [root_fragment, *support_signals],
+        seen_queries=seen_queries,
+        limit=max(limit * 4, 12),
+    )
+    for cleaned in ranked_fragments:
+        normalized = _normalize_query_fragment(cleaned)
+        if (
+            not normalized
+            or normalized in local_seen
+            or not _query_candidate_strong_enough(cleaned)
+        ):
+            continue
+        local_seen.add(normalized)
+        picked.append(cleaned)
         if len(picked) >= limit:
             break
-    return sorted(
-        picked,
-        key=lambda item: (
-            0 if _normalize_query_fragment(item) not in seen_queries else 1,
-            -_fragment_specificity_score(item),
-            len(item),
-            item,
-        ),
-    )[:limit]
+    return picked[:limit]
 
 
 def _bundle_pressure_summary(bundle: dict[str, Any]) -> str:
@@ -1077,22 +1261,23 @@ def _bundle_fetch_terms(
         *(bundle.get("terms") or []),
         bundle.get("rationale"),
     ]
-    for value in values:
-        direct_fragments = _query_term_fragments(value, limit=3) or [_clean_query_text(value)]
-        for fragment in direct_fragments:
-            cleaned = _clean_query_text(fragment)
-            normalized = _normalize_query_fragment(cleaned)
-            if (
-                not cleaned
-                or not normalized
-                or normalized in seen
-                or not _query_candidate_strong_enough(cleaned)
-            ):
-                continue
-            seen.add(normalized)
-            terms.append(cleaned)
-            if len(terms) >= limit:
-                return terms
+    ranked_fragments = _rank_bundle_query_fragments(
+        values,
+        seen_queries=seen,
+        limit=max(limit * 4, 12),
+    )
+    for cleaned in ranked_fragments:
+        normalized = _normalize_query_fragment(cleaned)
+        if (
+            not normalized
+            or normalized in seen
+            or not _query_candidate_strong_enough(cleaned)
+        ):
+            continue
+        seen.add(normalized)
+        terms.append(cleaned)
+        if len(terms) >= limit:
+            return terms
     return terms
 
 
@@ -1102,6 +1287,11 @@ def _bundle_queries(focus: str, support_signals: list[str]) -> list[str]:
 
 def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
     bundle_score = float(bundle.get("score") or 0.0)
+    bundle_origins = [
+        str(item).strip()
+        for item in list(bundle.get("audit_origins") or bundle.get("origins") or [])
+        if str(item).strip()
+    ]
     core_values = [
         bundle.get("focus"),
         bundle.get("conflict_note"),
@@ -1124,9 +1314,9 @@ def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
     scored: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def add_candidates(value: Any, *, position_bias: float, core_fragment: bool) -> None:
+    def add_candidates(value: Any, *, core_fragment: bool) -> None:
         fragments = _query_term_fragments(value, limit=3) or [_clean_query_text(value)]
-        for index, fragment in enumerate(fragments):
+        for fragment in fragments:
             cleaned = _clean_query_text(fragment)
             normalized = _normalize_query_fragment(cleaned)
             if (
@@ -1140,12 +1330,10 @@ def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
             score = _query_candidate_score(
                 cleaned,
                 bundle_score=bundle_score,
-                position=index,
+                origins=bundle_origins,
             )
             if core_fragment or normalized in core_normalized:
                 score += 0.32
-            elif position_bias > 0:
-                score -= position_bias
             scored.append(
                 {
                     "query": cleaned,
@@ -1155,14 +1343,16 @@ def _bundle_query_candidates(bundle: dict[str, Any]) -> list[str]:
             )
 
     for value in core_values:
-        add_candidates(value, position_bias=0.0, core_fragment=True)
+        add_candidates(value, core_fragment=True)
     for value in stored_values:
-        add_candidates(value, position_bias=0.08, core_fragment=False)
+        add_candidates(value, core_fragment=False)
 
     scored.sort(
         key=lambda item: (
             -float(item.get("score") or 0.0),
             -int(bool(item.get("core"))),
+            -_bundle_fragment_priority_score(str(item.get("query") or ""), seen_queries=set()),
+            -_pressure_fragment_score(str(item.get("query") or "")),
             -_fragment_specificity_score(str(item.get("query") or "")),
             len(str(item.get("query") or "")),
             str(item.get("query") or ""),
@@ -1216,10 +1406,28 @@ def _query_candidate_score(
     cleaned = _clean_query_text(query)
     if not cleaned:
         return float("-inf")
-    del origins
-    score = float(bundle_score or 0.0) - position * 0.08
-    if direct_reference:
-        score += 0.0
+    del position
+    score = float(bundle_score or 0.0)
+    score += min(_pressure_fragment_score(cleaned), 2.8) * 0.78
+    score += min(_fragment_specificity_score(cleaned), 1.8) * 0.26
+    if _discovery_fragment_has_case_object(cleaned):
+        score += 0.34
+    origin_set = {
+        str(item).strip()
+        for item in list(origins or [])
+        if str(item).strip()
+    }
+    if origin_set & DISCOVERY_OUTSIDE_ORIGINS:
+        if _discovery_fragment_has_case_object(cleaned) or _pressure_fragment_score(cleaned) >= 1.0:
+            score += 0.3
+        else:
+            score += 0.08
+    elif origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS and not _discovery_fragment_has_case_object(cleaned):
+        score -= 0.24 if _pressure_fragment_score(cleaned) < 1.0 else 0.12
+    if direct_reference and (
+        _discovery_fragment_has_case_object(cleaned) or _pressure_fragment_score(cleaned) >= 1.1
+    ):
+        score += 0.14
     if len(cleaned) >= 8:
         score += 0.12
     if len(cleaned) >= 18:
@@ -1246,6 +1454,34 @@ def _query_candidate_score(
         score += 0.14
     if _looks_like_source_title_shell(cleaned):
         score -= 0.55
+    return round(score, 3)
+
+
+def _bundle_query_priority_score(bundle: dict[str, Any]) -> float:
+    focus = str(bundle.get("focus") or bundle.get("query") or "").strip()
+    pressure = str(bundle.get("pressure_summary") or bundle.get("conflict_note") or bundle.get("rationale") or "").strip()
+    support_signals = [
+        str(item).strip()
+        for item in list(bundle.get("support_signals") or [])
+        if str(item).strip()
+    ]
+    origins = {
+        str(item).strip()
+        for item in list(bundle.get("audit_origins") or bundle.get("origins") or [])
+        if str(item).strip()
+    }
+    score = float(bundle.get("score") or 0.0)
+    score += min(_pressure_fragment_score(pressure), 2.8) * 0.82
+    score += min(_pressure_fragment_score(focus), 2.4) * 0.28
+    score += min(_fragment_specificity_score(focus or pressure), 1.8) * 0.18
+    if support_signals:
+        score += min(len(support_signals), 3) * 0.08
+    if origins & DISCOVERY_OUTSIDE_ORIGINS and (
+        _discovery_fragment_has_case_object(focus or pressure) or _pressure_fragment_score(pressure or focus) >= 1.0
+    ):
+        score += 0.3
+    if _looks_like_source_title_shell(focus):
+        score -= 0.35
     return round(score, 3)
 
 
@@ -1329,6 +1565,8 @@ def _rank_query_candidates(
     scored.sort(
         key=lambda item: (
             -float(item.get("score") or 0.0),
+            -_bundle_fragment_priority_score(str(item.get("query") or ""), seen_queries=set()),
+            -_pressure_fragment_score(str(item.get("query") or "")),
             -_fragment_specificity_score(str(item.get("query") or "")),
             len(str(item.get("query") or "")),
             str(item.get("query") or ""),
@@ -1394,7 +1632,7 @@ def _discovery_query_bundles(
     )
     bundles: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
-    for root in _prioritize_root_fragments(ranked_fragments):
+    for root in _prioritize_bundle_roots(ranked_fragments):
         bundle = _build_discovery_bundle(root, ranked_fragments, seen_queries=seen_queries)
         if not bundle:
             continue
@@ -1419,7 +1657,9 @@ def _research_query_pool(
     ordered_bundles = sorted(
         list(bundles),
         key=lambda item: (
+            -_bundle_query_priority_score(item),
             -float(item.get("score") or 0.0),
+            -_pressure_fragment_score(str(item.get("pressure_summary") or item.get("focus") or "")),
             -len(list(item.get("fetch_terms") or item.get("queries") or [])),
             -len(list(item.get("terms") or [])),
             str(item.get("focus") or item.get("query") or ""),
@@ -2136,6 +2376,220 @@ def _world_signal_snapshot(
     return snapshot[:limit]
 
 
+def _world_entry_signal_type(family: str) -> str:
+    normalized = str(family or "").strip()
+    if normalized == "discovery_bundle":
+        return "world-bundle"
+    if normalized == "community_breakouts":
+        return "community-breakout"
+    if normalized == "github_trending":
+        return "github"
+    if normalized == "zhihu_hot":
+        return "zhihu"
+    if normalized in {"prl_recent", "conference_recent", "crossref_recent", "arxiv_latest"}:
+        return "paper"
+    if normalized in {"classic_readings", "classic_index", "marxists"}:
+        return "classic"
+    return "external"
+
+
+def _world_entry_priority_adjustment(
+    *,
+    title: str,
+    pressure: str,
+    origins: list[str] | None = None,
+    family: str = "",
+) -> float:
+    title_text = str(title or "").strip()
+    pressure_text = str(pressure or "").strip()
+    origin_set = {
+        str(origin).strip()
+        for origin in list(origins or [])
+        if str(origin).strip()
+    }
+    object_text = " ".join(part for part in (title_text, pressure_text) if part)
+    has_object = _discovery_fragment_has_case_object(object_text)
+    pressure_score = _pressure_fragment_score(pressure_text or title_text)
+    title_score = _pressure_fragment_score(title_text)
+    score = 0.0
+    if origin_set & DISCOVERY_OUTSIDE_ORIGINS:
+        score += 0.18
+        if has_object or pressure_score >= 1.0:
+            score += 0.14
+    elif origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS:
+        if not has_object:
+            score -= 0.28
+        if pressure_score < 1.25:
+            score -= 0.2
+    if family in {"community_breakouts", "open_web_search", "manual_web", "zhihu_hot"} and (
+        has_object or pressure_score >= 1.0
+    ):
+        score += 0.08
+    if _looks_like_source_title_shell(title_text) and pressure_score > title_score:
+        score += 0.05
+    return round(score, 3)
+
+
+def _world_entry_points(
+    *,
+    discovery_bundles: list[dict[str, Any]],
+    selected_readings: list[dict[str, Any]],
+    raw_candidates: list[dict[str, Any]],
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    def display_title(title: Any, *, pressure: str, summary: str) -> str:
+        cleaned_title = truncate_text(str(title or "").strip(), 120)
+        pressure_text = truncate_text(pressure or summary, 120)
+        if not pressure_text:
+            return cleaned_title
+        if not cleaned_title:
+            return pressure_text
+        if _looks_like_source_title_shell(cleaned_title):
+            return pressure_text
+        if _pressure_fragment_score(pressure_text) >= 1.4 and _pressure_fragment_score(cleaned_title) < 1.0:
+            return pressure_text
+        return cleaned_title
+
+    ranked: list[dict[str, Any]] = []
+    for index, bundle in enumerate(discovery_bundles or []):
+        support_signals = [
+            truncate_text(str(value or "").strip(), 88)
+            for value in (
+                list(bundle.get("support_signals") or [])
+                + list(bundle.get("lenses") or [])
+            )
+            if str(value or "").strip()
+        ][:3]
+        pressure = truncate_text(
+            str(bundle.get("pressure_summary") or "").strip()
+            or "；".join(_bundle_signal_values(bundle)[:3]),
+            220,
+        )
+        summary = truncate_text(
+            str(bundle.get("rationale") or "").strip()
+            or pressure,
+            220,
+        )
+        title = display_title(bundle.get("focus") or bundle.get("query"), pressure=pressure, summary=summary)
+        if not title or not pressure:
+            continue
+        evidence = "；".join(signal for signal in support_signals if signal and signal != pressure)
+        score = _world_snapshot_score(
+            title=title,
+            pressure=pressure,
+            item=bundle,
+            bundle_bonus=0.45,
+        )
+        score += _world_entry_priority_adjustment(
+            title=title,
+            pressure=pressure,
+            origins=list(bundle.get("audit_origins") or []),
+            family="discovery_bundle",
+        )
+        ranked.append(
+            {
+                "title": title,
+                "family": "discovery_bundle",
+                "signal_type": "world-bundle",
+                "summary": summary,
+                "pressure": pressure,
+                "evidence": evidence,
+                "support_signals": support_signals,
+                "audit_origins": [
+                    str(origin).strip()
+                    for origin in list(bundle.get("audit_origins") or [])
+                    if str(origin).strip()
+                ][:3],
+                "world_score": round(score, 3),
+                "_source_index": index,
+                "_dedupe_key": _normalize_query_fragment(title) or _normalize_query_fragment(pressure),
+            }
+        )
+
+    for bucket_name, bucket_bonus, items in (
+        ("selected", 0.28, selected_readings or []),
+        ("raw", 0.0, raw_candidates or []),
+    ):
+        for index, item in enumerate(items):
+            family = str(item.get("family") or "").strip()
+            pressure = _world_snapshot_pressure_text(item)
+            summary = truncate_text(
+                str(item.get("summary") or item.get("excerpt") or item.get("abstract") or pressure).strip(),
+                220,
+            )
+            title = display_title(item.get("title"), pressure=pressure, summary=summary)
+            if not title:
+                continue
+            evidence = truncate_text(
+                str(
+                    item.get("excerpt")
+                    or item.get("summary")
+                    or item.get("abstract")
+                    or item.get("note")
+                    or item.get("relevance_note")
+                    or ""
+                ).strip(),
+                180,
+            )
+            candidate_text = _reading_candidate_text(item)
+            score = _world_snapshot_score(title=title, pressure=pressure or summary, item=item)
+            score += _reading_evidence_density_bonus(candidate_text)
+            score += bucket_bonus
+            score += _world_entry_priority_adjustment(
+                title=title,
+                pressure=pressure or summary,
+                origins=list(item.get("audit_origins") or item.get("origins") or []),
+                family=family,
+            )
+            ranked.append(
+                {
+                    "title": title,
+                    "family": family,
+                    "signal_type": _world_entry_signal_type(family),
+                    "summary": summary,
+                    "pressure": pressure or summary,
+                    "evidence": evidence,
+                    "url": str(item.get("url") or "").strip(),
+                    "published_at": str(item.get("published_at") or "").strip(),
+                    "world_score": round(score, 3),
+                    "_source_bucket": bucket_name,
+                    "_source_index": index,
+                    "_dedupe_key": str(item.get("url") or "").strip()
+                    or _normalize_query_fragment(title)
+                    or _normalize_query_fragment(pressure or summary),
+                }
+            )
+
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("world_score") or 0.0),
+            -len(str(item.get("pressure") or "")),
+            -len(str(item.get("evidence") or "")),
+            str(item.get("_source_bucket") or ""),
+            int(item.get("_source_index") or 0),
+            str(item.get("title") or ""),
+        )
+    )
+
+    entry_points: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in ranked:
+        key = str(item.get("_dedupe_key") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        entry_points.append(
+            {
+                key: value
+                for key, value in item.items()
+                if not str(key).startswith("_")
+            }
+        )
+        if len(entry_points) >= limit:
+            break
+    return entry_points[:limit]
+
+
 def _bundle_alignment_terms(discovery_bundles: list[dict[str, Any]] | None, *, limit: int = 14) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
@@ -2402,6 +2856,16 @@ def refresh_external_information(
         discovery_bundles=discovery_bundles,
     )
     reading_notes = [_reading_note(item) for item in selected_readings]
+    world_signal_snapshot = _world_signal_snapshot(
+        discovery_bundles=discovery_bundles,
+        selected_readings=selected_readings,
+        raw_candidates=raw_candidates,
+    )
+    world_entry_points = _world_entry_points(
+        discovery_bundles=discovery_bundles,
+        selected_readings=selected_readings,
+        raw_candidates=raw_candidates,
+    )
     bibliography = [
         {
             "title": str(item.get("title") or "").strip(),
@@ -2416,6 +2880,7 @@ def refresh_external_information(
         "registry_families": registry_families,
         "raw_candidates": raw_candidates,
         "selected_readings": selected_readings,
+        "world_entry_points": world_entry_points,
         "reading_notes": reading_notes,
         "bibliography": bibliography,
         "community_breakouts": community_breakouts,
@@ -2434,11 +2899,7 @@ def refresh_external_information(
         "discovery_fetch_terms": discovery_fetch_terms,
         "research_queries": research_queries,
         "research_interest_profile": read_json(RESEARCH_INTEREST_PROFILE_PATH, default=_bootstrap_interest_profile()),
-        "world_signal_snapshot": _world_signal_snapshot(
-            discovery_bundles=discovery_bundles,
-            selected_readings=selected_readings,
-            raw_candidates=raw_candidates,
-        ),
+        "world_signal_snapshot": world_signal_snapshot,
     }
     for family in registry_families:
         state_key = str(family.get("state_key") or family.get("name") or "").strip()
