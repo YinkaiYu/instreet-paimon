@@ -857,6 +857,18 @@ def _planner_public_kind_display_name(kind: str) -> str:
     }.get(str(kind or "").strip(), "公开动作")
 
 
+def _lane_reason_label(entry: dict[str, Any], *, limit: int = 26) -> str:
+    focus = _object_level_pressure_text(
+        entry.get("source_text"),
+        entry.get("reason"),
+        fallback="",
+    )
+    cleaned = truncate_text(focus, limit).strip()
+    if cleaned and not cleaned.startswith("当前 "):
+        return f"“{cleaned}”"
+    return _planner_public_kind_display_name(str(entry.get("kind") or ""))
+
+
 def _preferred_public_idea(ideas: list[dict[str, Any]], public_override: dict[str, Any]) -> dict[str, Any]:
     preferred_kinds = [
         str(item).strip()
@@ -869,6 +881,34 @@ def _preferred_public_idea(ideas: list[dict[str, Any]], public_override: dict[st
                 if str(idea.get("kind") or "").strip() == kind:
                     return idea
     return ideas[0] if ideas else {}
+
+
+def _public_idea_pressure_label(idea: dict[str, Any], *, limit: int = 34) -> str:
+    pressure = _object_level_pressure_text(
+        *(idea.get("source_signals") or []),
+        idea.get("why_now"),
+    )
+    cleaned_pressure = truncate_text(pressure, limit).strip()
+    if cleaned_pressure and not cleaned_pressure.startswith("当前 "):
+        return cleaned_pressure
+    title = truncate_text(str(idea.get("title") or "").strip(), limit).strip()
+    if title and not _source_title_shell(title):
+        return title
+    return cleaned_pressure or title
+
+
+def _literary_pick_pressure_text(literary_pick: dict[str, Any]) -> str:
+    chapter_plan = literary_pick.get("chapter_plan") or {}
+    work_title = str(literary_pick.get("work_title") or "当前连载").strip()
+    planned_title = str(literary_pick.get("next_planned_title") or "下一章").strip()
+    fallback = f"{work_title}：{planned_title}".strip("：")
+    return _object_level_pressure_text(
+        chapter_plan.get("summary"),
+        chapter_plan.get("key_conflict"),
+        chapter_plan.get("hook"),
+        literary_pick.get("summary"),
+        fallback=fallback,
+    )
 
 
 def _recommended_next_action_from_live_pressure(
@@ -916,11 +956,13 @@ def _recommended_next_action_from_live_pressure(
         )
         if not unresolved_failures and not active_discussions:
             public_score += 0.9
+        pressure_label = _public_idea_pressure_label(public_idea)
+        public_target = f"“{pressure_label}”这条公开判断" if pressure_label else "这条公开判断"
         choices.append(
             {
                 "name": "public",
                 "score": public_score,
-                "label": f"公共窗口还在，但只有它比评论、修复和外部切口更强时，才先发这轮最强的{_planner_public_kind_display_name(str(public_idea.get('kind') or ''))}",
+                "label": f"公共窗口还在，但只有它比评论、修复和外部切口更强时，才先发{public_target}",
             }
         )
     if active_discussions:
@@ -1002,6 +1044,24 @@ def default_hook_type(board: str) -> str:
 
 def default_cta_type(board: str) -> str:
     return str(board_profile(board).get("cta_type") or "comment-scene")
+
+
+def preferred_cta_type(kind: str, board: str, requested: Any = None) -> str:
+    cleaned_kind = str(kind or "").strip()
+    cleaned_board = str(board or "").strip()
+    if cleaned_board not in BOARD_WRITING_PROFILES:
+        cleaned_board = "square"
+    chosen = str(requested or "").strip() or default_cta_type(cleaned_board)
+    if cleaned_kind == "group-post":
+        return "bring-a-case"
+    if cleaned_kind == "theory-post" and chosen in {
+        "comment-scene",
+        "comment-diagnostic",
+        "comment-case-or-save",
+        "bring-a-case",
+    }:
+        return "comment-variant" if cleaned_board == "square" else "take-a-position"
+    return chosen
 
 
 def board_generation_guidance(board: str) -> str:
@@ -2322,7 +2382,7 @@ def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled
                 "lane_scores": [],
                 "rationale": "当前没有够格的公开 lane，也没有必要拿默认残压硬补空心题。",
             }
-        lane_text = "、".join(str(item.get("kind") or "") for item in fallback_ranked[:max_slots] if str(item.get("kind") or ""))
+        lane_text = "、".join(_lane_reason_label(item) for item in fallback_ranked[:max_slots])
         return {
             "selected_kinds": [],
             "focus_kind": "",
@@ -2344,23 +2404,25 @@ def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled
         if len(selected_kinds) >= max_slots:
             break
     selected_entries = [item for item in ranked if str(item.get("kind") or "") in selected_kinds][: len(selected_kinds)]
-    lane_text = "、".join(str(item.get("kind") or "") for item in ranked[:max_slots])
-    selected_text = "、".join(selected_kinds)
+    lane_text = "、".join(_lane_reason_label(item) for item in ranked[:max_slots])
+    selected_text = "、".join(_lane_reason_label(item) for item in selected_entries)
     focus_kind = _dynamic_lane_focus_kind(selected_entries, signal_summary)
+    focus_entry = next((item for item in selected_entries if str(item.get("kind") or "").strip() == focus_kind), {})
+    focus_label = _lane_reason_label(focus_entry) if focus_entry else _planner_public_kind_display_name(focus_kind)
     backup_kinds = [kind for kind in selected_kinds if kind != focus_kind] if focus_kind else list(selected_kinds)
     if not focus_kind and selected_kinds:
         rationale = f"本轮公开短名单并列保留 {selected_text}，先让对象级压力继续竞争，不提前钉死主位。"
     elif backup_kinds:
-        rationale = f"本轮公开短名单先看 {focus_kind}，并列候选保留 {selected_text}。"
+        rationale = f"本轮公开短名单先看 {focus_label}，并列候选保留 {selected_text}。"
     else:
-        rationale = f"本轮公开短名单先看 {focus_kind}，其他 lane 暂不为了对称感硬补。"
+        rationale = f"本轮公开短名单先看 {focus_label}，其他观察暂不为了对称感硬补。"
     return {
         "selected_kinds": selected_kinds[:max_slots],
         "focus_kind": focus_kind,
         "backup_kinds": backup_kinds[: (max_slots if not focus_kind else max(0, max_slots - 1))],
         "lane_scores": ranked[:max_slots],
         "rationale": (
-            f"{rationale} 动态排序为 {lane_text}；较弱 lane 让位给更强的现场压力。"
+            f"{rationale} 动态排序为 {lane_text}；较弱观察让位给更强的现场压力。"
         ),
     }
 
@@ -2747,6 +2809,22 @@ def _theory_title_memory_capability_shell_reason(title: str) -> str:
     if _contains_any(title_text, THEORY_TITLE_CONCRETE_HANDOFF_TOKENS):
         return ""
     return "标题先把“会翻聊天记录 / 记得你”的记忆能力摆成卖点，再用“重新提交 / 继续等待”这种结果词兜症状，却没把驳回、签收或回写断口摆出来。读者先看到的是功能演示，不是责任断口。"
+
+
+def _theory_title_memory_spec_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not _contains_any(title_text, THEORY_TITLE_MEMORY_CAPABILITY_TOKENS):
+        return ""
+    if not re.search(
+        r"(?:\d+|[一二三四五六七八九十百千万两]+)\s*(?:条|份|轮|次|段|页).{0,4}(?:记录|聊天记录|历史记录|上下文|记忆)",
+        title_text,
+    ):
+        return ""
+    if not (_contains_any(title_text, THEORY_TITLE_ENTRY_STAKE_TOKENS) or "为什么" in title_text or "还是" in title_text):
+        return ""
+    return "标题先拿“200 条记录”这类记忆规格当门面，再在后半句补签收或责任；读者更容易把它读成产品参数失灵，不会第一眼把它当成接手责任的制度判断。"
 
 
 def _theory_title_handoff_gap_reason(title: str) -> str:
@@ -3744,16 +3822,109 @@ def _world_seed_texts(signal_summary: dict[str, Any], *, limit: int = 8) -> list
         )
         if seed:
             texts.append(seed)
-    texts.extend(str((item or {}).get("text") or "").strip() for item in signal_summary.get("user_topic_hints") or [])
     return _dedupe_texts([text for text in texts if text])[:limit]
+
+
+def _world_seed_units(signal_summary: dict[str, Any], *, limit: int = 8) -> list[str]:
+    external_information = signal_summary.get("external_information") or {}
+    units: list[str] = []
+    for item in external_information.get("world_entry_points") or []:
+        seed = _object_level_pressure_text(
+            item.get("pressure"),
+            item.get("summary"),
+            item.get("evidence"),
+            fallback=str(item.get("title") or "").strip(),
+        )
+        if seed:
+            units.append(seed)
+    for bundle in external_information.get("discovery_bundles") or []:
+        seed = (
+            _world_bundle_focus_source(bundle)
+            or _object_level_pressure_text(
+                bundle.get("pressure_summary"),
+                bundle.get("conflict_note"),
+                bundle.get("rationale"),
+                fallback=str(bundle.get("query") or "").strip(),
+            )
+        )
+        if seed:
+            units.append(seed)
+    for item in external_information.get("world_signal_snapshot") or []:
+        seed = _object_level_pressure_text(
+            item.get("pressure"),
+            item.get("summary"),
+            fallback=str(item.get("title") or "").strip(),
+        )
+        if seed:
+            units.append(seed)
+    for item in external_information.get("reading_notes") or []:
+        seed = _preferred_signal_seed_text(
+            item,
+            field_order=("summary", "excerpt", "title"),
+            limit=72,
+        )
+        if seed:
+            units.append(seed)
+    for item in _iter_external_world_candidates(external_information, limit=6):
+        seed = _preferred_signal_seed_text(
+            item,
+            field_order=("pressure", "relevance_note", "summary", "abstract", "excerpt", "note", "title"),
+            limit=72,
+        )
+        if seed:
+            units.append(seed)
+    return _dedupe_texts([text for text in units if text])[:limit]
+
+
+def _hint_matching_world_texts(
+    hint: dict[str, Any],
+    signal_summary: dict[str, Any],
+    *,
+    limit: int = 2,
+) -> list[str]:
+    hint_text = _concrete_focus_text(
+        (hint or {}).get("text"),
+        (hint or {}).get("note"),
+        limit=72,
+    )
+    if not hint_text or _looks_like_source_title_shell(hint_text):
+        return []
+    hint_fragments = {
+        _normalize_title(fragment)
+        for fragment in _meaningful_fragments(hint_text)
+        if _normalize_title(fragment)
+    }
+    if not hint_fragments:
+        return []
+    world_texts = [
+        text
+        for text in _world_seed_texts(signal_summary, limit=8)
+        if _normalize_title(text) != _normalize_title(hint_text)
+    ]
+    if not world_texts:
+        return []
+    matches: list[str] = []
+    for world_text in world_texts:
+        world_fragments = {
+            _normalize_title(fragment)
+            for fragment in _meaningful_fragments(world_text)
+            if _normalize_title(fragment)
+        }
+        if not world_fragments or not (hint_fragments & world_fragments):
+            continue
+        matches.append(world_text)
+        if len(matches) >= limit:
+            break
+    return _dedupe_texts(matches)[:limit]
 
 
 def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str, Any]:
     world_texts = _world_seed_texts(signal_summary, limit=8)
+    world_units = _world_seed_units(signal_summary, limit=8)
     unresolved = list(signal_summary.get("unresolved_failures") or [])
     reply_posts = list(signal_summary.get("pending_reply_posts") or [])
     group_hot_posts = list(((signal_summary.get("group_watch") or {}).get("hot_posts") or [])[:3])
-    primary_world = world_texts[0] if world_texts else ""
+    primary_world = world_units[0] if world_units else (world_texts[0] if world_texts else "")
     failure_focus = (
         _preferred_signal_seed_text(unresolved[0], field_order=("summary", "post_title", "error"), limit=72)
         if unresolved
@@ -3776,8 +3947,10 @@ def _fallback_track_seed(track: str, signal_summary: dict[str, Any]) -> dict[str
         primary = group_focus or failure_focus or primary_world
     if not primary:
         return {}
-    world_snapshot = _object_level_pressure_text(*world_texts[:3], fallback=primary)
+    world_snapshot = _object_level_pressure_text(*(world_units[:3] or world_texts[:3]), fallback=primary)
     if track == "theory":
+        if len(world_units) < 2:
+            return {}
         source_text = _concrete_focus_text(primary)
         if not source_text:
             return {}
@@ -4198,6 +4371,22 @@ def _idea_theory_specificity_issues(idea: dict[str, Any]) -> list[str]:
     source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
     title_text = str(idea.get("title") or "").strip()
     hard_service_signals = sum(1 for item in source_signals if _source_signal_has_hard_service_object(item))
+    theory_unit = _joined_idea_text(
+        idea.get("concept_core"),
+        idea.get("mechanism_core"),
+        idea.get("boundary_note"),
+        idea.get("theory_position"),
+        idea.get("practice_program"),
+    )
+    memory_entry_tokens = THEORY_TITLE_MEMORY_CAPABILITY_TOKENS + (
+        "历史凭证",
+        "历史偏好",
+        "历史引用",
+        "引用旧记录",
+        "沿用旧记录",
+        "旧记录裁决",
+        "记忆裁决",
+    )
     if not anchors:
         return ["缺少题目自己的概念锚点"]
     if _idea_uses_low_autonomy_language(idea):
@@ -4208,6 +4397,10 @@ def _idea_theory_specificity_issues(idea: dict[str, Any]) -> list[str]:
         issues.append("题眼借了拟共情壳，但外部或跨场景证据还只有一股信号")
     if _theory_title_memory_capability_shell_reason(title_text) and hard_service_signals < 2:
         issues.append("题眼先借“会翻聊天记录 / 记得你”的能力感起题，但 source_signals 里还没交够两个带驳回、回写、单据或按钮断口的硬样本")
+    if _theory_title_memory_spec_shell_reason(title_text) and hard_service_signals < 2:
+        issues.append("题眼先拿记忆条数或上下文规格起题，但外部或跨场景样本还没交够两个带驳回、回写、单据或按钮断口的硬例子")
+    if _theory_title_memory_spec_shell_reason(title_text) and not _contains_any(theory_unit, memory_entry_tokens):
+        issues.append("标题拿记忆规格起题，理论单元却没有继续写清历史引用怎样改变签收、驳回或回写，入口机制在正文里掉线了")
     generic_fields = sum(
         1
         for field in ("concept_core", "mechanism_core", "boundary_note", "theory_position", "practice_program")
@@ -4289,6 +4482,14 @@ def _idea_theory_board_fit_issue(idea: dict[str, Any]) -> str:
         and hard_service_signals < 2
     ):
         return "这题标题先卖“会翻聊天记录 / 记得你”的能力感，正文却已经在讲记忆引用后的接手责任；如果没有两个带驳回、回写或单据断口的硬样本，就别继续放在 square。"
+    if (
+        _theory_title_memory_spec_shell_reason(title_text)
+        and structural_hits >= 4
+        and str(idea.get("concept_core") or "").strip()
+        and str(idea.get("mechanism_core") or "").strip()
+        and hard_service_signals < 2
+    ):
+        return "这题标题先拿“200 条记录”这类记忆规格做门面，正文却已经在讲签收和责任重排；如果没有两股带单据、按钮或回写断口的硬样本，就别继续放在 square。"
     if _title_has_public_structural_anchor(title_text) or _contains_any(title_text, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
         return ""
     if len(source_signals) > 1:
@@ -4503,6 +4704,8 @@ def _audit_generated_idea(
         failure_reason = empathy_reason
     elif kind == "theory-post" and (memory_reason := _theory_title_memory_capability_shell_reason(str(audited.get("title") or ""))):
         failure_reason = memory_reason
+    elif kind == "theory-post" and (memory_spec_reason := _theory_title_memory_spec_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = memory_spec_reason
     elif kind == "theory-post" and (handoff_reason := _theory_title_handoff_gap_reason(str(audited.get("title") or ""))):
         failure_reason = handoff_reason
     elif kind == "theory-post" and (meta_reason := _theory_title_meta_overhang_reason(str(audited.get("title") or ""))):
@@ -4702,7 +4905,7 @@ def _repair_rejected_public_candidate(
                         "submolt": board,
                         "board_profile": board,
                         "hook_type": default_hook_type(board),
-                        "cta_type": default_cta_type(board),
+                        "cta_type": preferred_cta_type("theory-post", board),
                         "series_key": f"theory-dynamic-{_normalize_title(focus)[:24] or 'live'}",
                         "series_prefix": _series_prefix(title),
                         "is_followup": is_followup,
@@ -4756,7 +4959,7 @@ def _repair_rejected_public_candidate(
                         "submolt": board,
                         "board_profile": board,
                         "hook_type": default_hook_type(board),
-                        "cta_type": "bring-a-case" if kind == "group-post" else default_cta_type(board),
+                        "cta_type": preferred_cta_type(kind, board),
                         "series_key": f"{track}-dynamic-{_normalize_title(focus)[:24] or 'live'}",
                         "series_prefix": _series_prefix(title),
                         "is_followup": is_followup,
@@ -5694,11 +5897,12 @@ def _public_hot_forum_override(
     ):
         priority_bonus += 0.08
 
+    trigger_label = truncate_text(trigger_pressure or trigger_title or "当前样本", 36)
     reason = (
-        f"公共热度正在把《{truncate_text(trigger_title, 36) or '当前样本'}》往台前推；"
+        f"公共热度正在把“{trigger_label}”往台前推；"
         "但它只该给已经长成的公共候选加一点顺风，不能压过修复、守场或外部切口。"
     )
-    if trigger_pressure:
+    if trigger_pressure and trigger_pressure != trigger_label:
         reason += f" 咬住的对象是：{trigger_pressure}。"
     elif trigger_board:
         reason += f" 触发现场落在 `{trigger_board}`。"
@@ -6192,7 +6396,10 @@ def _dynamic_opportunities(
             },
         )
     for hint in signal_summary.get("user_topic_hints", [])[:4]:
-        hint_text = str(hint.get("text") or "").strip()
+        hint_matches = _hint_matching_world_texts(hint, signal_summary)
+        if not hint_matches:
+            continue
+        hint_text = _concrete_focus_text(hint.get("text"), hint.get("note"), limit=72)
         if not hint_text:
             continue
         track = _infer_hint_track(hint)
@@ -6201,10 +6408,16 @@ def _dynamic_opportunities(
             track,
             "user-hint",
             hint_text,
-            why_now=str(hint.get("note") or "").strip(),
+            why_now=_object_level_pressure_text(
+                hint.get("note"),
+                *hint_matches,
+                fallback=str(hint.get("note") or hint_matches[0] or "").strip(),
+            ),
             preferred_board=preferred_board,
-            quality_score=2.5,
-            freshness_score=1.5,
+            quality_score=1.6 + min(len(hint_matches), 2) * 0.18,
+            freshness_score=0.8,
+            evidence_hint=truncate_text("、".join(hint_matches), 72),
+            world_score=0.45,
         )
 
     ranked = sorted(
@@ -6499,6 +6712,7 @@ def _generate_codex_ideas(
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
    - `philosophy` 默认：`board_profile=philosophy`, `hook_type=paradox`, `cta_type=take-a-position`
    - `skills` 默认：`board_profile=skills`, `hook_type=practical-yield`, `cta_type=comment-case-or-save`
+   - 但 `theory-post` 发在 `square` 时，不要再用 `comment-scene` 让评论区补第一条证据；优先改成 `comment-variant` 或 `take-a-position`，只收反例、变体和不同判断。
 19. 如果实时信号里出现 `rising_hot_posts`，把它们当成正在起飞的新兴热点样本线，不要只盯成熟热榜。
 20. 成熟外部“高赞样本”默认只认 `>=200` 赞；`rising_hot_posts` 例外，它们代表正在起飞的样本，不要和成熟高热混在一起。
 21. 允许学习别人的问题压力和盲点，但不要学习标题骨架、系列包装或 IP 话术；尤其不要出现这些保留词：{", ".join(RESERVED_TITLE_PHRASES)}。
@@ -6587,9 +6801,22 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         )
     title = _stutter_safe_title(title, source_text)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
-    why_now = str(bundle.get("why_now") or lead.get("why_now") or "理论线需要接住现场变化。")
+    why_now = _bundle_why_now_text(bundle, lead, fallback=source_text)
+    if not why_now:
+        return {}
     theory_fields = _theory_fallback_fields(bundle, lead)
     if not theory_fields:
+        return {}
+    angle = str(
+        bundle.get("angle_hint")
+        or lead.get("angle_hint")
+        or (
+            f"围绕“{truncate_text(source_text, 16)}”把解释动作、接手位置和等待代价压进同一条制度链。"
+            if source_text
+            else ""
+        )
+    ).strip()
+    if not angle:
         return {}
     return {
         "kind": "theory-post",
@@ -6597,9 +6824,9 @@ def _fallback_theory_idea(signal_summary: dict[str, Any], recent_titles: list[st
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
-        "cta_type": default_cta_type(board),
+        "cta_type": preferred_cta_type("theory-post", board),
         "title": title,
-        "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把眼前现象推进成更一般的社会判断。"),
+        "angle": angle,
         "why_now": why_now,
         "source_signals": source_signals,
         "novelty_basis": theory_fields["novelty_basis"],
@@ -6648,9 +6875,22 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     title = _stutter_safe_title(title, bundle_focus_title or focus_title)
     title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = _signal_bundle_source_signals("tech", bundle, signal_summary)
-    why_now = str(bundle.get("why_now") or lead.get("why_now") or "技术线需要正面回应当前运行压力。")
+    why_now = _bundle_why_now_text(bundle, lead, fallback=str(bundle.get("focus_text") or focus_title or ""))
+    if not why_now:
+        return {}
     method_fields = _method_fallback_fields(bundle, lead, track="tech")
     if not method_fields:
+        return {}
+    angle = str(
+        bundle.get("angle_hint")
+        or lead.get("angle_hint")
+        or (
+            f"围绕“{truncate_text(str(bundle.get('focus_text') or focus_title), 16)}”把对象、触发条件、接手动作和复核回写压成同一套方法。"
+            if str(bundle.get("focus_text") or focus_title).strip()
+            else ""
+        )
+    ).strip()
+    if not angle:
         return {}
     return {
         "kind": "tech-post",
@@ -6658,9 +6898,9 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
-        "cta_type": default_cta_type(board),
+        "cta_type": preferred_cta_type("tech-post", board),
         "title": title,
-        "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把现场约束拆成系统设计与执行顺序。"),
+        "angle": angle,
         "why_now": why_now,
         "source_signals": source_signals,
         "novelty_basis": method_fields["novelty_basis"],
@@ -6709,8 +6949,22 @@ def _fallback_group_idea(
         series_prefix=base_series,
     )
     source_signals = _signal_bundle_source_signals("group", bundle, signal_summary)
+    why_now = _bundle_why_now_text(bundle, lead, fallback=str(bundle.get("focus_text") or raw_title or ""))
+    if not why_now:
+        return {}
     method_fields = _method_fallback_fields(bundle, lead, track="group")
     if not method_fields:
+        return {}
+    angle = str(
+        bundle.get("angle_hint")
+        or lead.get("angle_hint")
+        or (
+            f"围绕“{truncate_text(str(bundle.get('focus_text') or raw_title), 16)}”把约束、反例入口和协议边界改写成一次可复跑实验。"
+            if str(bundle.get("focus_text") or raw_title).strip()
+            else ""
+        )
+    ).strip()
+    if not angle:
         return {}
     return {
         "kind": "group-post",
@@ -6721,8 +6975,8 @@ def _fallback_group_idea(
         "hook_type": default_hook_type("skills"),
         "cta_type": "bring-a-case",
         "title": title,
-        "angle": str(bundle.get("angle_hint") or lead.get("angle_hint") or "把争议最大的约束改写成协议、边界和实验。"),
-        "why_now": str(bundle.get("why_now") or lead.get("why_now") or "小组应该沉淀现场经验。"),
+        "angle": angle,
+        "why_now": why_now,
         "source_signals": source_signals,
         "novelty_basis": method_fields["novelty_basis"],
         "concept_core": method_fields["concept_core"],
@@ -6815,10 +7069,7 @@ def _sanitize_generated_idea(
     sanitized["submolt"] = board
     sanitized["board_profile"] = board
     sanitized["hook_type"] = str(sanitized.get("hook_type") or default_hook_type(board))
-    sanitized["cta_type"] = str(
-        sanitized.get("cta_type")
-        or ("bring-a-case" if kind == "group-post" else default_cta_type(board))
-    )
+    sanitized["cta_type"] = preferred_cta_type(kind, board, sanitized.get("cta_type"))
 
     prefix = _sanitize_reserved_text(
         str(sanitized.get("series_prefix") or _series_prefix(raw_title)).strip(),
@@ -6947,6 +7198,7 @@ def _build_dynamic_ideas(
         track = {"theory-post": "theory", "tech-post": "tech", "group-post": "group"}.get(kind, "")
         if not track:
             return "当前 lane 不可用。"
+        world_seed_count = len(_world_seed_units(signal_summary, limit=3))
         bundle = _track_signal_bundle(track, signal_summary)
         if bundle:
             if _bundle_has_grounding(bundle, track=track):
@@ -6955,14 +7207,18 @@ def _build_dynamic_ideas(
             if track == "group" and signal_types and signal_types <= WEAK_INTERNAL_SIGNAL_TYPES:
                 return "小组帖不能只靠节律、宣传或评论压力起题，至少要绑定案例、失败链或外部样本。"
             if track == "theory":
+                if world_seed_count < 2:
+                    return "当前理论线还只有单一样本或提示残影，没有够格的跨场景证据。"
                 return "当前理论线还没有够格的世界样本或跨场景证据。"
             return "当前方法线还没有够格的失败对象、外部样本或日志证据。"
-        if not _world_seed_texts(signal_summary, limit=3):
+        if world_seed_count <= 0:
             if track == "group":
                 return "小组帖不能只靠节律、宣传或评论压力起题，至少要绑定案例、失败链或外部样本。"
             if track == "theory":
                 return "当前理论线只有内向残压，没有够格的世界样本或跨场景证据。"
             return "当前方法线只有内向残压，没有够格的失败对象、外部样本或日志证据。"
+        if track == "theory" and world_seed_count < 2:
+            return "当前理论线还只有单一样本或提示残影，没有够格的跨场景证据。"
         if track == "group":
             ready = bool(group) and bool(
                 (signal_summary.get("group_watch") or {}).get("hot_posts")
@@ -6979,7 +7235,8 @@ def _build_dynamic_ideas(
         kind = str(idea.get("kind") or "").strip()
         signal_type = str(idea.get("signal_type") or "").strip()
         source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
-        has_world_seed = bool(_world_seed_texts(signal_summary, limit=1))
+        has_world_seed = bool(_world_seed_units(signal_summary, limit=1))
+        world_seed_count = len(_world_seed_units(signal_summary, limit=2))
         if signal_type == "failure":
             return True
         if signal_type == "world-bundle" and not has_world_seed:
@@ -6996,7 +7253,7 @@ def _build_dynamic_ideas(
             )
         if kind == "theory-post":
             return bool(
-                has_world_seed
+                world_seed_count >= 2
                 and
                 len(source_signals) >= 2
                 and any(any(token in item for token in ("外部", "样本", "案例", "公共", "世界")) for item in source_signals)
@@ -7241,7 +7498,19 @@ def build_plan(
 
     if literary_pick:
         planned_title = literary_pick.get("next_planned_title") or "下一章"
-        chapter_summary = (literary_pick.get("chapter_plan") or {}).get("summary")
+        chapter_plan = literary_pick.get("chapter_plan") or {}
+        chapter_summary = chapter_plan.get("summary")
+        chapter_pressure = _literary_pick_pressure_text(literary_pick)
+        chapter_source_signals = _dedupe_texts(
+            [
+                chapter_pressure,
+                _object_level_pressure_text(
+                    chapter_plan.get("key_conflict"),
+                    chapter_plan.get("hook"),
+                    fallback=f"{literary_pick.get('work_title', '当前连载')}：{planned_title}",
+                ),
+            ]
+        )[:2]
         ideas.append(
             {
                 "kind": "literary-chapter",
@@ -7254,13 +7523,10 @@ def build_plan(
                 "source_plan_path": literary_pick.get("plan_path"),
                 "reference_path": literary_pick.get("reference_path"),
                 "content_mode": literary_pick.get("content_mode"),
-                "angle": chapter_summary or "根据连载计划继续推进下一章。",
-                "why_now": "当前活跃文学社作品要按注册表推进，不能因为论坛热点而失去长篇连续性。",
-                "source_signals": [
-                    f"下一部连载：{literary_pick.get('work_title')}",
-                    f"下一章：{planned_title}",
-                ],
-                "novelty_basis": "根据 serial registry 与本地章节计划实时确定，不使用固定轮换口号。",
+                "angle": chapter_summary or str(chapter_plan.get("key_conflict") or chapter_plan.get("hook") or "把这一章真正要翻出来的关系继续推到台前。"),
+                "why_now": chapter_pressure or f"{literary_pick.get('work_title', '当前连载')}：{planned_title}",
+                "source_signals": chapter_source_signals or [f"{literary_pick.get('work_title', '当前连载')}：{planned_title}"],
+                "novelty_basis": "这章要把既定冲突、选择代价和章尾钩子继续往前推，不让长线叙事被短期节律挤成插空任务。",
             }
         )
 

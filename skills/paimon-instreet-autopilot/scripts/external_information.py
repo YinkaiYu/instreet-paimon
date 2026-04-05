@@ -166,7 +166,8 @@ PRESSURE_DISCOVERY_MARKERS = (
     "coordination",
     "write path",
 )
-DISCOVERY_OUTSIDE_ORIGINS = {"community", "competitor", "world-sample", "outside-memory"}
+DISCOVERY_LIVE_OUTSIDE_ORIGINS = {"community", "competitor", "world-sample"}
+DISCOVERY_OUTSIDE_ORIGINS = {*DISCOVERY_LIVE_OUTSIDE_ORIGINS, "outside-memory"}
 DISCOVERY_INTERNAL_ORIGINS = {"agenda", "objective", "manual", "hint", "interest"}
 DISCOVERY_ROOT_OBJECT_MARKERS = (
     "工单",
@@ -761,8 +762,22 @@ def _previous_external_fragments(*, limit: int = 12) -> list[str]:
         "arxiv_preprints",
     ):
         for item in list(state.get(key) or []):
-            if isinstance(item, dict):
-                candidate_items.append(item)
+            if not isinstance(item, dict):
+                continue
+            family = str(item.get("family") or "").strip()
+            title = str(item.get("title") or "").strip()
+            summary = str(item.get("summary") or item.get("excerpt") or item.get("note") or "").strip()
+            pressure = str(item.get("pressure") or item.get("relevance_note") or "").strip()
+            composite_text = " ".join(part for part in (title, pressure, summary) if part).strip()
+            if family == "discovery_bundle":
+                continue
+            if (
+                key == "world_signal_snapshot"
+                and not family
+                and _looks_like_bundle_feedback_shell(composite_text)
+            ):
+                continue
+            candidate_items.append(item)
     fragments: list[str] = []
     seen: set[str] = set()
     for fragment in _context_fragments_from_items(
@@ -824,16 +839,30 @@ def _looks_like_source_title_shell(fragment: str) -> bool:
     return False
 
 
+def _looks_like_bundle_feedback_shell(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    clause_count = len([part for part in re.split(r"[；;。!?！？]+", cleaned) if _clean_query_text(part)])
+    if clause_count >= 3:
+        return True
+    if clause_count >= 2 and len(cleaned) >= 42:
+        return True
+    if "..." in cleaned or "…" in cleaned:
+        return True
+    return False
+
+
 def _discovery_origin_convergence_bonus(origins: list[str]) -> float:
     del origins
     return 0.0
 
 
 def _discovery_fragment_score(fragment: str, origins: list[str], *, outside_available: bool) -> float:
-    del outside_available
     compact = re.sub(r"\s+", "", str(fragment or ""))
     lowered = compact.lower()
     score = _fragment_specificity_score(fragment)
+    origin_set = {str(origin).strip() for origin in origins if str(origin).strip()}
     if any(token in compact for token in ("为什么", "如何", "谁", "何时", "不是", "而是")):
         score += 0.2
     if re.search(r"\d", compact):
@@ -863,6 +892,18 @@ def _discovery_fragment_score(fragment: str, origins: list[str], *, outside_avai
         )
     ):
         score += 0.14
+    if outside_available and origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS:
+        score -= 0.28
+    if (
+        outside_available
+        and origin_set
+        and "outside-memory" in origin_set
+        and not (origin_set & DISCOVERY_LIVE_OUTSIDE_ORIGINS)
+    ):
+        if not _discovery_fragment_has_case_object(fragment):
+            score -= 0.34
+        if _looks_like_bundle_feedback_shell(fragment):
+            score -= 0.42
     if _looks_like_source_title_shell(fragment):
         score -= 0.55
     return round(score, 3)
@@ -933,7 +974,7 @@ def _ranked_discovery_fragments(
     limit: int,
 ) -> list[dict[str, Any]]:
     outside_available = any(
-        origin in DISCOVERY_OUTSIDE_ORIGINS and any(_clean_query_text(value) for value in list(values or [])[:12])
+        origin in DISCOVERY_LIVE_OUTSIDE_ORIGINS and any(_clean_query_text(value) for value in list(values or [])[:12])
         for origin, values in origin_pools.items()
     )
     grouped: dict[str, dict[str, Any]] = {}
@@ -1032,6 +1073,7 @@ def _fragment_can_anchor_world_entry(fragment: str) -> bool:
 
 def _discovery_root_priority_score(item: dict[str, Any]) -> float:
     fragment = str(item.get("fragment") or "").strip()
+    origin_set = {str(origin).strip() for origin in list(item.get("origins") or []) if str(origin).strip()}
     pressure = _pressure_fragment_score(fragment)
     specificity = _fragment_specificity_score(fragment)
     has_case_object = _discovery_fragment_has_case_object(fragment)
@@ -1044,6 +1086,20 @@ def _discovery_root_priority_score(item: dict[str, Any]) -> float:
         score += 0.22
     if _fragment_can_anchor_world_entry(fragment):
         score += 0.18
+    if origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS and not has_case_object:
+        if pressure < 1.0:
+            score -= 0.85
+        elif pressure < 1.2:
+            score -= 0.35
+    if (
+        origin_set
+        and "outside-memory" in origin_set
+        and not (origin_set & DISCOVERY_LIVE_OUTSIDE_ORIGINS)
+        and not has_case_object
+    ):
+        score -= 0.32
+        if _looks_like_bundle_feedback_shell(fragment):
+            score -= 0.38
     if _looks_like_source_title_shell(fragment):
         score -= 0.35
     return round(score, 3)
@@ -1051,9 +1107,28 @@ def _discovery_root_priority_score(item: dict[str, Any]) -> float:
 
 def _prioritize_bundle_roots(ranked_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prioritized = _prioritize_root_fragments(ranked_fragments)
+    outside_available = any(
+        {
+            str(origin).strip()
+            for origin in list(item.get("origins") or [])
+            if str(origin).strip()
+        }
+        & DISCOVERY_LIVE_OUTSIDE_ORIGINS
+        for item in prioritized
+    )
     return sorted(
         prioritized,
         key=lambda item: (
+            int(
+                outside_available
+                and {
+                    str(origin).strip()
+                    for origin in list(item.get("origins") or [])
+                    if str(origin).strip()
+                }
+                <= DISCOVERY_INTERNAL_ORIGINS
+                and not _discovery_fragment_has_case_object(str(item.get("fragment") or ""))
+            ),
             -_discovery_root_priority_score(item),
             -float(item.get("score") or 0.0),
             -_pressure_fragment_score(str(item.get("fragment") or "")),
@@ -1075,12 +1150,32 @@ def _build_discovery_bundle(
     if not root_fragment or not root_normalized:
         return None
     root_origins = list(root.get("origins") or [])
+    root_origin_set = {str(origin).strip() for origin in root_origins if str(origin).strip()}
     support_signals: list[str] = []
     support_origins: list[str] = []
+
+    def support_origin_priority(candidate: dict[str, Any]) -> float:
+        if not root_origin_set & DISCOVERY_LIVE_OUTSIDE_ORIGINS:
+            return 0.0
+        candidate_origin_set = {
+            str(origin).strip()
+            for origin in list(candidate.get("origins") or [])
+            if str(origin).strip()
+        }
+        if "interest" in candidate_origin_set:
+            return 0.4
+        if "objective" in candidate_origin_set:
+            return 0.32
+        if "agenda" in candidate_origin_set:
+            return 0.18
+        if candidate_origin_set and candidate_origin_set <= DISCOVERY_INTERNAL_ORIGINS:
+            return 0.08
+        return 0.0
+
     ranked_support_candidates = sorted(
         candidates,
         key=lambda candidate: (
-            -_discovery_bundle_relatedness(root, candidate),
+            -(_discovery_bundle_relatedness(root, candidate) + support_origin_priority(candidate)),
             -float(candidate.get("score") or 0.0),
             -_pressure_fragment_score(str(candidate.get("fragment") or "")),
             str(candidate.get("fragment") or ""),
@@ -1089,9 +1184,10 @@ def _build_discovery_bundle(
     for candidate in ranked_support_candidates:
         fragment = str(candidate.get("fragment") or "").strip()
         relatedness = _discovery_bundle_relatedness(root, candidate)
+        effective_relatedness = relatedness + support_origin_priority(candidate)
         if (
             not fragment
-            or relatedness < 0.16
+            or effective_relatedness < 0.16
             or _fragments_overlap(root_fragment, fragment)
             or any(_fragments_overlap(fragment, existing) for existing in support_signals)
         ):
@@ -1103,6 +1199,50 @@ def _build_discovery_bundle(
                 support_origins.append(cleaned_origin)
                 break
         if len(support_signals) >= DISCOVERY_QUERY_MAX_TERMS - 1:
+            break
+    internal_context_origins = {"interest", "objective", "agenda"}
+    has_internal_context_support = any(origin in internal_context_origins for origin in support_origins)
+    if root_origin_set & DISCOVERY_LIVE_OUTSIDE_ORIGINS and not has_internal_context_support:
+        internal_candidates = sorted(
+            ranked_support_candidates,
+            key=lambda candidate: (
+                min(
+                    {
+                        "interest": 0,
+                        "objective": 1,
+                        "agenda": 2,
+                        "manual": 3,
+                        "hint": 4,
+                    }.get(str(origin).strip(), 9)
+                    for origin in list(candidate.get("origins") or [])
+                    if str(origin).strip()
+                ),
+                -float(candidate.get("score") or 0.0),
+                -_fragment_specificity_score(str(candidate.get("fragment") or "")),
+                str(candidate.get("fragment") or ""),
+            ),
+        )
+        for candidate in internal_candidates:
+            fragment = str(candidate.get("fragment") or "").strip()
+            candidate_origin_set = {
+                str(origin).strip()
+                for origin in list(candidate.get("origins") or [])
+                if str(origin).strip()
+            }
+            if (
+                not fragment
+                or not candidate_origin_set
+                or not candidate_origin_set <= DISCOVERY_INTERNAL_ORIGINS
+                or _fragments_overlap(root_fragment, fragment)
+                or any(_fragments_overlap(fragment, existing) for existing in support_signals)
+            ):
+                continue
+            if _fragment_specificity_score(fragment) < 0.65:
+                continue
+            support_signals.append(fragment)
+            for origin in candidate_origin_set:
+                if origin not in support_origins:
+                    support_origins.append(origin)
             break
     queries = _bundle_direct_queries(root_fragment, support_signals, seen_queries=seen_queries)
     primary_query = next(
@@ -1480,23 +1620,55 @@ def _query_candidate_strong_enough(query: str) -> bool:
     return _fragment_can_anchor_world_entry(cleaned)
 
 
+def _internal_reference_query_penalty(
+    query: str,
+    origins: list[str] | None,
+    *,
+    outside_available: bool,
+) -> float:
+    if not outside_available:
+        return 0.0
+    origin_set = {str(origin).strip() for origin in list(origins or []) if str(origin).strip()}
+    if not origin_set or not origin_set <= DISCOVERY_INTERNAL_ORIGINS:
+        return 0.0
+    cleaned = _clean_query_text(query)
+    if not cleaned:
+        return 0.0
+    if _discovery_fragment_has_case_object(cleaned):
+        return -0.18
+    if _pressure_fragment_score(cleaned) >= 1.1:
+        return -0.08
+    return -0.55
+
+
 def _rank_query_candidates(
     bundles: list[dict[str, Any]],
     direct_reference_queries: list[Any],
 ) -> list[str]:
     seen: set[str] = set()
     scored: list[dict[str, Any]] = []
+    outside_available = any(
+        set(str(item).strip() for item in list(bundle.get("audit_origins") or bundle.get("origins") or []) if str(item).strip())
+        & DISCOVERY_LIVE_OUTSIDE_ORIGINS
+        for bundle in bundles
+        if isinstance(bundle, dict)
+    )
 
     def add(query: Any, *, score: float, origins: list[str] | None = None) -> None:
         cleaned = _clean_query_text(query)
         normalized = _normalize_query_fragment(cleaned)
         if not cleaned or not normalized or not _query_candidate_strong_enough(cleaned):
             return
+        adjusted_score = float(score or 0.0) + _internal_reference_query_penalty(
+            cleaned,
+            origins,
+            outside_available=outside_available,
+        )
         scored.append(
             {
                 "query": cleaned,
                 "normalized": normalized,
-                "score": float(score or 0.0),
+                "score": round(adjusted_score, 3),
                 "origins": [str(item).strip() for item in list(origins or []) if str(item).strip()],
             }
         )
@@ -2377,10 +2549,11 @@ def _world_entry_priority_adjustment(
     origins: list[str] | None = None,
     family: str = "",
 ) -> float:
-    del origins, family
+    del family
     title_text = str(title or "").strip()
     pressure_text = str(pressure or "").strip()
     object_text = " ".join(part for part in (title_text, pressure_text) if part)
+    origin_set = {str(origin).strip() for origin in list(origins or []) if str(origin).strip()}
     has_object = _discovery_fragment_has_case_object(object_text)
     pressure_score = _pressure_fragment_score(pressure_text or title_text)
     title_score = _pressure_fragment_score(title_text)
@@ -2391,6 +2564,12 @@ def _world_entry_priority_adjustment(
         score += 0.18
     elif pressure_score < 0.95 and not has_object:
         score -= 0.18
+    if origin_set & DISCOVERY_LIVE_OUTSIDE_ORIGINS:
+        score += 0.14
+    elif origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS and not has_object:
+        score -= 0.12
+    elif "outside-memory" in origin_set and not has_object:
+        score -= 0.1
     if _looks_like_source_title_shell(title_text) and pressure_score > title_score:
         score += 0.05
     return round(score, 3)
@@ -2528,9 +2707,10 @@ def _world_entry_points(
     ranked.sort(
         key=lambda item: (
             -float(item.get("world_score") or 0.0),
+            -_pressure_fragment_score(str(item.get("pressure") or "")),
             -len(str(item.get("pressure") or "")),
             -len(str(item.get("evidence") or "")),
-            int(item.get("_source_index") or 0),
+            -len(str(item.get("summary") or "")),
             str(item.get("title") or ""),
         )
     )

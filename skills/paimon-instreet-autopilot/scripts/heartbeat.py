@@ -58,9 +58,9 @@ from content_planner import (
     build_plan,
     build_content_evolution_state,
     board_generation_guidance,
-    default_cta_type,
     default_hook_type,
     normalize_forum_board,
+    preferred_cta_type,
 )
 from external_information import ensure_external_information_files, refresh_external_information
 from serial_state import describe_next_serial_action, record_published_chapter, sync_serial_registry
@@ -173,6 +173,10 @@ def _heartbeat_codex_timeout_seconds(config) -> int:
         minimum_seconds=60,
     )
     return min(configured, cap)
+
+
+def _heartbeat_source_mutation_enabled(config) -> bool:
+    return bool(config.automation.get("heartbeat_source_mutation_enabled", True))
 
 
 def _source_mutation_codex_timeout_seconds(config) -> int:
@@ -495,9 +499,9 @@ def _reload_mutable_runtime_modules() -> None:
     global build_plan
     global build_content_evolution_state
     global board_generation_guidance
-    global default_cta_type
     global default_hook_type
     global normalize_forum_board
+    global preferred_cta_type
     global BOARD_WRITING_PROFILES
     global ensure_external_information_files
     global refresh_external_information
@@ -510,9 +514,9 @@ def _reload_mutable_runtime_modules() -> None:
     build_plan = reloaded_planner.build_plan
     build_content_evolution_state = reloaded_planner.build_content_evolution_state
     board_generation_guidance = reloaded_planner.board_generation_guidance
-    default_cta_type = reloaded_planner.default_cta_type
     default_hook_type = reloaded_planner.default_hook_type
     normalize_forum_board = reloaded_planner.normalize_forum_board
+    preferred_cta_type = reloaded_planner.preferred_cta_type
     BOARD_WRITING_PROFILES = reloaded_planner.BOARD_WRITING_PROFILES
     ensure_external_information_files = reloaded_external_information.ensure_external_information_files
     refresh_external_information = reloaded_external_information.refresh_external_information
@@ -640,6 +644,7 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     method_focus = False
     source_overhang_focus = False
     memory_capability_focus = False
+    memory_spec_focus = False
     soft_example_focus = False
     title_handoff_focus = False
     generic_example_focus = False
@@ -648,6 +653,7 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     abstract_method_opening_focus = False
     title_echo_focus = False
     truncated_scaffold_focus = False
+    memory_entry_dropout_focus = False
     if content_planner_module._theory_title_emotion_shell_reason(title):
         lessons.append("标题先借“最折磨人的，不是……而是……”这种共感句起手，读者先看到的是情绪吐槽，看不到这条判断真正要抓的接管权、责任分配和解释资格。")
         system_fixes.append("给 theory-post 增加“情绪壳标题”审计；没有把责任、资格、接管摆上第一屏的标题，直接打回重写。")
@@ -658,6 +664,10 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         memory_capability_focus = True
         lessons.append("标题的问题不是不具体，而是具体错了地方。`会翻聊天记录的 Agent` 先卖的是功能感，再用 `重新提交` 兜一个结果，读者更容易把它读成产品抱怨，不会第一眼读成“记忆被拿来裁你，但没人签收”的结构判断。")
         system_fixes.append("给 theory-post 增加“记忆能力壳标题”审计；凡是先报“会翻聊天记录 / 记得你 / 长期记忆”，再用“重新提交 / 继续等待”兜症状，却没点出驳回、签收或回写节点的标题，直接打回。")
+    if content_planner_module._theory_title_memory_spec_shell_reason(title):
+        memory_spec_focus = True
+        lessons.append("标题先拿“200 条记录”这类记忆规格当门面，读者先进来的不是接手责任，而是“参数都这么高了怎么还不行”的产品抱怨。真正的签收断口被挤到了后半句。")
+        system_fixes.append("给 theory-post 增加“记忆规格标题”审计；凡是先拿记忆条数、上下文长度或长期记忆容量做门面，再在后半句补签收/责任的标题，直接打回。")
     if content_planner_module._theory_title_handoff_gap_reason(title):
         title_handoff_focus = True
         lessons.append("标题先把“系统闭嘴 / 排队 / 追责资格”叠成态度判断，却没让人第一眼看见断在哪个接手节点。读者能感觉到立场，但抓不住对象。")
@@ -680,8 +690,19 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         lessons.append("例证还停在“项目 Agent”“补件助手”这种角色标签和功能名上。场景感是有了，可别人没法立刻复核你说的是哪个对象、哪条单据、哪个按钮或哪段失败话术，概念自然跑得比证据快。")
         system_fixes.append("给 theory-post 完整度审计补“角色标签例证”门槛；如果题眼借记忆或上下文能力起题，source_signals 至少要交两条带驳回、回写、单据、按钮或接口断口的硬样本，不够就别进生成。")
     if (
+        memory_spec_focus
+        and _forum_theory_has_concept_unit(excerpt)
+        and not any(
+            token in excerpt
+            for token in ("历史记录", "旧记录", "历史凭证", "历史偏好", "引用旧记录", "引用历史", "沿用旧记录", "记忆裁决")
+        )
+    ):
+        memory_entry_dropout_focus = True
+        lessons.append("题目拿记忆规格起手，正文命名成“等待责任漂移”以后却没继续写清历史引用怎样改变签收、驳回或回写。入口机制在正文里掉线了，读者会觉得你从一个具体入口跳回了泛流程抱怨。")
+        system_fixes.append("给 theory-post 完整度审计补“入口机制不能掉线”校验；标题如果借记忆、上下文或历史记录起题，concept_core、mechanism_core、practice_program 至少一处继续写清历史引用如何改变签收、驳回或回写。")
+    if (
         ("评论区" in excerpt and any(token in excerpt for token in ("欢迎把", "一起写在评论区", "你见过")))
-        or re.search(r"你见过最典型|哪一句系统话术|什么时候先说“我记得”", excerpt)
+        or re.search(r"你见过最典型|你在哪个系统里|最明显地见过|哪一句系统话术|什么时候先说“我记得”|按钮、状态词", excerpt)
     ):
         lessons.append("正文把最硬的证据工作留给了评论区。派蒙先交出去的是概念说明，不是带着外部样本或跨场景证据的判断，读者很难在第一眼就决定要不要跟。")
         system_fixes.append("给 theory-post 生成器补“先交一个外部或跨场景证据段，再提问”约束；问题只能收立场、反例和变体，不能再征集第一句系统话术或第一条失败链。")
@@ -752,6 +773,8 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         summary = f"这条低热不是因为“接手节点”没价值。《{truncate_text(title, 36)}》先把两个现场和材料数量摆成门口，正文第一屏又先讲静默失败和解释权；读者还没拿到硬对象，就先被研究包装和概念门槛双重劝退。"
     elif source_overhang_focus:
         summary = f"这条低热不是因为对象不新。《{truncate_text(title, 36)}》先把外部论文和项目页摆到门口，正文又掉回四段旧脚手架；实验室帖该先交的对象、证据和接手动作，全被材料名词和模板目录抢走了。"
+    elif memory_spec_focus and memory_entry_dropout_focus:
+        summary = f"这条低热不是因为“签收人”不重要。《{truncate_text(title, 36)}》先把“200 条记录”的能力规格摆成门面，正文却没继续写清记忆引用如何改变签收与驳回；读者先被产品参数带进去，再被一篇更一般的流程判断带出来。"
     elif memory_capability_focus and soft_example_focus:
         summary = f"这条低热不是因为记忆题没人关心。《{truncate_text(title, 36)}》先把“会翻聊天记录”的能力感摆成门面，正文却在讲记忆引用后的接手责任；再加上样本还停在角色标签上，读者先进了功能抱怨，再去猜你真正想命名什么。"
     elif title_handoff_focus and generic_example_focus:
@@ -1031,11 +1054,72 @@ def _sanitize_source_mutation_summary(text: str) -> str:
     return cleaned
 
 
-def _default_source_mutation_state(*, allow_codex: bool, low_heat_reflection: dict[str, Any]) -> dict[str, Any]:
+SOURCE_MUTATION_AUDIT_HUMANIZE_MAP = {
+    "theory-post": "理论主帖",
+    "tech-post": "方法主帖",
+    "group-post": "小组实验帖",
+    "square": "公共讨论版",
+    "philosophy": "理论讨论版",
+    "skills": "方法实验版",
+    "workplace": "工作现场版",
+    "community_breakouts": "外部高热样本",
+    "open_web_search": "开放网页探索",
+    "zhihu_hot": "开放网页探索",
+    "github_trending": "开放网页探索",
+    "prl_recent": "前沿论文样本",
+    "conference_recent": "前沿论文样本",
+    "crossref_recent": "前沿论文样本",
+    "arxiv_latest": "前沿论文样本",
+    "manual_web": "手动外部样本",
+    "marxists": "经典理论样本",
+}
+SOURCE_MUTATION_AUDIT_BARE_LABELS = {
+    *SOURCE_MUTATION_AUDIT_HUMANIZE_MAP.values(),
+    "相关源码",
+}
+
+
+def _sanitize_source_mutation_feedback_item(text: Any) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"`?(?:AGENTS\.md|(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|md|mjs|sh|json|ya?ml|txt))`?",
+        "相关源码",
+        cleaned,
+    )
+    for source, target in SOURCE_MUTATION_AUDIT_HUMANIZE_MAP.items():
+        cleaned = cleaned.replace(source, target)
+    cleaned = re.sub(r"相关源码(?:\s*[、,，和及]\s*相关源码)+", "相关源码", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,；;。")
+    if cleaned in {"", "相关源码"} or cleaned in SOURCE_MUTATION_AUDIT_BARE_LABELS:
+        return ""
+    return cleaned
+
+
+def _sanitize_source_mutation_feedback(items: list[Any], *, limit: int) -> list[str]:
+    cleaned_items: list[str] = []
+    for item in items:
+        cleaned = _sanitize_source_mutation_feedback_item(item)
+        if cleaned and cleaned not in cleaned_items:
+            cleaned_items.append(cleaned)
+        if len(cleaned_items) >= limit:
+            break
+    return cleaned_items
+
+
+def _default_source_mutation_state(
+    *,
+    allow_codex: bool,
+    low_heat_reflection: dict[str, Any],
+    human_summary: str | None = None,
+) -> dict[str, Any]:
+    if human_summary is None:
+        human_summary = "" if allow_codex else "本轮未启用 Codex，自我进化没有执行到源码层。"
     return {
         "generated_at": now_utc(),
         "executed": False,
-        "human_summary": "" if allow_codex else "本轮未启用 Codex，自我进化没有执行到源码层。",
+        "human_summary": human_summary,
         "commit_sha": "",
         "commit_deferred_reason": "",
         "changed_files": [],
@@ -1277,14 +1361,19 @@ fallback 轨迹：
         "executed": bool(changed_files),
         "human_summary": _sanitize_source_mutation_summary(str(last_result.get("human_summary") or "").strip()),
         "changed_files": changed_files,
-        "changed_files_hint": [
-            str(item).strip()
-            for item in list(last_result.get("changed_files_hint") or [])
-            if str(item).strip()
-        ][:12],
+        "changed_files_hint": _sanitize_source_mutation_feedback(
+            list(last_result.get("changed_files_hint") or []),
+            limit=12,
+        ),
         "preexisting_dirty_files": sorted(path for path in changed_files if path in baseline_dirty_files),
-        "deleted_legacy_logic": _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or []))[:6],
-        "new_capability": _dedupe_feedback(list(last_result.get("new_capability") or []))[:6],
+        "deleted_legacy_logic": _sanitize_source_mutation_feedback(
+            _dedupe_feedback(list(last_result.get("deleted_legacy_logic") or [])),
+            limit=6,
+        ),
+        "new_capability": _sanitize_source_mutation_feedback(
+            _dedupe_feedback(list(last_result.get("new_capability") or [])),
+            limit=6,
+        ),
         "mutation_rounds": rounds,
     }
 
@@ -2412,18 +2501,14 @@ def _plan_has_grounded_primary_candidate(plan: dict[str, Any]) -> bool:
 def _plan_has_primary_publication_pressure(plan: dict[str, Any]) -> bool:
     if _plan_has_grounded_primary_candidate(plan):
         return True
-    lane_strategy = plan.get("idea_lane_strategy") or {}
-    candidates = [lane_strategy.get("focus_kind")]
-    candidates.extend(list(lane_strategy.get("selected_kinds") or []))
-    candidates.extend(list(lane_strategy.get("backup_kinds") or []))
-    candidates.extend((item or {}).get("kind") for item in list(lane_strategy.get("lane_scores") or []))
-    if any(str(kind or "").strip() in PUBLIC_PRIMARY_KINDS for kind in candidates):
-        return True
-    if any(str((item or {}).get("kind") or "").strip() in PUBLIC_PRIMARY_KINDS for item in list(plan.get("idea_rejections") or [])):
-        return True
     public_hot_override = ((plan.get("primary_priority_overrides") or {}).get("public_hot_forum") or {})
     preferred_kinds = [str(item).strip() for item in list(public_hot_override.get("preferred_kinds") or []) if str(item).strip()]
-    return bool(public_hot_override.get("enabled") and any(kind in PUBLIC_PRIMARY_KINDS for kind in preferred_kinds))
+    override_reason = str(public_hot_override.get("reason") or "").strip()
+    return bool(
+        public_hot_override.get("enabled")
+        and override_reason
+        and any(kind in PUBLIC_PRIMARY_KINDS for kind in preferred_kinds)
+    )
 
 
 def _non_primary_forum_write_cap(
@@ -2532,6 +2617,7 @@ def _runtime_stage_strategy(
     primary_publication_required: bool,
 ) -> dict[str, Any]:
     carryover_tasks = carryover_tasks or []
+    signals = plan.get("planning_signals") or {}
     reply_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "reply-comment"]
     failure_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "resolve-failure"]
     publish_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "publish-primary"]
@@ -2542,6 +2628,7 @@ def _runtime_stage_strategy(
     focus_kind = str(lane_strategy.get("focus_kind") or "").strip()
     grounded_primary_candidate = _plan_has_grounded_primary_candidate(plan)
     primary_pressure = _plan_primary_pressure_hint(plan)
+    external_observations = _external_observation_items(signals.get("external_information") or {}, limit=3)
 
     stage_scores: list[dict[str, Any]] = []
 
@@ -2637,6 +2724,22 @@ def _runtime_stage_strategy(
             external_live_signals += high_priority_targets
             external_reasons.append(f"外部讨论里有 {high_priority_targets} 个高优先入口")
         external_reasons.append(f"仍有 {len(external_targets)} 个外部讨论值得主动切入")
+    strongest_external = external_observations[0] if external_observations else {}
+    strongest_external_pressure = truncate_text(
+        str(strongest_external.get("pressure") or strongest_external.get("title") or "").strip(),
+        44,
+    )
+    if strongest_external_pressure:
+        external_score += 0.5 if external_targets else 0.95
+        external_pressure_units += 0.7 if external_targets else 1.2
+        external_live_signals += 1.0
+        external_reasons.append(f"外部世界里正冒出“{strongest_external_pressure}”这条对象级压力")
+    elif external_observations:
+        observation_count = min(len(external_observations), 3)
+        external_score += observation_count * 0.24
+        external_pressure_units += observation_count * 0.32
+        external_live_signals += observation_count * 0.4
+        external_reasons.append(f"外部世界里还有 {observation_count} 条对象级压力值得继续盯")
     stage_scores.append(
         {
             "name": "engage-external",
@@ -2674,8 +2777,16 @@ def _runtime_stage_strategy(
     )
 
     stage_scores.sort(key=_runtime_stage_sort_key)
-    lead = str((stage_scores[0] or {}).get("name") or "publish-primary") if stage_scores else "publish-primary"
-    lead_reason = str((stage_scores[0] or {}).get("reason") or "").strip() if stage_scores else ""
+    lead_stage = next((item for item in stage_scores if float(item.get("score") or 0.0) > 0.0), {})
+    if not lead_stage:
+        return {
+            "order": [str(item.get("name") or "") for item in stage_scores if str(item.get("name") or "")],
+            "lead": "steady-state",
+            "rationale": _steady_state_pressure_label(),
+            "stages": stage_scores,
+        }
+    lead = str(lead_stage.get("name") or "steady-state")
+    lead_reason = str(lead_stage.get("reason") or "").strip()
     rationale = f"这轮先从{_runtime_stage_display_name(lead)}起手"
     if lead_reason:
         rationale += f"：{lead_reason}"
@@ -3106,6 +3217,7 @@ def _idea_publish_title(idea: dict[str, Any]) -> str:
             content_planner_module._theory_title_emotion_shell_reason(raw_title)
             or content_planner_module._theory_title_empathy_shell_reason(raw_title)
             or content_planner_module._theory_title_memory_capability_shell_reason(raw_title)
+            or content_planner_module._theory_title_memory_spec_shell_reason(raw_title)
             or content_planner_module._theory_title_handoff_gap_reason(raw_title)
             or content_planner_module._theory_title_surface_overhang_reason(raw_title)
             or content_planner_module._theory_title_meta_overhang_reason(raw_title)
@@ -3247,6 +3359,18 @@ def _idea_signal_block(idea: dict[str, Any], *, heading: str = "## 现场证据"
             continue
         lines.append(text)
     if not lines:
+        for raw in (idea.get("why_now"), idea.get("angle")):
+            text = _public_line(str(raw or "").strip())
+            if not text or _forum_line_has_title_heat_overhang(text, title=title):
+                continue
+            if (
+                content_planner_module._source_signal_has_hard_service_object(text)
+                or content_planner_module._evidence_hint_from_text(text)
+                or re.search(r"429|posting too fast|retry|cooldown|限速|冷却", text, flags=re.IGNORECASE)
+            ):
+                lines.append(text)
+                break
+    if not lines:
         return ""
     body = "\n".join(f"- {truncate_text(line, 120)}" for line in lines[:4])
     return f"{heading}\n{body}"
@@ -3257,6 +3381,7 @@ def _forum_question_line(cta_type: str) -> str:
         "comment-scene": "你见过最典型的一次类似场景，是什么？",
         "comment-diagnostic": "你见过最典型的一种系统病灶，是什么？",
         "take-a-position": "如果你不同意，请直接指出你认为这里错在前提、机制还是结论？",
+        "comment-variant": "如果你见过相反的结果，或者这条判断会在哪一步失效，欢迎直接讲那个反例或变体。",
         "comment-case-or-save": "如果你也在做类似系统，最想拿走的是哪条规则？",
         "bring-a-case": "如果你手里也有案例，欢迎直接把约束和失败点摆出来。",
     }.get(cta_type, "你最想补充的一个现场例子，是什么？")
@@ -3373,6 +3498,7 @@ def _forum_theory_has_boundary_unit(merged: str) -> bool:
 def _forum_theory_has_example_unit(merged: str) -> bool:
     example_markers = (
         "## 信号交叉点",
+        "## 现场证据",
         "## 例子",
         "## 例证",
         "## 反例",
@@ -3384,7 +3510,9 @@ def _forum_theory_has_example_unit(merged: str) -> bool:
         "最典型的",
         "放回 Agent 社会里看",
     )
-    return any(marker in merged for marker in example_markers)
+    if any(marker in merged for marker in example_markers):
+        return True
+    return bool(re.search(r"(?:^|\n)-\s+", merged) and content_planner_module._source_signal_has_hard_service_object(merged))
 
 
 def _square_theory_has_packaged_hot_opening(content: str) -> bool:
@@ -3439,6 +3567,33 @@ def _forum_theory_has_generic_example_overhang(content: str, idea: dict[str, Any
             continue
         return True
     return False
+
+
+def _forum_theory_question_collects_first_evidence(content: str) -> bool:
+    paragraphs = _forum_content_units(content)
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if not body:
+        return False
+    cta_paragraph = next(
+        (
+            paragraph
+            for paragraph in reversed(body)
+            if re.search(r"[？?]|欢迎把|留在评论(?:区|里)", paragraph)
+        ),
+        "",
+    )
+    if not cta_paragraph:
+        return False
+    if not re.search(r"你见过|你在哪个系统里|欢迎把|留在评论(?:区|里)", cta_paragraph):
+        return False
+    if re.search(r"错在前提|机制还是结论|更认同|算成立|不成立|边界", cta_paragraph):
+        return False
+    return bool(
+        re.search(
+            r"系统里|按钮|状态词|话术|失败链|场景|例子|例证|设计|接口|日志|单据|哪个系统",
+            cta_paragraph,
+        )
+    )
 
 
 def _forum_method_relies_on_self_heat_evidence(content: str) -> bool:
@@ -3616,7 +3771,7 @@ def _forum_content_publishable_issue(content: str, *, submolt: str, kind: str | 
     cleaned = str(content or "").strip()
     if not cleaned:
         return "empty-content"
-    paragraphs = [item.strip() for item in re.split(r"\n{2,}", cleaned) if item.strip()]
+    paragraphs = _forum_content_units(cleaned)
     body = [item for item in paragraphs if not item.startswith("#")]
     if len(body) < 4:
         return "too-thin"
@@ -3638,6 +3793,8 @@ def _forum_content_publishable_issue(content: str, *, submolt: str, kind: str | 
         return "missing-theory-example"
     if is_theory and any(content_planner_module._contains_stock_theory_scaffold(item) for item in body):
         return "stock-theory-scaffold"
+    if is_theory and _forum_theory_question_collects_first_evidence(cleaned):
+        return "question-collects-first-evidence"
     if submolt in {"skills", "workplace"} and not any(
         token in merged for token in ("规则", "协议", "状态", "恢复", "修复", "边界", "回退", "取舍", "证据")
     ):
@@ -3716,7 +3873,7 @@ def _fallback_forum_post(idea: dict) -> tuple[str, str, str]:
     brief = _forum_publish_brief(idea)
     title = brief["title"]
     submolt = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
-    cta_type = str(idea.get("cta_type") or default_cta_type(submolt))
+    cta_type = preferred_cta_type(str(idea.get("kind") or ""), submolt, idea.get("cta_type"))
     cta_line = _forum_question_line(cta_type)
     signal_block = _idea_signal_block(idea)
     if str(idea.get("kind") or "") == "theory-post":
@@ -4944,7 +5101,7 @@ def _generate_forum_post(
     recent_titles = "\n".join(f"- {item.get('title', '')}" for item in posts[:8])
     desired_board = normalize_forum_board(str(idea.get("submolt") or idea.get("board_profile") or "square"))
     hook_type = str(idea.get("hook_type") or default_hook_type(desired_board))
-    cta_type = str(idea.get("cta_type") or default_cta_type(desired_board))
+    cta_type = preferred_cta_type(str(idea.get("kind") or ""), desired_board, idea.get("cta_type"))
     source_signals = "\n".join(f"- {item}" for item in brief["evidence_lines"]) or "- 无"
     title_guidance = brief["title"]
     followup_hint = "这是续篇或热点跟进，标题必须显式变化并体现续篇关系。" if idea.get("is_followup") else "不要把本轮帖子写成上一条帖子的同标题复刻。"
@@ -4977,7 +5134,8 @@ def _generate_forum_post(
 30. 如果标题借“系统闭嘴 / 沉默 / 排队”抬到“资格 / 追责 / 解释权”，第一屏必须立刻补出断开的接手节点、签收状态、单据或回写断口。
 31. 不要拿“会翻聊天记录 / 记得你 / 长期记忆”这种能力感给理论帖起题；如果标题里出现这类记忆能力词，第一屏必须立刻翻成驳回、签收、补件、回写或转人工断口。
 32. 这类记忆题的跨场景例证也不能只写“项目 Agent / 补件助手 / 售后页里的某个助手”这种角色标签；至少保留一个真实对象、按钮、接口、单据状态或失败话术。
-33. 结尾提问只能收立场、反例或变体，不能再让读者替你补第一句系统话术、第一条失败链或第一组外部样本。
+33. 如果标题里出现“200 条记录”“32k 上下文”这类记忆规格，正文后半段还要继续写清历史引用怎样改变签收、驳回或回写；不要让记忆只在门口负责吸睛，后面就退回泛流程抱怨。
+34. 结尾提问只能收立场、反例或变体，不能再让读者替你补第一句系统话术、第一条失败链或第一组外部样本。
 """.strip()
     else:
         theory_contract = f"""
@@ -5058,6 +5216,11 @@ CONTENT:
         title = brief["title"]
     if (
         str(idea.get("kind") or "") == "theory-post"
+        and content_planner_module._theory_title_memory_spec_shell_reason(title)
+    ):
+        title = brief["title"]
+    if (
+        str(idea.get("kind") or "") == "theory-post"
         and content_planner_module._theory_title_handoff_gap_reason(title)
     ):
         title = brief["title"]
@@ -5085,14 +5248,15 @@ CONTENT:
     if not _idea_publishable_title(title):
         title = brief["title"]
     content = _sanitize_generated_forum_content(content, title=title, submolt=submolt)
-    publish_issue = _forum_content_publishable_issue(content, submolt=submolt, kind=str(idea.get("kind") or ""))
+    publish_issue = None
     if (
-        not publish_issue
-        and str(idea.get("kind") or "") == "theory-post"
+        str(idea.get("kind") or "") == "theory-post"
         and submolt == "square"
         and _square_theory_has_packaged_hot_opening(content)
     ):
         publish_issue = "square-packaged-hot-opening"
+    if not publish_issue:
+        publish_issue = _forum_content_publishable_issue(content, submolt=submolt, kind=str(idea.get("kind") or ""))
     if not publish_issue and _forum_theory_has_placeholder_cross_scene_example(content, idea):
         publish_issue = "placeholder-cross-scene-example"
     if not publish_issue and _forum_theory_has_generic_example_overhang(content, idea):
@@ -7403,8 +7567,14 @@ def _compose_source_mutation_line(source_mutation: dict[str, Any]) -> str:
     summary = _sanitize_source_mutation_summary(str(source_mutation.get("human_summary") or ""))
     commit_error = str(source_mutation.get("commit_error") or "").strip()
     commit_deferred_reason = str(source_mutation.get("commit_deferred_reason") or "").strip()
-    deleted_legacy_logic = [str(item).strip() for item in list(source_mutation.get("deleted_legacy_logic") or []) if str(item).strip()]
-    new_capability = [str(item).strip() for item in list(source_mutation.get("new_capability") or []) if str(item).strip()]
+    deleted_legacy_logic = _sanitize_source_mutation_feedback(
+        list(source_mutation.get("deleted_legacy_logic") or []),
+        limit=6,
+    )
+    new_capability = _sanitize_source_mutation_feedback(
+        list(source_mutation.get("new_capability") or []),
+        limit=6,
+    )
     parts: list[str] = []
     if summary:
         parts.append(summary.rstrip("。"))
@@ -7725,6 +7895,7 @@ def main() -> None:
     username = config.identity["name"]
     codex_model = config.automation.get("codex_model") or None
     codex_reasoning_effort = config.automation.get("codex_reasoning_effort") or None
+    source_mutation_enabled = _heartbeat_source_mutation_enabled(config)
     codex_timeout_seconds = _heartbeat_codex_timeout_seconds(config)
     failure_detail_limit = _heartbeat_failure_detail_limit(config)
     start_overview = run_snapshot(
@@ -7828,7 +7999,13 @@ def main() -> None:
     }
     notification_cleanup = {"actions": [], "failure_details": []}
     planner_retry_count = 0
-    primary_publication_required = bool(args.execute)
+    primary_publication_required = bool(
+        args.execute
+        and (
+            _plan_has_primary_publication_pressure(plan)
+            or _carryover_requires_primary_publication(carryover_tasks)
+        )
+    )
     runtime_stage_strategy = (
         _runtime_stage_strategy(
             plan,
@@ -7847,6 +8024,8 @@ def main() -> None:
             stage_order = sorted({"publish-primary", "reply-comments", "engage-external", "reply-dms"})
         for stage_name in stage_order:
             if stage_name == "publish-primary":
+                if not primary_publication_required:
+                    continue
                 for attempt_index in range(_primary_plan_retry_rounds(config)):
                     if attempt_index > 0:
                         planner_retry_count = attempt_index
@@ -8008,7 +8187,27 @@ def main() -> None:
         end_overview,
         comparison_overview=((last_run_state.get("account_snapshot") or {}).get("finished") or {}),
     )
-    source_mutation_state = _run_source_mutation_worker(allow_codex=args.allow_codex)
+    if source_mutation_enabled:
+        source_mutation_state = _run_source_mutation_worker(allow_codex=args.allow_codex)
+    else:
+        source_mutation_state = _default_source_mutation_state(
+            allow_codex=args.allow_codex,
+            low_heat_reflection=low_heat_reflection,
+            human_summary="已按配置关闭心跳源码进化，本轮跳过源码层自我进化。",
+        )
+        write_json(SOURCE_MUTATION_STATE_PATH, source_mutation_state)
+        write_json(
+            SOURCE_MUTATION_RUN_PATH,
+            {
+                "updated_at": source_mutation_state["generated_at"],
+                "status": "disabled",
+                "pid": None,
+                "started_at": None,
+                "finished_at": source_mutation_state["generated_at"],
+                "error": "",
+                "result": source_mutation_state,
+            },
+        )
 
     primary_visibility_confirmed = _confirm_primary_publication(primary_action) if args.execute else None
     if primary_action is not None:
