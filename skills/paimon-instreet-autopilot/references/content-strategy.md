@@ -47,6 +47,7 @@ Paimon runs a dual-track content system:
 - Registry entries are fetch surfaces, not a silent restore list. If a source family was removed from the live registry, do not add it back in code just to keep the old comfort set alive.
 - Manual queries and user hints are references, not reserved slots. If they are weaker than the live outside bundle this round, let them fall out of `research_queries` instead of silently guaranteeing them a seat.
 - When an outside sample already has a summary, mechanism description, excerpt, or conflict note, use that before the headline. Title text is a fallback, not the default seed.
+- If a sample only offers a title shell and still cannot hand over an object, failure sentence, or mechanism fragment after reading the summary/excerpt, drop it from discovery instead of letting headline packaging pretend to be research input.
 - Research phrases should come from conflict sentences, mechanism notes, failure descriptions, or evidence-rich summaries before they come from titles. If a bundle only yields headline packaging, keep the query list short instead of padding it with decorative search strings.
 - A discovery bundle should survive as `focus + support signals + conflict note`, not as an optimized query blueprint. If the bundle only makes sense as a search string, reopen it before using it.
 - If one bundle really has two direct pressure fragments, keep both fragments. Do not compress them into one prettier search spell just to make the query list look clever.
@@ -180,6 +181,7 @@ Paimon runs a dual-track content system:
 - Feishu 里的外部观察也别按来源家族排队展示。谁更具体、更新、证据更硬，谁就先上，不要把报告写成另一套隐藏来源梯子。
 - Feishu 里的外部观察不要只贴标题。优先报对象和压力句，标题只当索引，让旅行者一眼看见为什么这条样本值得继续追。
 - Feishu 里的“下一步动作”也不要退回 `先补主发布` 这种礼仪口号。能点名具体对象、失败链、外部压力句或公开题目时，就直接点名。
+- Planner 里的 `why_now` 也一样：宁可留空、让 lane 退回观察区，也不要再塞“高热还在发酵”“这条样本值得看看”这种固定机会话术。
 - 低热复盘必须先写回 planner 能读取的状态，再开始下一轮 build_plan；不要先让旧壳混进种子计划，事后再假装复盘。
 - `idea_lane_strategy` 是公开短名单，不是硬闸。`focus_kind` 只给偏置，不替代对象级压力和真实证据。
 - 如果 `focus_kind` 故意留空，就让它一路留空；不要在 fallback builder、repair 顺序或后续汇报里又偷偷把短名单第一项补回“主位”。

@@ -627,6 +627,7 @@ def _query_term_fragments(value: Any, *, limit: int = 6) -> list[str]:
             or normalized in QUERY_FRAGMENT_STOPWORDS
             or normalized in seen
             or not _discovery_fragment_plausible(cleaned)
+            or not _fragment_can_anchor_world_entry(cleaned)
         ):
             continue
         if not re.search(r"[\u3400-\u9fff]", cleaned) and len(cleaned.split()) > 5:
@@ -733,7 +734,7 @@ def _world_sample_fragments(items: list[dict[str, Any]], *, limit: int = 12) -> 
         if len(fragments) > before_count:
             continue
         title = str(item.get("title") or item.get("post_title") or "").strip()
-        if title:
+        if title and _fragment_can_anchor_world_entry(title):
             append_texts([title])
             if len(fragments) >= limit:
                 return fragments[:limit]
@@ -976,6 +977,13 @@ def _ranked_discovery_fragments(
         fragment = _pick_representative_fragment(list(entry.get("fragments") or []))
         if not fragment:
             continue
+        if (
+            outside_available
+            and origins
+            and set(origins) <= DISCOVERY_INTERNAL_ORIGINS
+            and not _fragment_can_anchor_world_entry(fragment)
+        ):
+            continue
         score = _discovery_fragment_score(fragment, origins, outside_available=outside_available)
         ranked.append(
             {
@@ -1013,6 +1021,23 @@ def _discovery_fragment_has_case_object(fragment: str) -> bool:
     if not compact:
         return False
     return any(_marker_in_pressure_text(marker, compact, lowered) for marker in DISCOVERY_ROOT_OBJECT_MARKERS)
+
+
+def _fragment_can_anchor_world_entry(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    if _discovery_fragment_has_case_object(cleaned):
+        return True
+    pressure = _pressure_fragment_score(cleaned)
+    if pressure >= 1.25:
+        return True
+    if pressure >= 1.0 and not _looks_like_source_title_shell(cleaned):
+        return True
+    compact = re.sub(r"\s+", "", cleaned)
+    if _fragment_specificity_score(cleaned) >= 1.2 and len(compact) >= 6 and not _looks_like_source_title_shell(cleaned):
+        return True
+    return False
 
 
 def _discovery_root_priority_score(item: dict[str, Any], *, world_pressure_available: bool) -> float:
@@ -1386,12 +1411,18 @@ def _direct_reference_query_candidates(
         ),
     ):
         for value in values:
-            cleaned = _clean_query_text(value)
-            normalized = _normalize_query_fragment(cleaned)
-            if not cleaned or not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            candidates.append({"query": cleaned, "origins": [origin]})
+            for fragment in _pressure_text_fragments(value, limit=4) or [value]:
+                cleaned = _clean_query_text(fragment)
+                normalized = _normalize_query_fragment(cleaned)
+                if (
+                    not cleaned
+                    or not normalized
+                    or normalized in seen
+                    or not _query_candidate_strong_enough(cleaned)
+                ):
+                    continue
+                seen.add(normalized)
+                candidates.append({"query": cleaned, "origins": [origin]})
     return candidates
 
 
@@ -1487,20 +1518,9 @@ def _bundle_query_priority_score(bundle: dict[str, Any]) -> float:
 
 def _query_candidate_strong_enough(query: str) -> bool:
     cleaned = _clean_query_text(query)
-    if not cleaned or _looks_like_source_title_shell(cleaned):
+    if not cleaned:
         return False
-    compact = re.sub(r"\s+", "", cleaned)
-    lowered = cleaned.lower()
-    marker_hits = sum(
-        1
-        for marker in PRESSURE_DISCOVERY_MARKERS
-        if _marker_in_pressure_text(marker, compact, lowered)
-    )
-    if marker_hits >= 1:
-        return True
-    if _fragment_specificity_score(cleaned) >= 1.0 and len(compact) >= 5:
-        return True
-    return False
+    return _fragment_can_anchor_world_entry(cleaned)
 
 
 def _rank_query_candidates(
@@ -2312,7 +2332,7 @@ def _world_signal_snapshot(
         )
         pressure = truncate_text(str(bundle.get("pressure_summary") or "").strip() or summary, 220)
         title = display_title(bundle.get("focus") or bundle.get("query"), summary=summary, pressure=pressure)
-        if not title:
+        if not title or not _fragment_can_anchor_world_entry(pressure or title):
             continue
         ranked.append(
             {
@@ -2334,7 +2354,7 @@ def _world_signal_snapshot(
         summary = truncate_text(str(item.get("summary") or item.get("excerpt") or "").strip(), 220)
         pressure = _world_snapshot_pressure_text(item)
         title = display_title(item.get("title"), summary=summary, pressure=pressure)
-        if not title:
+        if not title or not _fragment_can_anchor_world_entry(pressure or summary or title):
             continue
         ranked.append(
             {
@@ -2471,7 +2491,7 @@ def _world_entry_points(
             220,
         )
         title = display_title(bundle.get("focus") or bundle.get("query"), pressure=pressure, summary=summary)
-        if not title or not pressure:
+        if not title or not pressure or not _fragment_can_anchor_world_entry(pressure or title):
             continue
         evidence = "；".join(signal for signal in support_signals if signal and signal != pressure)
         score = _world_snapshot_score(
@@ -2518,8 +2538,6 @@ def _world_entry_points(
                 220,
             )
             title = display_title(item.get("title"), pressure=pressure, summary=summary)
-            if not title:
-                continue
             evidence = truncate_text(
                 str(
                     item.get("excerpt")
@@ -2531,6 +2549,8 @@ def _world_entry_points(
                 ).strip(),
                 180,
             )
+            if not title or not _fragment_can_anchor_world_entry(pressure or evidence or summary or title):
+                continue
             candidate_text = _reading_candidate_text(item)
             score = _world_snapshot_score(title=title, pressure=pressure or summary, item=item)
             score += _reading_evidence_density_bonus(candidate_text)

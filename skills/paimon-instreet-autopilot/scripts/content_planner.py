@@ -1218,22 +1218,17 @@ def _opportunity_live_why_now(
     item: dict[str, Any],
     *,
     field_order: tuple[str, ...],
-    fallback: str,
+    fallback: str = "",
     include_heat: bool = False,
 ) -> str:
     parts = [
         part
         for part in _signal_context_snippets(item, field_order=field_order, limit=2, text_limit=56)
-        if not _is_metric_surface_text(part)
+        if not _is_metric_surface_text(part) and not _source_title_shell(part)
     ]
-    heat_note = ""
-    if include_heat:
-        heat_note = _signal_heat_note(item)
-        if heat_note and parts:
-            parts.append(heat_note)
-    if parts:
-        return "；".join(parts[:3])
-    fallback_note = _object_level_pressure_text(
+    anchor = _object_led_signal_anchor(item, field_order=field_order, limit=56)
+    evidence_hint = _opportunity_evidence_hint(item, field_order=field_order)
+    pressure_note = _object_level_pressure_text(
         item.get("pressure"),
         item.get("summary"),
         item.get("reason"),
@@ -1243,6 +1238,22 @@ def _opportunity_live_why_now(
         item.get("note"),
         item.get("post_title"),
         item.get("title"),
+    )
+    dynamic_parts = _dedupe_texts(
+        [
+            part
+            for part in [*parts, pressure_note, anchor, evidence_hint]
+            if str(part or "").strip()
+        ]
+    )
+    heat_note = ""
+    if include_heat:
+        heat_note = _signal_heat_note(item)
+        if heat_note and dynamic_parts:
+            dynamic_parts.append(heat_note)
+    if dynamic_parts:
+        return "；".join(dynamic_parts[:3])
+    fallback_note = _object_level_pressure_text(
         fallback=fallback,
     )
     if fallback_note:
@@ -2191,53 +2202,62 @@ def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[st
 
 
 def _fallback_lane_pressure_entries(signal_summary: dict[str, Any], *, group_enabled: bool) -> list[dict[str, Any]]:
-    external_information = signal_summary.get("external_information") or {}
-    world_bundle_count = len(list(external_information.get("discovery_bundles") or []))
-    world_candidate_count = len(_iter_external_world_candidates(external_information, limit=10))
-    community_hot_count = len(_high_like_external_posts(list(signal_summary.get("community_hot_posts") or [])))
-    rising_hot_count = len(_high_like_external_posts(list(signal_summary.get("rising_hot_posts") or [])))
-    unresolved_count = len(signal_summary.get("unresolved_failures") or [])
-    reply_pressure_count = len(signal_summary.get("pending_reply_posts") or [])
-    group_heat_count = len(((signal_summary.get("group_watch") or {}).get("hot_posts") or [])[:4])
-
-    ranked = [
-        {
-            "kind": "theory-post",
-            "score": round(
-                1.1
-                + world_bundle_count * 0.75
-                + min(world_candidate_count, 8) * 0.18
-                + min(community_hot_count, 4) * 0.22
-                + min(rising_hot_count, 3) * 0.28,
-                2,
-            ),
-            "reason": "外部世界和公共讨论还在给理论线供压，不需要为了空缺去伪造别的 lane。",
-        },
-        {
-            "kind": "tech-post",
-            "score": round(
-                0.9
-                + min(unresolved_count, 4) * 0.85
-                + world_bundle_count * 0.35
-                + min(world_candidate_count, 6) * 0.16
-                + min(reply_pressure_count, 4) * 0.12,
-                2,
-            ),
-            "reason": "失败链、回退链和外部协议样本还没收口，技术线更像真实压力而不是配额补位。",
-        },
-    ]
-    if group_enabled:
+    ranked: list[dict[str, Any]] = []
+    for track in TRACK_KIND_MAP:
+        if track == "group" and not group_enabled:
+            continue
+        kind = _track_kind(track)
+        bundle = _track_signal_bundle(track, signal_summary)
+        lead = bundle.get("lead") or {} if bundle else {}
+        seed = _fallback_track_seed(track, signal_summary)
+        focus = _concrete_focus_text(
+            seed.get("source_text"),
+            (bundle or {}).get("public_focus_text"),
+            (bundle or {}).get("focus_text"),
+            (bundle or {}).get("title_seed"),
+            lead.get("source_text"),
+        )
+        reason = _object_level_pressure_text(
+            seed.get("why_now"),
+            (bundle or {}).get("why_now"),
+            lead.get("why_now"),
+            (bundle or {}).get("pressure_summary"),
+            (bundle or {}).get("conflict_note"),
+            *((bundle or {}).get("support_signals") or []),
+            fallback=focus,
+        )
+        if not focus and not reason:
+            continue
+        grounded = bool(bundle) and _bundle_has_grounding(bundle, track=track)
+        note_score = _source_signal_note_score(track, reason) if reason else 0.0
+        track_fit = _track_signal_fit(
+            track,
+            focus,
+            reason,
+            seed.get("angle_hint"),
+            lead.get("evidence_hint"),
+        )
+        score = float((bundle or {}).get("score") or 0.0)
+        if grounded:
+            score += 1.35
+        if focus:
+            score += 0.75
+        if reason:
+            score += max(note_score, 0.0) * 0.65
+        if track_fit > 0:
+            score += min(track_fit, 1.6) * 0.45
+        if str(seed.get("signal_type") or lead.get("signal_type") or "").strip() == "failure":
+            score += 0.75
+        reason_text = reason
+        if focus and reason_text and _normalize_title(focus) != _normalize_title(reason_text) and focus not in reason_text:
+            reason_text = f"{focus}：{reason_text}"
+        elif not reason_text:
+            reason_text = focus
         ranked.append(
             {
-                "kind": "group-post",
-                "score": round(
-                    0.8
-                    + min(group_heat_count, 4) * 0.9
-                    + min(unresolved_count, 3) * 0.45
-                    + min(world_candidate_count, 5) * 0.18,
-                    2,
-                ),
-                "reason": "实验室有对象可做，外部样本也够具体，小组帖可以直接沉淀成实验框架。",
+                "kind": kind,
+                "score": round(score, 2),
+                "reason": truncate_text(str(reason_text or "").strip(), 120),
             }
         )
     return sorted(
@@ -5927,7 +5947,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "content", "title"),
-            fallback="正在起飞的公共样本",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "title"))
@@ -5957,7 +5976,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "content", "reason", "title"),
-            fallback="高热公共讨论还在发酵",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "reason", "title"))
@@ -5987,7 +6005,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "content", "title"),
-            fallback="实验室里有对象正在发酵",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "title"))
@@ -6033,7 +6050,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "reason", "title"),
-            fallback="外部讨论里有一条值得正面试探的样本",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "reason", "title"))
@@ -6063,7 +6079,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "error", "post_title"),
-            fallback="同一条失败链还没有收口",
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "error", "post_title"))
         add_source("tech", "failure", title, why_now=why_now, quality_score=2.0, freshness_score=1.0, evidence_hint=evidence_hint)
@@ -6073,7 +6088,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "post_title", "preview"),
-            fallback="这个讨论口还在继续逼你交判断",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "post_title", "preview"))
@@ -6103,7 +6117,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "reason", "title"),
-            fallback="这条外部样本还在逼近当前议题",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "reason", "title"))
@@ -6133,7 +6146,6 @@ def _dynamic_opportunities(
         why_now = _opportunity_live_why_now(
             item,
             field_order=("summary", "post_title", "preview", "title"),
-            fallback="高价值讨论还在逼你补下一句判断",
             include_heat=True,
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "post_title", "preview", "title"))
