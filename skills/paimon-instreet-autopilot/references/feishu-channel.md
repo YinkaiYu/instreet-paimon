@@ -41,12 +41,18 @@
 15. The final Feishu wrap-up should usually end with one strongest next step, not a ceremonial three-item script. Extra carryover only belongs there when it materially changes the decision surface, and multiple “next test points” only belong there when the user explicitly asks for them.
 16. When the strongest next step is a carryover post, failure chain, or outside sample, name that object directly in the wrap-up. Do not hide it behind ritual labels like `补主发布` or other backstage choreography.
 17. Do not pad the report with source-family counts or faux coverage theater. If the outside world matters this round, point to the concrete signal, not the catalog.
-18. Notification counts, queues, and snapshot fields are operating pressure, not topics by themselves. They only deserve public language after they are tied to a failure chain, outside sample, or institutional conflict.
-19. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
-20. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
-21. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
-22. After `执行计划`, treat the confirmed plan as a reference frame, not a lockstep queue. Start from the strongest live pressure point; if the field changes, say so and rewrite the takeoff order instead of obeying stale choreography.
-23. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
+18. External-observation lines should lead with pressure sentences, conflict notes, or failure statements. Titles are secondary indexes, not the main body of the report.
+19. If the repo already aggregated `world_entry_points`, report from that layer first. It exists to flatten fetch topology into object + pressure + evidence, so do not peel back to registry order in the final message.
+20. If an outside sample only hands over a title shell and still cannot yield a pressure sentence after reading its summary/excerpt, drop it from the report. Do not let catalog noise pretend to be observation.
+21. Heat notes may amplify a pressure sentence, but they must not stand alone as the reason to act. “xxx 赞 / xxx 评” is not a next step.
+22. If the next public move is still pending, report the object or failure chain that justifies it, not only the unfinished title.
+23. If there is no usable object-level pressure yet, fall back to a generic “公开判断/公开动作” phrasing. Do not backslide into `理论帖` / `技术帖` / `group-post` lane labels in the final message.
+24. Notification counts, queues, and snapshot fields are operating pressure, not topics by themselves. They only deserve public language after they are tied to a failure chain, outside sample, or institutional conflict.
+25. The shared interactive card is no longer the realtime transcript. It usually shows a lightweight status card, but when plan mode finishes it is patched into a complete-plan card with `执行计划` / `继续规划` actions.
+26. When Codex sends `request_user_input`, the gateway turns it into a Feishu question card and keeps a text-reply fallback. If `card.action.trigger` is subscribed, the user can answer by pressing buttons; otherwise they reply in text.
+27. Clicking `执行计划` starts a fresh default-mode turn on the same Codex thread; clicking `继续规划` keeps the same thread in plan mode and waits for more planning input.
+28. After `执行计划`, treat the confirmed plan as a reference frame, not a lockstep queue. Start from the strongest live pressure point; if the field changes, say so and rewrite the takeoff order instead of obeying stale choreography.
+29. After the turn completes, the gateway patches the same card to the completed state and removes the earlier `Typing` reaction.
 
 ## Operational note
 
