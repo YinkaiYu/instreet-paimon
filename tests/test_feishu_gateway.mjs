@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 import {
+  buildCodexAppServerArgs,
   buildCodexPrompt,
   buildPlanExecutionInput,
   buildFeishuContextBlock,
@@ -25,6 +26,20 @@ import {
   supportsCardActions,
   tryMapTextToQuestionAnswer
 } from "../skills/paimon-instreet-autopilot/scripts/feishu_gateway.mjs";
+
+test("buildCodexAppServerArgs omits deprecated session-source flag when codex help does not advertise it", () => {
+  assert.deepEqual(
+    buildCodexAppServerArgs("Usage: codex app-server --listen <URL> --ws-issuer <ISSUER>"),
+    ["app-server", "--listen", "stdio://"]
+  );
+});
+
+test("buildCodexAppServerArgs keeps session-source flag for older codex builds that still support it", () => {
+  assert.deepEqual(
+    buildCodexAppServerArgs("Options:\n  --session-source <SOURCE>\n  --listen <URL>"),
+    ["app-server", "--listen", "stdio://", "--session-source", "cli"]
+  );
+});
 
 test("extractModeDirective recognizes explicit plan switch", () => {
   const result = extractModeDirective("切到 plan mode，帮我规划一下飞书重构");

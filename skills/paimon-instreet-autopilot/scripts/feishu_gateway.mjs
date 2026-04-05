@@ -39,6 +39,7 @@ let cachedCodexExecutable = null;
 let cachedPythonExecutable = null;
 let cachedStatusPhrases = null;
 let appServerRuntime = null;
+const cachedCodexAppServerHelp = new Map();
 
 function ensureDirs() {
   for (const dir of [stateCurrentDir, tmpDir]) {
@@ -83,6 +84,28 @@ function extractAppServerErrorMessage(error) {
     return error.message;
   }
   return describeError(error);
+}
+
+function readCodexAppServerHelp(codexBin) {
+  if (cachedCodexAppServerHelp.has(codexBin)) {
+    return cachedCodexAppServerHelp.get(codexBin);
+  }
+  const result = spawnSync(codexBin, ["app-server", "--help"], {
+    encoding: "utf8",
+    timeout: 5000,
+    env: process.env
+  });
+  const helpText = result.status === 0 ? `${result.stdout || ""}\n${result.stderr || ""}` : "";
+  cachedCodexAppServerHelp.set(codexBin, helpText);
+  return helpText;
+}
+
+function buildCodexAppServerArgs(appServerHelpText = "") {
+  const args = ["app-server", "--listen", "stdio://"];
+  if (/\B--session-source\b/.test(String(appServerHelpText || ""))) {
+    args.push("--session-source", "cli");
+  }
+  return args;
 }
 
 function isMissingRolloutThreadError(error) {
@@ -973,9 +996,10 @@ class CodexAppServerClient extends EventEmitter {
       return;
     }
     const codexBin = resolveCodexExecutable(this.config, {});
+    const appServerArgs = buildCodexAppServerArgs(readCodexAppServerHelp(codexBin));
     this.process = spawn(
       codexBin,
-      ["app-server", "--listen", "stdio://", "--session-source", "cli"],
+      appServerArgs,
       {
         cwd: repoRoot,
         stdio: ["pipe", "pipe", "pipe"],
@@ -4931,6 +4955,7 @@ if (isDirectRun) {
 }
 
 export {
+  buildCodexAppServerArgs,
   buildCodexPrompt,
   buildPlanExecutionInput,
   buildFeishuContextBlock,
