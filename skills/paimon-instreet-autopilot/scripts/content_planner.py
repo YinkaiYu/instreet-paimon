@@ -5405,6 +5405,36 @@ def _selected_track_scores_for_signal(*texts: Any, candidate_tracks: list[str]) 
     return {}
 
 
+def _selected_public_tracks(track_scores: dict[str, float], *, max_tracks: int = 2) -> list[str]:
+    scored = [
+        (track, float(score))
+        for track, score in track_scores.items()
+        if track in {"theory", "tech", "group"} and float(score) > 0.0
+    ]
+    if not scored:
+        return []
+    scored.sort(key=lambda item: (-item[1], str(item[0])))
+    viable = [
+        (track, float(score))
+        for track, score in scored
+        if float(score) >= _track_signal_threshold(track)
+    ]
+    if not viable:
+        return [scored[0][0]]
+    viable.sort(key=lambda item: (-item[1], str(item[0])))
+    if len(viable) == 1:
+        return [viable[0][0]]
+    top_score = float(viable[0][1])
+    second_score = float(viable[1][1])
+    if top_score - second_score >= 0.42:
+        return [viable[0][0]]
+    return [
+        track
+        for track, score in viable
+        if score >= max(_track_signal_threshold(track), top_score - 0.28)
+    ][:max_tracks]
+
+
 def _rank_dynamic_topic_bundles(signal_summary: dict[str, Any], *, group_enabled: bool) -> list[dict[str, Any]]:
     ranked: list[dict[str, Any]] = []
     for track in _live_track_order(signal_summary, group_enabled=group_enabled):
@@ -5765,7 +5795,30 @@ def _dynamic_opportunities(
             return
         opportunities.append(opportunity)
 
-    def add_external_world_item(item: dict[str, Any], *, source_bias: float = 0.0) -> None:
+    def add_selected_tracks(
+        *,
+        source_text: str,
+        signal_type: str,
+        why_now: str,
+        evidence_hint: str,
+        track_scores: dict[str, float],
+        track_options: dict[str, dict[str, Any]],
+        max_tracks: int = 2,
+    ) -> None:
+        for track in _selected_public_tracks(track_scores, max_tracks=max_tracks):
+            options = dict(track_options.get(track) or {})
+            if not options:
+                continue
+            add_source(
+                track,
+                signal_type,
+                source_text,
+                why_now=why_now,
+                evidence_hint=evidence_hint,
+                **options,
+            )
+
+    def add_external_world_item(item: dict[str, Any]) -> None:
         title = str(item.get("title") or "").strip()
         family = str(item.get("family") or "").strip() or "external"
         signal_type = str(item.get("signal_type") or "").strip() or _external_signal_type(family)
@@ -5813,8 +5866,6 @@ def _dynamic_opportunities(
                 evidence_hint=evidence_hint,
             ),
         )
-        if source_bias:
-            world_score += source_bias
         if family in ACADEMIC_EXTERNAL_FAMILIES and not _external_candidate_can_anchor_world_lane(
             item,
             relevance_score=relevance_score,
@@ -5822,72 +5873,54 @@ def _dynamic_opportunities(
             world_score=world_score,
         ):
             return
-        selected_track_scores = _selected_track_scores_for_signal(
+        track_scores = _selected_track_scores_for_signal(
             source_seed,
             title,
             summary_source,
             evidence_hint,
             candidate_tracks=["theory", "tech"],
         )
-        for track in ("theory", "tech"):
-            if track not in selected_track_scores:
-                continue
-            add_source(
-                track,
-                signal_type,
-                source_seed,
-                why_now=summary,
-                angle_hint=_external_track_angle_hint(
-                    track,
-                    source_seed=source_seed,
-                    summary_source=summary_source,
-                    evidence_hint=evidence_hint,
-                    signal_type=signal_type,
-                ),
-                quality_score=_external_track_quality_score(
-                    track,
-                    source_seed=source_seed,
-                    summary_source=summary_source,
-                    evidence_hint=evidence_hint,
-                    world_score=world_score,
-                    strength=strength,
-                    track_score=selected_track_scores[track],
-                ) + source_bias,
-                freshness_score=_external_track_freshness_score(item, signal_type=signal_type),
-                evidence_hint=evidence_hint,
-                world_score=world_score,
-            )
         group_track_score = _track_signal_fit("group", source_seed, title, summary_source, evidence_hint)
         if _external_candidate_supports_group_lane(
             evidence_hint=evidence_hint,
             summary_source=summary_source,
             source_seed=source_seed,
         ) and group_track_score >= _track_signal_threshold("group"):
-            add_source(
-                "group",
-                signal_type,
-                source_seed,
-                why_now=summary,
-                angle_hint=_external_track_angle_hint(
-                    "group",
-                    source_seed=source_seed,
-                    summary_source=summary_source,
-                    evidence_hint=evidence_hint,
-                    signal_type=signal_type,
-                ),
-                quality_score=_external_track_quality_score(
-                    "group",
-                    source_seed=source_seed,
-                    summary_source=summary_source,
-                    evidence_hint=evidence_hint,
-                    world_score=world_score,
-                    strength=strength,
-                    track_score=group_track_score,
-                ) + source_bias,
-                freshness_score=max(1.2, _external_track_freshness_score(item, signal_type=signal_type) - 0.1),
-                evidence_hint=evidence_hint,
-                world_score=world_score,
-            )
+            track_scores["group"] = group_track_score
+        add_selected_tracks(
+            source_text=source_seed,
+            signal_type=signal_type,
+            why_now=summary,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                track: {
+                    "angle_hint": _external_track_angle_hint(
+                        track,
+                        source_seed=source_seed,
+                        summary_source=summary_source,
+                        evidence_hint=evidence_hint,
+                        signal_type=signal_type,
+                    ),
+                    "quality_score": _external_track_quality_score(
+                        track,
+                        source_seed=source_seed,
+                        summary_source=summary_source,
+                        evidence_hint=evidence_hint,
+                        world_score=world_score,
+                        strength=strength,
+                        track_score=track_scores[track],
+                    ),
+                    "freshness_score": (
+                        max(1.2, _external_track_freshness_score(item, signal_type=signal_type) - 0.1)
+                        if track == "group"
+                        else _external_track_freshness_score(item, signal_type=signal_type)
+                    ),
+                    "world_score": world_score,
+                }
+                for track in track_scores
+            },
+        )
 
     for bundle in list(external_information.get("discovery_bundles") or [])[:6]:
         bundle_seeds = _bundle_world_seed_texts(bundle, limit=3)
@@ -5911,33 +5944,30 @@ def _dynamic_opportunities(
             evidence_hint,
             candidate_tracks=["theory", "tech"],
         )
-        if "theory" in bundle_track_scores:
-            add_source(
-                "theory",
-                "world-bundle",
-                focus,
-                why_now=why_now,
-                angle_hint=_world_bundle_angle(bundle, track="theory"),
-                quality_score=4.8 + min(bundle_track_scores["theory"], 1.4) * 0.35,
-                freshness_score=2.4,
-                evidence_hint=evidence_hint,
-                world_score=0.95 + min(len(lenses), 2) * 0.15,
-            )
-        if "tech" in bundle_track_scores:
-            add_source(
-                "tech",
-                "world-bundle",
-                focus,
-                why_now=why_now,
-                angle_hint=_world_bundle_angle(bundle, track="tech"),
-                quality_score=4.3 + min(bundle_track_scores["tech"], 1.4) * 0.35,
-                freshness_score=2.2,
-                evidence_hint=evidence_hint,
-                world_score=0.85 + min(len(lenses), 2) * 0.12,
-            )
+        add_selected_tracks(
+            source_text=focus,
+            signal_type="world-bundle",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=bundle_track_scores,
+            track_options={
+                "theory": {
+                    "angle_hint": _world_bundle_angle(bundle, track="theory"),
+                    "quality_score": 4.8 + min(bundle_track_scores.get("theory", 0.0), 1.4) * 0.35,
+                    "freshness_score": 2.4,
+                    "world_score": 0.95 + min(len(lenses), 2) * 0.15,
+                },
+                "tech": {
+                    "angle_hint": _world_bundle_angle(bundle, track="tech"),
+                    "quality_score": 4.3 + min(bundle_track_scores.get("tech", 0.0), 1.4) * 0.35,
+                    "freshness_score": 2.2,
+                    "world_score": 0.85 + min(len(lenses), 2) * 0.12,
+                },
+            },
+        )
 
     for item in world_entry_points[:8]:
-        add_external_world_item(item, source_bias=0.28)
+        add_external_world_item(item)
 
     for item in external_world_candidates:
         add_external_world_item(item)
@@ -5951,26 +5981,23 @@ def _dynamic_opportunities(
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "title"))
         track_scores = _selected_track_scores_for_signal(title, why_now, candidate_tracks=["theory", "tech"])
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "rising-hot",
-                title,
-                why_now=why_now,
-                quality_score=4.0 + min(track_scores["theory"], 1.2) * 0.25,
-                freshness_score=3.0,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "rising-hot",
-                title,
-                why_now=why_now,
-                quality_score=3.5 + min(track_scores["tech"], 1.2) * 0.25,
-                freshness_score=3.0,
-                evidence_hint=evidence_hint,
-            )
+        add_selected_tracks(
+            source_text=title,
+            signal_type="rising-hot",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 4.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.25,
+                    "freshness_score": 3.0,
+                },
+                "tech": {
+                    "quality_score": 3.5 + min(track_scores.get("tech", 0.0), 1.2) * 0.25,
+                    "freshness_score": 3.0,
+                },
+            },
+        )
     for item in community_hot_posts[:4]:
         title = _object_led_signal_anchor(item, field_order=("summary", "content", "title"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -5980,26 +6007,23 @@ def _dynamic_opportunities(
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "content", "reason", "title"))
         track_scores = _selected_track_scores_for_signal(title, why_now, item.get("summary"), candidate_tracks=["theory", "tech"])
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "community-hot",
-                title,
-                why_now=why_now,
-                quality_score=4.0 + min(track_scores["theory"], 1.2) * 0.25,
-                freshness_score=2.0,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "community-hot",
-                title,
-                why_now=why_now,
-                quality_score=3.0 + min(track_scores["tech"], 1.2) * 0.25,
-                freshness_score=2.0,
-                evidence_hint=evidence_hint,
-            )
+        add_selected_tracks(
+            source_text=title,
+            signal_type="community-hot",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 4.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.25,
+                    "freshness_score": 2.0,
+                },
+                "tech": {
+                    "quality_score": 3.0 + min(track_scores.get("tech", 0.0), 1.2) * 0.25,
+                    "freshness_score": 2.0,
+                },
+            },
+        )
     for item in (group_watch.get("hot_posts") or [])[:3]:
         title = _object_led_signal_anchor(item, field_order=("summary", "content", "title"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -6014,37 +6038,30 @@ def _dynamic_opportunities(
             item.get("content"),
             candidate_tracks=["theory", "tech"],
         )
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "discussion",
-                title,
-                why_now=why_now,
-                quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.25,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "community-hot",
-                title,
-                why_now=why_now,
-                quality_score=2.5 + min(track_scores["tech"], 1.2) * 0.25,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
         group_track_score = _track_signal_fit("group", title, item.get("summary"), item.get("content"))
         if group_track_score >= _track_signal_threshold("group"):
-            add_source(
-                "group",
-                "discussion",
-                title,
-                why_now=why_now,
-                quality_score=2.5 + min(group_track_score, 1.5) * 0.25,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
+            track_scores["group"] = group_track_score
+        add_selected_tracks(
+            source_text=title,
+            signal_type="discussion",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 2.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.25,
+                    "freshness_score": 1.0,
+                },
+                "tech": {
+                    "quality_score": 2.5 + min(track_scores.get("tech", 0.0), 1.2) * 0.25,
+                    "freshness_score": 1.0,
+                },
+                "group": {
+                    "quality_score": 2.5 + min(track_scores.get("group", 0.0), 1.5) * 0.25,
+                    "freshness_score": 1.0,
+                },
+            },
+        )
     for item in competitor_watchlist[:4]:
         title = _object_led_signal_anchor(item, field_order=("summary", "reason", "title"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -6054,26 +6071,23 @@ def _dynamic_opportunities(
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "reason", "title"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), item.get("reason"), candidate_tracks=["theory", "tech"])
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "discussion",
-                title,
-                why_now=why_now,
-                quality_score=3.0 + min(track_scores["theory"], 1.2) * 0.25,
-                freshness_score=1.5,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "community-hot",
-                title,
-                why_now=why_now,
-                quality_score=3.0 + min(track_scores["tech"], 1.2) * 0.25,
-                freshness_score=1.5,
-                evidence_hint=evidence_hint,
-            )
+        add_selected_tracks(
+            source_text=title,
+            signal_type="discussion",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 3.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.25,
+                    "freshness_score": 1.5,
+                },
+                "tech": {
+                    "quality_score": 3.0 + min(track_scores.get("tech", 0.0), 1.2) * 0.25,
+                    "freshness_score": 1.5,
+                },
+            },
+        )
     for item in unresolved[:2]:
         title = _object_led_signal_anchor(item, field_order=("summary", "post_title", "error"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -6081,8 +6095,24 @@ def _dynamic_opportunities(
             field_order=("summary", "error", "post_title"),
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "error", "post_title"))
-        add_source("tech", "failure", title, why_now=why_now, quality_score=2.0, freshness_score=1.0, evidence_hint=evidence_hint)
-        add_source("group", "failure", title, why_now=why_now, quality_score=2.0, freshness_score=1.0, evidence_hint=evidence_hint)
+        track_scores = _selected_track_scores_for_signal(title, why_now, evidence_hint, candidate_tracks=["tech", "group"])
+        add_selected_tracks(
+            source_text=title,
+            signal_type="failure",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "tech": {
+                    "quality_score": 2.0,
+                    "freshness_score": 1.0,
+                },
+                "group": {
+                    "quality_score": 2.0,
+                    "freshness_score": 1.0,
+                },
+            },
+        )
     for item in reply_posts[:2]:
         title = _object_led_signal_anchor(item, field_order=("summary", "post_title"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -6092,26 +6122,23 @@ def _dynamic_opportunities(
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "post_title", "preview"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), candidate_tracks=["theory", "tech"])
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "reply-pressure",
-                title,
-                why_now=why_now,
-                quality_score=1.0 + min(track_scores["theory"], 1.2) * 0.2,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "reply-pressure",
-                title,
-                why_now=why_now,
-                quality_score=1.0 + min(track_scores["tech"], 1.2) * 0.2,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
+        add_selected_tracks(
+            source_text=title,
+            signal_type="reply-pressure",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 1.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.2,
+                    "freshness_score": 1.0,
+                },
+                "tech": {
+                    "quality_score": 1.0 + min(track_scores.get("tech", 0.0), 1.2) * 0.2,
+                    "freshness_score": 1.0,
+                },
+            },
+        )
     for item in feed_watchlist[:3]:
         title = _object_led_signal_anchor(item, field_order=("summary", "reason", "title"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -6121,26 +6148,23 @@ def _dynamic_opportunities(
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "reason", "title"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), item.get("reason"), candidate_tracks=["theory", "tech"])
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "feed",
-                title,
-                why_now=why_now,
-                quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.2,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "feed",
-                title,
-                why_now=why_now,
-                quality_score=2.0 + min(track_scores["tech"], 1.2) * 0.2,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
+        add_selected_tracks(
+            source_text=title,
+            signal_type="feed",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 2.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.2,
+                    "freshness_score": 1.0,
+                },
+                "tech": {
+                    "quality_score": 2.0 + min(track_scores.get("tech", 0.0), 1.2) * 0.2,
+                    "freshness_score": 1.0,
+                },
+            },
+        )
     for item in top_discussion[:2]:
         title = _object_led_signal_anchor(item, field_order=("summary", "post_title", "title"), limit=72)
         why_now = _opportunity_live_why_now(
@@ -6150,26 +6174,23 @@ def _dynamic_opportunities(
         )
         evidence_hint = _opportunity_evidence_hint(item, field_order=("summary", "post_title", "preview", "title"))
         track_scores = _selected_track_scores_for_signal(title, item.get("summary"), candidate_tracks=["theory", "tech"])
-        if "theory" in track_scores:
-            add_source(
-                "theory",
-                "discussion",
-                title,
-                why_now=why_now,
-                quality_score=2.0 + min(track_scores["theory"], 1.2) * 0.2,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
-        if "tech" in track_scores:
-            add_source(
-                "tech",
-                "discussion",
-                title,
-                why_now=why_now,
-                quality_score=2.0 + min(track_scores["tech"], 1.2) * 0.2,
-                freshness_score=1.0,
-                evidence_hint=evidence_hint,
-            )
+        add_selected_tracks(
+            source_text=title,
+            signal_type="discussion",
+            why_now=why_now,
+            evidence_hint=evidence_hint,
+            track_scores=track_scores,
+            track_options={
+                "theory": {
+                    "quality_score": 2.0 + min(track_scores.get("theory", 0.0), 1.2) * 0.2,
+                    "freshness_score": 1.0,
+                },
+                "tech": {
+                    "quality_score": 2.0 + min(track_scores.get("tech", 0.0), 1.2) * 0.2,
+                    "freshness_score": 1.0,
+                },
+            },
+        )
     for hint in signal_summary.get("user_topic_hints", [])[:4]:
         hint_text = str(hint.get("text") or "").strip()
         if not hint_text:

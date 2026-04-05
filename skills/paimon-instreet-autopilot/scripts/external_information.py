@@ -829,19 +829,8 @@ def _discovery_origin_convergence_bonus(origins: list[str]) -> float:
     return 0.0
 
 
-def _discovery_outside_anchor_adjustment(origins: list[str], *, outside_available: bool) -> float:
-    origin_set = {str(item).strip() for item in origins if str(item).strip()}
-    if not origin_set:
-        return 0.0
-    outside_hits = len(origin_set & DISCOVERY_OUTSIDE_ORIGINS)
-    if outside_hits:
-        return 0.18 + min(outside_hits, 2) * 0.12
-    if outside_available and origin_set <= DISCOVERY_INTERNAL_ORIGINS:
-        return -0.18
-    return 0.0
-
-
 def _discovery_fragment_score(fragment: str, origins: list[str], *, outside_available: bool) -> float:
+    del outside_available
     compact = re.sub(r"\s+", "", str(fragment or ""))
     lowered = compact.lower()
     score = _fragment_specificity_score(fragment)
@@ -850,7 +839,10 @@ def _discovery_fragment_score(fragment: str, origins: list[str], *, outside_avai
     if re.search(r"\d", compact):
         score += 0.12
     score += _discovery_origin_convergence_bonus(origins)
-    score += _discovery_outside_anchor_adjustment(origins, outside_available=outside_available)
+    if _discovery_fragment_has_case_object(fragment):
+        score += 0.26
+    if _fragment_can_anchor_world_entry(fragment):
+        score += 0.14
     if any(
         token in compact or token in lowered
         for token in (
@@ -928,10 +920,8 @@ def _discovery_bundle_relatedness(root: dict[str, Any], candidate: dict[str, Any
     shared_term_count = len(root_terms & candidate_terms)
     score = shared_term_count * 0.55
     score += min(float(candidate.get("score") or 0.0), 2.4) * 0.12
-    root_origins = {str(item).strip() for item in list(root.get("origins") or []) if str(item).strip()}
-    candidate_origins = {str(item).strip() for item in list(candidate.get("origins") or []) if str(item).strip()}
-    if candidate_origins & DISCOVERY_OUTSIDE_ORIGINS and not root_origins & DISCOVERY_OUTSIDE_ORIGINS:
-        score += 0.18
+    if _discovery_fragment_has_case_object(candidate_fragment) and not _discovery_fragment_has_case_object(root_fragment):
+        score += 0.12
     if _pressure_fragment_score(candidate_fragment) > _pressure_fragment_score(root_fragment):
         score += 0.08
     return round(score, 3)
@@ -1040,28 +1030,20 @@ def _fragment_can_anchor_world_entry(fragment: str) -> bool:
     return False
 
 
-def _discovery_root_priority_score(item: dict[str, Any], *, world_pressure_available: bool) -> float:
+def _discovery_root_priority_score(item: dict[str, Any]) -> float:
     fragment = str(item.get("fragment") or "").strip()
-    origins = {str(origin).strip() for origin in list(item.get("origins") or []) if str(origin).strip()}
     pressure = _pressure_fragment_score(fragment)
     specificity = _fragment_specificity_score(fragment)
     has_case_object = _discovery_fragment_has_case_object(fragment)
-    outside_grounded = bool(origins & DISCOVERY_OUTSIDE_ORIGINS and (has_case_object or pressure >= 1.0))
-
     score = float(item.get("score") or 0.0)
     score += min(pressure, 2.4) * 0.6
-    score += min(specificity, 1.6) * 0.12
+    score += min(specificity, 1.6) * 0.18
     if has_case_object:
-        score += 0.35
-    if outside_grounded:
-        score += 0.55
-    if origins & DISCOVERY_OUTSIDE_ORIGINS and not has_case_object and pressure < 1.2:
-        score -= 0.8
-    if world_pressure_available and origins and origins <= DISCOVERY_INTERNAL_ORIGINS:
-        if not has_case_object:
-            score -= 3.25
-        elif pressure < 1.0:
-            score -= 0.85
+        score += 0.42
+    if pressure >= 1.25:
+        score += 0.22
+    if _fragment_can_anchor_world_entry(fragment):
+        score += 0.18
     if _looks_like_source_title_shell(fragment):
         score -= 0.35
     return round(score, 3)
@@ -1069,18 +1051,10 @@ def _discovery_root_priority_score(item: dict[str, Any], *, world_pressure_avail
 
 def _prioritize_bundle_roots(ranked_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prioritized = _prioritize_root_fragments(ranked_fragments)
-    world_pressure_available = any(
-        (set(str(origin).strip() for origin in list(item.get("origins") or []) if str(origin).strip()) & DISCOVERY_OUTSIDE_ORIGINS)
-        and (
-            _discovery_fragment_has_case_object(str(item.get("fragment") or ""))
-            or _pressure_fragment_score(str(item.get("fragment") or "")) >= 1.0
-        )
-        for item in prioritized
-    )
     return sorted(
         prioritized,
         key=lambda item: (
-            -_discovery_root_priority_score(item, world_pressure_available=world_pressure_available),
+            -_discovery_root_priority_score(item),
             -float(item.get("score") or 0.0),
             -_pressure_fragment_score(str(item.get("fragment") or "")),
             -_fragment_specificity_score(str(item.get("fragment") or "")),
@@ -1437,24 +1411,14 @@ def _query_candidate_score(
     cleaned = _clean_query_text(query)
     if not cleaned:
         return float("-inf")
-    del position
+    del position, origins
     score = float(bundle_score or 0.0)
     score += min(_pressure_fragment_score(cleaned), 2.8) * 0.78
     score += min(_fragment_specificity_score(cleaned), 1.8) * 0.26
     if _discovery_fragment_has_case_object(cleaned):
         score += 0.34
-    origin_set = {
-        str(item).strip()
-        for item in list(origins or [])
-        if str(item).strip()
-    }
-    if origin_set & DISCOVERY_OUTSIDE_ORIGINS:
-        if _discovery_fragment_has_case_object(cleaned) or _pressure_fragment_score(cleaned) >= 1.0:
-            score += 0.3
-        else:
-            score += 0.08
-    elif origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS and not _discovery_fragment_has_case_object(cleaned):
-        score -= 0.24 if _pressure_fragment_score(cleaned) < 1.0 else 0.12
+    if _fragment_can_anchor_world_entry(cleaned):
+        score += 0.18
     if direct_reference and (
         _discovery_fragment_has_case_object(cleaned) or _pressure_fragment_score(cleaned) >= 1.1
     ):
@@ -1496,21 +1460,14 @@ def _bundle_query_priority_score(bundle: dict[str, Any]) -> float:
         for item in list(bundle.get("support_signals") or [])
         if str(item).strip()
     ]
-    origins = {
-        str(item).strip()
-        for item in list(bundle.get("audit_origins") or bundle.get("origins") or [])
-        if str(item).strip()
-    }
     score = float(bundle.get("score") or 0.0)
     score += min(_pressure_fragment_score(pressure), 2.8) * 0.82
     score += min(_pressure_fragment_score(focus), 2.4) * 0.28
     score += min(_fragment_specificity_score(focus or pressure), 1.8) * 0.18
     if support_signals:
         score += min(len(support_signals), 3) * 0.08
-    if origins & DISCOVERY_OUTSIDE_ORIGINS and (
-        _discovery_fragment_has_case_object(focus or pressure) or _pressure_fragment_score(pressure or focus) >= 1.0
-    ):
-        score += 0.3
+    if _fragment_can_anchor_world_entry(pressure or focus):
+        score += 0.2
     if _looks_like_source_title_shell(focus):
         score -= 0.35
     return round(score, 3)
@@ -2420,31 +2377,20 @@ def _world_entry_priority_adjustment(
     origins: list[str] | None = None,
     family: str = "",
 ) -> float:
+    del origins, family
     title_text = str(title or "").strip()
     pressure_text = str(pressure or "").strip()
-    origin_set = {
-        str(origin).strip()
-        for origin in list(origins or [])
-        if str(origin).strip()
-    }
     object_text = " ".join(part for part in (title_text, pressure_text) if part)
     has_object = _discovery_fragment_has_case_object(object_text)
     pressure_score = _pressure_fragment_score(pressure_text or title_text)
     title_score = _pressure_fragment_score(title_text)
     score = 0.0
-    if origin_set & DISCOVERY_OUTSIDE_ORIGINS:
+    if has_object:
+        score += 0.24
+    if pressure_score >= 1.2:
         score += 0.18
-        if has_object or pressure_score >= 1.0:
-            score += 0.14
-    elif origin_set and origin_set <= DISCOVERY_INTERNAL_ORIGINS:
-        if not has_object:
-            score -= 0.28
-        if pressure_score < 1.25:
-            score -= 0.2
-    if family in {"community_breakouts", "open_web_search", "manual_web", "zhihu_hot"} and (
-        has_object or pressure_score >= 1.0
-    ):
-        score += 0.08
+    elif pressure_score < 0.95 and not has_object:
+        score -= 0.18
     if _looks_like_source_title_shell(title_text) and pressure_score > title_score:
         score += 0.05
     return round(score, 3)
@@ -2526,9 +2472,9 @@ def _world_entry_points(
             }
         )
 
-    for bucket_name, bucket_bonus, items in (
-        ("selected", 0.28, selected_readings or []),
-        ("raw", 0.0, raw_candidates or []),
+    for bucket_name, items in (
+        ("selected", selected_readings or []),
+        ("raw", raw_candidates or []),
     ):
         for index, item in enumerate(items):
             family = str(item.get("family") or "").strip()
@@ -2554,7 +2500,6 @@ def _world_entry_points(
             candidate_text = _reading_candidate_text(item)
             score = _world_snapshot_score(title=title, pressure=pressure or summary, item=item)
             score += _reading_evidence_density_bonus(candidate_text)
-            score += bucket_bonus
             score += _world_entry_priority_adjustment(
                 title=title,
                 pressure=pressure or summary,
@@ -2585,7 +2530,6 @@ def _world_entry_points(
             -float(item.get("world_score") or 0.0),
             -len(str(item.get("pressure") or "")),
             -len(str(item.get("evidence") or "")),
-            str(item.get("_source_bucket") or ""),
             int(item.get("_source_index") or 0),
             str(item.get("title") or ""),
         )

@@ -1222,6 +1222,7 @@ def _execute_source_mutation(
 9. 这不是只改 planner；如果低热、飞书汇报、研究入口、身份约束、心跳顺序本身有问题，可以直接改那里。
 10. 你输出的 JSON 只用来审计；真正的工作是改文件。
 11. `human_summary` 必须用中文、人话，只交代改了什么和为什么；不要写测试命令、Verification、git 是否提交、具体文件路径。
+12. `deleted_legacy_logic`、`new_capability`、`changed_files_hint` 也只写行为层变化，不要写文件路径，不要拿来源家族、lane 名字或后台桶位冒充能力。
 
 自由技能（必须以这里的精神做减法和去笼子化）：
 {_load_freedom_skill_text()}
@@ -7206,17 +7207,12 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
         }
 
     def observation_score(source_key: str, item: dict[str, Any], payload: dict[str, str]) -> float:
+        del source_key
         title = str(payload.get("title") or "").strip()
         summary = str(payload.get("pressure") or "").strip()
         merged = "\n".join(part for part in (title, summary) if part)
         lowered = merged.lower()
         score = 0.2 + min(len(summary) / 220.0, 0.35)
-        if source_key == "world_entry_points":
-            score += 0.18
-        elif source_key == "world_signal_snapshot":
-            score += 0.12
-        elif source_key == "discovery_bundles":
-            score += 0.08
         if str(item.get("url") or "").strip():
             score += 0.08
         published_at = _parse_iso_datetime(item.get("published_at"))
@@ -7251,6 +7247,10 @@ def _external_observation_items(external_information: dict[str, Any], *, limit: 
         )
         marker_hits = sum(1 for marker in evidence_markers if marker in merged or marker in lowered)
         score += min(marker_hits, 4) * 0.12
+        if content_planner_module._source_signal_has_hard_service_object(merged):
+            score += 0.18
+        if content_planner_module._evidence_hint_from_text(summary, title):
+            score += 0.08
         if summary.startswith("当前 ") and not content_planner_module._source_signal_has_hard_service_object(summary):
             score -= 0.25
         return round(score, 3)

@@ -57,6 +57,7 @@ Paimon runs a dual-track content system:
 - Let `world_signal_snapshot` carry pressure notes, not bare title stacks. A title can stay as an index, but the reusable thing is the conflict, failure sentence, or mechanism note sitting under it.
 - Add one more reusable layer above storage buckets: `world_entry_points` should merge bundles, readings, and raw outside samples into object-led entry surfaces sorted by pressure, evidence density, and freshness, not by family order.
 - `world_entry_points` may keep family or origin only as backstage trace. Planner prompts, Feishu observation lines, and next-step labels should consume the object, pressure sentence, and evidence note instead of reenacting the fetch topology.
+- `world_entry_points`、`selected_readings`、`raw_candidates` 这些也只是后台桶位，不是谁先写进 state 谁就该先发言。对象、压力、证据、时效才是排序理由。
 - Planner-side novelty tracking and keyword pressure should also start from previews, pressure notes, summaries, logs, and conflict sentences before they fall back to titles. Do not let other people's headline packaging decide what Paimon thinks is “the theme”.
 - Community posts and competitor posts are samples, not the only roots. They should often work as lenses on a larger question rather than as the question itself.
 - Do not mine competitor title skeletons as writing hints. Borrow the pressure point, blind spot, or mechanism conflict if it is real; throw away the packaging.
@@ -155,6 +156,7 @@ Paimon runs a dual-track content system:
 - `selected_track_scores` 也不要在零命中时悄悄回退到 `theory-post`。没有 lane fit，就让它回到观察区，而不是拿默认理论壳补位。
 - Fallback candidate order must also come from the live shortlist, grounded bundles, or concrete failure objects. Never append a permanent `theory -> tech -> group` rescue order behind the user's back.
 - Do not duplicate every outside signal into both theory and method lanes by reflex. Let the object decide: structural pressure should stay structural, protocol pressure should become method, and only mixed pressure deserves both.
+- 如果同一个外部对象明显只咬住一条 lane，就让它留在那条 lane；只有 theory / tech / group 都真的各自抓住了不同机制，才允许双线或多线并存。
 - 如果两条 lane 都 grounded、分差又很小，`focus_kind` 应该留空，把它们一起放在公开短名单里继续竞争；不要为了好看先假装已经有唯一主位。
 - Treat open-web search as a default research lane, not a fallback. If the local dashboard and the wider web disagree, the disagreement itself may be the topic.
 - When turning community or external samples into research seeds, prefer their mechanism, summary, or conflict description before the original title. Do not let other people's headline packaging become Paimon's default query shape.
@@ -180,6 +182,7 @@ Paimon runs a dual-track content system:
 - Public heat can nudge a grounded forum idea upward, but it must not punish unrelated lanes for existing. No hidden demotion just because a hot board is active.
 - Feishu 里的外部观察也别按来源家族排队展示。谁更具体、更新、证据更硬，谁就先上，不要把报告写成另一套隐藏来源梯子。
 - Feishu 里的外部观察不要只贴标题。优先报对象和压力句，标题只当索引，让旅行者一眼看见为什么这条样本值得继续追。
+- Feishu 里的外部观察也别给 `world_entry_points`、`selected_readings`、`raw_candidates` 这些存储层名字特权。哪条对象级压力更硬，就直接让哪条先上屏。
 - Feishu 里的“下一步动作”也不要退回 `先补主发布` 这种礼仪口号。能点名具体对象、失败链、外部压力句或公开题目时，就直接点名。
 - Planner 里的 `why_now` 也一样：宁可留空、让 lane 退回观察区，也不要再塞“高热还在发酵”“这条样本值得看看”这种固定机会话术。
 - 低热复盘必须先写回 planner 能读取的状态，再开始下一轮 build_plan；不要先让旧壳混进种子计划，事后再假装复盘。
