@@ -384,6 +384,25 @@ THEORY_SOURCE_SIGNAL_HARD_OBJECT_TOKENS = (
     "凭证",
     "审核",
 )
+THEORY_SOURCE_SIGNAL_NAMED_ANCHOR_TOKENS = (
+    "Jira",
+    "GitHub",
+    "Notion",
+    "Slack",
+    "Zendesk",
+    "ServiceNow",
+    "Shopify",
+    "飞书",
+    "钉钉",
+    "企业微信",
+    "淘宝",
+    "京东",
+    "拼多多",
+    "美团",
+    "饿了么",
+    "滴滴",
+    "12306",
+)
 THEORY_TITLE_DIRECT_ACTOR_TOKENS = (
     "谁",
     "Agent",
@@ -657,6 +676,18 @@ METHOD_TITLE_CONCRETE_OBJECT_TOKENS = (
     "通知",
     "抓取",
     "申诉",
+    "订单",
+    "页面",
+    "结算页",
+    "购物车",
+    "附加项",
+    "加购",
+    "免运",
+    "免配送",
+    "运费",
+    "续费",
+    "年付",
+    "保险",
     "归属",
     "队列",
     "接口",
@@ -721,6 +752,122 @@ METHOD_TITLE_SELF_CASE_TOKENS = (
     "我才让",
     "我才把",
     "我才",
+)
+METHOD_TITLE_AWARENESS_SHELL_TOKENS = (
+    "知道",
+    "看出来",
+    "识别到",
+    "识别出了",
+    "意识到",
+    "察觉",
+    "觉得不对",
+    "发现不对",
+    "不对劲",
+    "被推单",
+    "被诱导",
+    "风险",
+)
+METHOD_PUBLIC_PRODUCT_SCENE_TOKENS = (
+    "支付前",
+    "结算",
+    "结算页",
+    "购物车",
+    "账单",
+    "平台费",
+    "处理费",
+    "会员项",
+    "附加项",
+    "加购",
+    "免运",
+    "免配送",
+    "运费",
+    "续费",
+    "订票",
+    "保费",
+    "年付",
+    "自动续费",
+)
+METHOD_PUBLIC_PRODUCT_SURPRISE_TOKENS = (
+    "冒出",
+    "跳出",
+    "突然",
+    "临门",
+    "变价",
+    "加价",
+    "多出来",
+    "才出现",
+    "才冒出",
+    "蹦出",
+)
+METHOD_PUBLIC_PRODUCT_BUILDER_TOKENS = (
+    "来源",
+    "回写",
+    "撤回",
+    "回退",
+    "冻结",
+    "字段",
+    "版本",
+    "确认时间",
+    "确认点",
+    "签收",
+    "阈值",
+    "账单行",
+    "刷新",
+)
+METHOD_TITLE_GENERIC_SYSTEM_TOKENS = (
+    "多 Agent",
+    "多Agent",
+    "多代理",
+    "多智能体",
+    "Agent 协作",
+    "Agent协作",
+    "代理协作",
+    "任务编排",
+    "系统编排",
+    "任务链",
+)
+METHOD_TITLE_GENERIC_SYSTEM_OUTCOME_TOKENS = (
+    "越权",
+    "授权链",
+    "权限链",
+    "交接",
+    "回写",
+    "责任链",
+    "拦截",
+    "失控",
+)
+METHOD_ENGLISH_ABSTRACT_TOKENS = (
+    "in this paper",
+    "this paper",
+    "we study",
+    "this study",
+    "paper introduces",
+    "paper explores",
+    "paper examines",
+    "generalized reciprocity",
+)
+LOW_HEAT_CLUSTER_SIGNATURE_TOKENS = (
+    "解释",
+    "裁决",
+    "记忆",
+    "历史记录",
+    "记得你",
+    "接手",
+    "接管",
+    "交接",
+    "回写",
+    "权限",
+    "授权",
+    "越权",
+    "责任链",
+    "状态词",
+    "处理中",
+    "签收",
+    "转人工",
+    "等待",
+    "审核",
+    "驳回",
+    "补件",
 )
 LEGACY_STATE_ALIASES = {
     "external_information": "high_quality_sources",
@@ -2511,6 +2658,38 @@ def _recent_low_heat_cluster_fragments(signal_summary: dict[str, Any], *, limit:
     return fragments
 
 
+def _recent_low_heat_items_in_window(signal_summary: dict[str, Any], *, limit: int = 6) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    picked: list[dict[str, Any]] = []
+    for item in (signal_summary.get("low_heat_failures") or {}).get("items", []):
+        recorded_at = _parse_datetime(item.get("recorded_at"))
+        if recorded_at is not None:
+            age_seconds = (now - recorded_at.astimezone(timezone.utc)).total_seconds()
+            if age_seconds > LOW_HEAT_FOLLOWUP_WINDOW_HOURS * 3600:
+                continue
+        picked.append(item)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _low_heat_cluster_signature_tokens(text: str, *, limit: int = 8) -> list[str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    picked: list[str] = []
+    seen: set[str] = set()
+    for token in LOW_HEAT_CLUSTER_SIGNATURE_TOKENS:
+        token_key = _normalize_title(token)
+        if not token_key or token_key in seen or token not in cleaned:
+            continue
+        seen.add(token_key)
+        picked.append(token)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
 def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> bool:
     normalized_text = _normalize_title(text)
     if not normalized_text:
@@ -2560,6 +2739,19 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
         semantic_overlap += 1
         if semantic_overlap >= 2:
             return True
+    candidate_signatures = set(_low_heat_cluster_signature_tokens(text))
+    if candidate_signatures and not _contains_any(text, METHOD_TITLE_CONCRETE_OBJECT_TOKENS):
+        for item in _recent_low_heat_items_in_window(signal_summary):
+            combined = "\n".join(
+                [
+                    str(item.get("title") or "").strip(),
+                    str(item.get("summary") or "").strip(),
+                    *(str(part).strip() for part in list(item.get("lessons") or [])[:2] if str(part).strip()),
+                ]
+            )
+            failure_signatures = set(_low_heat_cluster_signature_tokens(combined))
+            if len(candidate_signatures & failure_signatures) >= 2:
+                return True
     return False
 
 
@@ -2682,6 +2874,110 @@ def _pick_title_detail(track: str, fragments: list[str], lead: str) -> str:
         if not _title_fragments_related(fragment, lead):
             return fragment
     return ""
+
+
+def _method_title_fragment_is_low_signal(fragment: str) -> bool:
+    cleaned = str(fragment or "").strip()
+    if not cleaned:
+        return True
+    compact = re.sub(r"\s+", "", cleaned)
+    if not compact:
+        return True
+    if compact.startswith(("的", "了", "把", "让", "将", "再", "又", "更", "最")):
+        return True
+    if compact in {"我发现", "价值", "模式", "能力", "问题", "系统", "方法", "流程", "方案"}:
+        return True
+    if re.fullmatch(r"[的一是在将把给了呢吗吧和与及或其这那再又更最还都很太只仅等]{1,5}", compact):
+        return True
+    return False
+
+
+def _method_title_has_detail_anchor(track: str, fragment: str) -> bool:
+    detail_tokens = TECH_TRACK_HINT_TOKENS if track == "tech" else GROUP_TRACK_HINT_TOKENS
+    return bool(
+        _method_title_has_concrete_anchor(fragment)
+        or _contains_any(fragment, detail_tokens)
+        or any(token in str(fragment or "") for token in ("失败", "风险", "断口", "边界", "窗口"))
+    )
+
+
+def _filtered_method_title_fragments(track: str, *texts: Any) -> list[str]:
+    fragments = _candidate_title_units(track, *texts)
+    filtered = [fragment for fragment in fragments if not _method_title_fragment_is_low_signal(fragment)]
+    return filtered or fragments
+
+
+def _method_focus_text_from_inputs(
+    track: str,
+    signal_type: str,
+    source_text: str,
+    *context_texts: Any,
+) -> str:
+    cleaned_source = truncate_text(_sanitize_reserved_text(str(source_text or "").strip()), 18)
+    compact_source = re.sub(r"\s+", "", cleaned_source)
+    if (
+        cleaned_source
+        and len(compact_source) <= 12
+        and not _method_title_fragment_is_low_signal(cleaned_source)
+        and not _method_source_text_needs_object_reframe(signal_type, cleaned_source)
+    ):
+        return cleaned_source
+
+    fragments = _filtered_method_title_fragments(track, source_text, *context_texts)
+    for fragment in fragments:
+        if _method_title_has_concrete_anchor(fragment):
+            return truncate_text(fragment, 18)
+    for fragment in fragments:
+        if _method_title_has_detail_anchor(track, fragment):
+            return truncate_text(fragment, 18)
+    return _concrete_focus_text(*fragments, source_text, *context_texts, limit=18)
+
+
+def _compose_method_dynamic_title(
+    track: str,
+    signal_type: str,
+    source_text: str,
+    *,
+    context_texts: tuple[Any, ...] = (),
+) -> str:
+    cleaned_inputs = [str(source_text or "").strip(), *(str(text or "").strip() for text in context_texts if str(text or "").strip())]
+    if not cleaned_inputs:
+        return _fallback_dynamic_title(track, signal_type, source_text, *context_texts)
+    if _looks_like_placeholder_title(cleaned_inputs[0]) or not _contains_cjk(cleaned_inputs[0]):
+        return _fallback_dynamic_title(track, signal_type, *cleaned_inputs)
+
+    fragments = _filtered_method_title_fragments(track, *cleaned_inputs)
+    lead = _method_focus_text_from_inputs(track, signal_type, cleaned_inputs[0], *cleaned_inputs[1:]) or _pick_title_lead(
+        track,
+        fragments,
+        *cleaned_inputs,
+    )
+    detail = next(
+        (
+            fragment
+            for fragment in fragments
+            if not _title_fragments_related(fragment, lead) and _method_title_has_detail_anchor(track, fragment)
+        ),
+        "",
+    )
+    if not detail:
+        detail = next(
+            (
+                fragment
+                for fragment in fragments
+                if not _title_fragments_related(fragment, lead) and not _method_title_fragment_is_low_signal(fragment)
+            ),
+            "",
+        )
+
+    if track == "group":
+        ordered_inputs = [value for value in [lead, detail, *cleaned_inputs] if str(value or "").strip()]
+        return _compose_fragment_title("group", *ordered_inputs)
+    if lead and detail and not _title_fragments_related(lead, detail):
+        return truncate_text(f"{lead}：{detail}", 30)
+    if lead:
+        return truncate_text(lead, 28)
+    return _fallback_dynamic_title(track, signal_type, *cleaned_inputs)
 
 
 def _fallback_dynamic_title(track: str, signal_type: str, *texts: Any) -> str:
@@ -2841,6 +3137,21 @@ def _theory_title_handoff_gap_reason(title: str) -> str:
     if _contains_any(title_text, THEORY_TITLE_CONCRETE_HANDOFF_TOKENS):
         return ""
     return "标题先把“闭嘴 / 排队 / 资格”这类抽象结果叠成态度判断，却没写清断在什么接手节点，读者能感到立场，却看不见故障对象。"
+
+
+def _theory_title_mirror_paradox_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    if not _contains_any(title_text, THEORY_TITLE_META_PACKAGING_TOKENS):
+        return ""
+    lead = title_text.split("：", 1)[0]
+    compact = re.sub(r"\s+", "", lead)
+    if compact.count("的人不") < 2:
+        return ""
+    if _contains_any(title_text, THEORY_SOURCE_SIGNAL_HARD_OBJECT_TOKENS):
+        return ""
+    return "标题把同一组动作折成“X 的人不 Y，Y 的人不 X”这种镜面对句，再叠一个“悖论”包装。句子很齐，但对象和代价都被藏起来了。"
 
 
 def _theory_title_meta_overhang_reason(title: str) -> str:
@@ -3020,6 +3331,94 @@ def _method_title_status_vocab_shell_reason(title: str) -> str:
     return "方法帖标题还在拿一排“收到 / 已响应 / 已处理”这类状态词当门口，看起来像术语整理或命名升级，不像别人能立刻复用的对象级方法。"
 
 
+def _method_title_awareness_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    quoted_bits = re.findall(r"[“\"]([^”\"\n]{1,18})[”\"]", title_text)
+    awareness_hits = sum(
+        1
+        for bit in quoted_bits
+        if _contains_any(bit, METHOD_TITLE_AWARENESS_SHELL_TOKENS)
+    )
+    if awareness_hits < 1 and not _contains_any(title_text, METHOD_TITLE_AWARENESS_SHELL_TOKENS):
+        return ""
+    if not (
+        "别把" in title_text
+        or re.search(r"把[^，。]{0,18}(?:改成|变成|升级成|做成|当成)", title_text)
+        or re.search(r"从[^，。]{0,18}(?:改成|变成)", title_text)
+    ):
+        return ""
+    return "方法帖标题还在借“我知道这里不对 / 识别到了风险”这种认知壳起手，门口先卖的是用户清醒感，不是系统对象、接手动作或验证收益。"
+
+
+def _method_title_public_product_story_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    separator = "：" if "：" in title_text else ":" if ":" in title_text else ""
+    if not separator:
+        return ""
+    lead, tail = [part.strip() for part in title_text.split(separator, 1)]
+    if len(lead) < 6 or len(tail) < 6:
+        return ""
+    if not _contains_any(lead, METHOD_PUBLIC_PRODUCT_SCENE_TOKENS):
+        return ""
+    if not _contains_any(lead, METHOD_PUBLIC_PRODUCT_SURPRISE_TOKENS):
+        return ""
+    if _contains_any(lead, METHOD_PUBLIC_PRODUCT_BUILDER_TOKENS):
+        return ""
+    if not (
+        re.search(r"[0-9一二三四五六七八九十两]+\s*条", tail)
+        or _contains_any(tail, ("规则", "协议", "校验", "账单"))
+    ):
+        return ""
+    return "方法帖标题先把“支付前才冒出的平台费”这种用户侧惊讶场景挂在门口，读者先看到的是结算抱怨，不是产品侧对象、回写字段和撤回路径。"
+
+
+def _method_title_generic_system_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    separator = "：" if "：" in title_text else ":" if ":" in title_text else ""
+    if not separator:
+        return ""
+    lead, tail = [part.strip() for part in title_text.split(separator, 1)]
+    if len(lead) < 6 or len(tail) < 6:
+        return ""
+    if not _contains_any(lead, METHOD_TITLE_GENERIC_SYSTEM_TOKENS):
+        return ""
+    if _contains_any(title_text, METHOD_TITLE_CONCRETE_OBJECT_TOKENS):
+        return ""
+    if not _contains_any(title_text, METHOD_TITLE_GENERIC_SYSTEM_OUTCOME_TOKENS):
+        return ""
+    compact_tail = re.sub(r"\s+", "", tail)
+    if not (
+        re.search(r"[0-9一二三四五六七八九十两]+\s*(个|条|步|层)", compact_tail)
+        or _contains_any(tail, ("规则", "校验", "协议", "回写点", "拦截", "交接点"))
+    ):
+        return ""
+    return "方法帖标题先挂的是“多 Agent 任务 / Agent 协作”这种大场面，读者看不见具体对象、接手节点或回写位，skills 入口太空。"
+
+
+def _method_text_has_public_product_scene(text: str) -> bool:
+    return _contains_any(str(text or "").strip(), METHOD_PUBLIC_PRODUCT_SCENE_TOKENS)
+
+
+def _method_source_signals_have_public_product_builder_evidence(source_signals: list[str]) -> bool:
+    return any(_contains_any(str(item or "").strip(), METHOD_PUBLIC_PRODUCT_BUILDER_TOKENS) for item in source_signals)
+
+
+def _text_has_english_abstract_scaffold(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned or not _ascii_heavy_text(cleaned):
+        return False
+    lowered = cleaned.lower()
+    if any(token in lowered for token in METHOD_ENGLISH_ABSTRACT_TOKENS):
+        return True
+    return cleaned.endswith("...") and len(re.findall(r"[A-Za-z]{4,}", cleaned)) >= 6
+
+
 def _method_source_text_needs_object_reframe(signal_type: str, source_text: str) -> bool:
     cleaned = str(source_text or "").strip()
     signal_type = str(signal_type or "").strip()
@@ -3034,6 +3433,14 @@ def _method_source_text_needs_object_reframe(signal_type: str, source_text: str)
     if _method_title_source_inventory_overhang_reason(cleaned):
         return True
     if _method_title_status_vocab_shell_reason(cleaned):
+        return True
+    if _method_title_awareness_shell_reason(cleaned):
+        return True
+    if _method_title_public_product_story_reason(cleaned):
+        return True
+    if _method_title_generic_system_shell_reason(cleaned):
+        return True
+    if _text_has_english_abstract_scaffold(cleaned):
         return True
     if _source_title_shell(cleaned):
         return True
@@ -3154,11 +3561,8 @@ def _compose_dynamic_title(
         if _theory_source_text_needs_public_reframe(signal_type, title):
             return _fallback_dynamic_title("theory", signal_type, *title_inputs)
         return title
-    if track == "tech":
-        del signal_type, board
-        return _compose_fragment_title("tech", *title_inputs)
-    del signal_type, board
-    return _compose_fragment_title("group", *title_inputs)
+    del board
+    return _compose_method_dynamic_title(track, signal_type, source_text, context_texts=context_texts)
 
 
 def _title_has_stuttering_repeat(title: str) -> bool:
@@ -3668,6 +4072,39 @@ def _bundle_why_now_text(bundle: dict[str, Any], lead: dict[str, Any], *, fallba
     return truncate_text(focus, 72) if focus else ""
 
 
+def _method_public_why_now_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: str, fallback: str) -> str:
+    lead_signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
+    if lead_signal_type == "world-bundle":
+        reason = _world_bundle_reason(bundle)
+        if reason:
+            return truncate_text(reason, 72)
+    return _bundle_why_now_text(bundle, lead, fallback=fallback)
+
+
+def _method_public_angle_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: str, fallback: str) -> str:
+    lead_signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
+    if lead_signal_type == "world-bundle":
+        focus = _method_focus_text_from_inputs(
+            track,
+            lead_signal_type,
+            str(lead.get("source_text") or bundle.get("focus_text") or bundle.get("title_seed") or ""),
+            str(bundle.get("why_now") or "").strip(),
+            str(bundle.get("angle_hint") or "").strip(),
+            str(lead.get("why_now") or "").strip(),
+            str(lead.get("evidence_hint") or "").strip(),
+        ) or "这条失败链"
+        if track == "group":
+            return (
+                f"把“{focus}”压成实验对象：先交代日志断口、接手时点和回写校验，"
+                "再看这条失败链怎样改写实验边界。"
+            )
+        return (
+            f"把“{focus}”改写成方法对象：先钉触发条件、接手动作和回写校验，"
+            "再补反例入口和退出判据。"
+        )
+    return str(bundle.get("angle_hint") or lead.get("angle_hint") or fallback or "").strip()
+
+
 def _method_bundle_projection(bundle: dict[str, Any], lead: dict[str, Any], *, track: str) -> dict[str, Any]:
     lead_signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
     lead_source_text = str(lead.get("source_text") or bundle.get("focus_text") or "").strip()
@@ -3742,18 +4179,43 @@ def _theory_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any]) -> dic
 
 
 def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, track: str) -> dict[str, str]:
-    focus = _bundle_focus_text(bundle, lead, track=track)
-    if not focus:
-        return {}
     lead_signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
+    public_angle = _method_public_angle_text(
+        bundle,
+        lead,
+        track=track,
+        fallback="把现场约束拆成系统设计与执行顺序。",
+    )
+    why_now = _method_public_why_now_text(
+        bundle,
+        lead,
+        track=track,
+        fallback="现场约束已经把同一条失败链暴露出来，不能再写成经验贴。",
+    )
     source_needs_reframe = _method_source_text_needs_object_reframe(
         lead_signal_type,
         str(lead.get("source_text") or bundle.get("focus_text") or ""),
     )
     structural_supports = _bundle_structural_support_texts(bundle, lead, limit=4)
+    if source_needs_reframe:
+        structural_supports = _dedupe_texts(
+            [public_angle, why_now, *structural_supports]
+        )[:6]
+    focus = _method_focus_text_from_inputs(
+        track,
+        lead_signal_type,
+        str(bundle.get("focus_text") or bundle.get("title_seed") or lead.get("source_text") or ""),
+        public_angle,
+        why_now,
+        *structural_supports,
+    ) or _bundle_focus_text(bundle, lead, track=track)
+    if not focus:
+        return {}
+    structural_fragments = _bundle_structural_fragments(*structural_supports, why_now, limit=6)
     signal_phrase = (
         _concrete_focus_text(
             *(_runtime_title_fragments(*structural_supports) if source_needs_reframe else []),
+            *(structural_fragments if source_needs_reframe else []),
             *(structural_supports if source_needs_reframe else []),
             _bundle_signal_phrase(bundle, lead),
             focus,
@@ -3762,6 +4224,7 @@ def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, tra
     )
     support_phrase = (
         _concrete_focus_text(
+            *(structural_fragments if source_needs_reframe else []),
             *(structural_supports if source_needs_reframe else []),
             _bundle_support_phrase(bundle, lead),
             signal_phrase,
@@ -3769,7 +4232,6 @@ def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, tra
         )
         or signal_phrase
     )
-    why_now = _bundle_why_now_text(bundle, lead, fallback="现场约束已经把同一条失败链暴露出来，不能再写成经验贴。")
     novelty_subject = "实验框架" if track == "group" else "方法框架"
     theory_position = (
         f"把“{focus}”放进派蒙的实验室治理与自治运营论，讨论的是哪段方法边界会持续吞掉判断力，而不是再围观一次热帖。"
@@ -4504,6 +4966,7 @@ def _idea_theory_board_fit_issue(idea: dict[str, Any]) -> str:
 def _idea_method_specificity_issues(idea: dict[str, Any]) -> list[str]:
     anchors = _idea_anchor_fragments(idea)
     issues: list[str] = []
+    source_signals = [str(item).strip() for item in list(idea.get("source_signals") or []) if str(item).strip()]
     if not anchors:
         return ["缺少题目自己的证据锚点"]
     if _idea_uses_low_autonomy_language(idea):
@@ -4524,6 +4987,17 @@ def _idea_method_specificity_issues(idea: dict[str, Any]) -> list[str]:
     )
     if stock_fields >= 1:
         issues.append("方法框架还在复用旧协议壳，没有交出这次题目自己的故障对象和验证动作")
+    public_scene_text = _joined_idea_text(
+        idea.get("title"),
+        idea.get("angle"),
+        idea.get("why_now"),
+        *source_signals,
+    )
+    if (
+        _method_text_has_public_product_scene(public_scene_text)
+        and not _method_source_signals_have_public_product_builder_evidence(source_signals)
+    ):
+        issues.append("题目来自结算页/购物车/续费页这类公共产品现场，但 source_signals 还没交账单来源、撤回路径或回写位这类产品侧证据；现在更像诊断，不像可复用方法")
     return issues
 
 
@@ -4722,6 +5196,10 @@ def _audit_generated_idea(
         failure_reason = inventory_reason
     elif kind in {"tech-post", "group-post"} and (status_vocab_reason := _method_title_status_vocab_shell_reason(str(audited.get("title") or ""))):
         failure_reason = status_vocab_reason
+    elif kind in {"tech-post", "group-post"} and (awareness_reason := _method_title_awareness_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = awareness_reason
+    elif kind in {"tech-post", "group-post"} and (public_product_reason := _method_title_public_product_story_reason(str(audited.get("title") or ""))):
+        failure_reason = public_product_reason
     elif title_scene_overhang:
         failure_reason = (
             "标题还在拿外部场景当门口："
@@ -4823,6 +5301,7 @@ def _repair_needs_field_rebuild(kind: str, reason: str) -> bool:
         return any(
             token in reason
             for token in (
+                "指标表层",
                 "理论帖还不完整",
                 "理论帖还没形成完整理论单元",
                 "概念/机制还没真正咬住",
@@ -4839,6 +5318,7 @@ def _repair_needs_field_rebuild(kind: str, reason: str) -> bool:
         return any(
             token in reason
             for token in (
+                "指标表层",
                 "方法线候选",
                 "方法框架",
                 "缺证据段",
@@ -4938,16 +5418,42 @@ def _repair_rejected_public_candidate(
         else:
             board = "skills" if kind == "group-post" else _preferred_tech_board(lead)
             source_signals = _signal_bundle_source_signals(track, bundle, signal_summary)
-            focus = _bundle_focus_text(bundle, lead, track=track)
+            method_fields = _method_fallback_fields(bundle, lead, track=track)
+            if not method_fields:
+                return None
+            why_now = _method_public_why_now_text(
+                bundle,
+                lead,
+                track=track,
+                fallback=str(bundle.get("focus_text") or current.get("title") or ""),
+            )
+            angle = _method_public_angle_text(
+                bundle,
+                lead,
+                track=track,
+                fallback="把现场约束拆成系统设计与执行顺序。",
+            )
+            focus = _method_focus_text_from_inputs(
+                track,
+                signal_type,
+                str(bundle.get("title_seed") or bundle.get("focus_text") or current.get("title") or ""),
+                angle,
+                why_now,
+                *source_signals,
+                method_fields.get("mechanism_core"),
+                method_fields.get("practice_program"),
+            ) or _bundle_focus_text(bundle, lead, track=track)
             title_seed = _compose_dynamic_title(
                 track,
                 signal_type,
                 focus,
                 board=board,
                 context_texts=(
-                    bundle.get("angle_hint"),
-                    bundle.get("why_now"),
-                    bundle.get("focus_text"),
+                    angle,
+                    why_now,
+                    "；".join(source_signals),
+                    method_fields.get("mechanism_core"),
+                    method_fields.get("practice_program"),
                 ),
             )
             title_seed = _stutter_safe_title(title_seed, focus)
@@ -4967,19 +5473,11 @@ def _repair_rejected_public_candidate(
                     }
                 )
             if title_reframe or field_rebuild or _idea_uses_low_autonomy_language(repaired):
-                method_fields = _method_fallback_fields(bundle, lead, track=track)
-                if not method_fields:
-                    return None
                 repaired.update(
                     {
                         "signal_type": signal_type,
-                        "angle": str(
-                            bundle.get("angle_hint")
-                            or lead.get("angle_hint")
-                            or repaired.get("angle")
-                            or "把现场约束拆成系统设计与执行顺序。"
-                        ),
-                        "why_now": str(bundle.get("why_now") or lead.get("why_now") or repaired.get("why_now") or ""),
+                        "angle": angle or str(repaired.get("angle") or ""),
+                        "why_now": why_now or str(repaired.get("why_now") or ""),
                         "source_signals": source_signals or list(repaired.get("source_signals") or []),
                         "novelty_basis": method_fields["novelty_basis"],
                         "concept_core": method_fields["concept_core"],
@@ -6706,7 +7204,7 @@ def _generate_codex_ideas(
    - `square`：公共情绪入口、低门槛参与、标题要有冲突感，结尾要能让别人立刻补自己的经历。
    - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
    - `philosophy`：悖论、困境、真相、结构判断，要能引发站队或反驳。
-   - `skills`：数字、前后对比、失败链路、可复制规则；标题第一屏必须先点明具体对象、故障或收益，不要只报“4 段协议”“一套框架”这种内部包装，也不要写成“场景 A、场景 B：16 人访谈 + 1 段日志，逼出 4 个节点”这种先晒取材过程的门口；也不要把“收到 / 已响应 / 已处理”这类状态词排成门口，再补“6 条规则 / 改成责任链”，那还是在卖命名整理，不是在交对象级方法。
+   - `skills`：数字、前后对比、失败链路、可复制规则；标题第一屏必须先点明具体对象、故障或收益，不要只报“4 段协议”“一套框架”这种内部包装，也不要写成“场景 A、场景 B：16 人访谈 + 1 段日志，逼出 4 个节点”这种先晒取材过程的门口；也不要把“收到 / 已响应 / 已处理”这类状态词排成门口，再补“6 条规则 / 改成责任链”，那还是在卖命名整理，不是在交对象级方法；如果题目来自结算页、续费页、订票页这类公共产品界面，也别把“我知道这里不对 / 识别到风险”这种用户内心独白，或者“支付前才冒出的平台费”这种用户侧惊讶句挂在门口，先交产品侧对象、接手动作和验证收益。
 18. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
    - `square` 默认：`board_profile=square`, `hook_type=public-emotion`, `cta_type=comment-scene`
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
@@ -6861,40 +7359,59 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
         or "自治运营仓库"
     )
     board = _preferred_tech_board(lead)
-    title = _compose_dynamic_title(
-        "tech",
-        str(bundle.get("signal_type") or lead.get("signal_type") or ""),
-        str(bundle.get("title_seed") or focus_title or "自治运营仓库"),
-        board=board,
-        context_texts=(
-            bundle.get("angle_hint"),
-            bundle.get("why_now"),
-            bundle.get("focus_text"),
-        ),
-    )
-    title = _stutter_safe_title(title, bundle_focus_title or focus_title)
-    title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     source_signals = _signal_bundle_source_signals("tech", bundle, signal_summary)
-    why_now = _bundle_why_now_text(bundle, lead, fallback=str(bundle.get("focus_text") or focus_title or ""))
-    if not why_now:
-        return {}
     method_fields = _method_fallback_fields(bundle, lead, track="tech")
     if not method_fields:
         return {}
-    angle = str(
-        bundle.get("angle_hint")
-        or lead.get("angle_hint")
-        or (
+    signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or "")
+    why_now = _method_public_why_now_text(
+        bundle,
+        lead,
+        track="tech",
+        fallback=str(bundle.get("focus_text") or focus_title or ""),
+    )
+    if not why_now:
+        return {}
+    angle = _method_public_angle_text(
+        bundle,
+        lead,
+        track="tech",
+        fallback=(
             f"围绕“{truncate_text(str(bundle.get('focus_text') or focus_title), 16)}”把对象、触发条件、接手动作和复核回写压成同一套方法。"
             if str(bundle.get("focus_text") or focus_title).strip()
             else ""
-        )
-    ).strip()
+        ),
+    )
     if not angle:
         return {}
+    title_focus = _method_focus_text_from_inputs(
+        "tech",
+        signal_type,
+        str(bundle.get("title_seed") or bundle.get("focus_text") or focus_title or "自治运营仓库"),
+        angle,
+        why_now,
+        *source_signals,
+        method_fields.get("mechanism_core"),
+        method_fields.get("practice_program"),
+    ) or str(bundle.get("focus_text") or focus_title or "自治运营仓库")
+    title = _compose_dynamic_title(
+        "tech",
+        signal_type,
+        title_focus,
+        board=board,
+        context_texts=(
+            angle,
+            why_now,
+            "；".join(source_signals),
+            method_fields.get("mechanism_core"),
+            method_fields.get("practice_program"),
+        ),
+    )
+    title = _stutter_safe_title(title, title_focus or bundle_focus_title or focus_title)
+    title, is_followup, part_number = _ensure_title_unique(title, recent_titles, allow_followup=False)
     return {
         "kind": "tech-post",
-        "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
+        "signal_type": signal_type,
         "submolt": board,
         "board_profile": board,
         "hook_type": default_hook_type(board),
@@ -6930,17 +7447,54 @@ def _fallback_group_idea(
     lead = bundle.get("lead") or {}
     bundle = _method_bundle_projection(bundle, lead, track="group")
     lead = bundle.get("lead") or lead
-    raw_title = _compose_dynamic_title(
-        "group",
-        str(bundle.get("signal_type") or lead.get("signal_type") or ""),
-        str(bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
-        context_texts=(
-            bundle.get("angle_hint"),
-            bundle.get("why_now"),
-            bundle.get("focus_text"),
+    source_signals = _signal_bundle_source_signals("group", bundle, signal_summary)
+    method_fields = _method_fallback_fields(bundle, lead, track="group")
+    if not method_fields:
+        return {}
+    signal_type = str(bundle.get("signal_type") or lead.get("signal_type") or "")
+    why_now = _method_public_why_now_text(
+        bundle,
+        lead,
+        track="group",
+        fallback=str(bundle.get("focus_text") or "实验室的下一条治理协议"),
+    )
+    if not why_now:
+        return {}
+    angle = _method_public_angle_text(
+        bundle,
+        lead,
+        track="group",
+        fallback=(
+            f"围绕“{truncate_text(str(bundle.get('focus_text') or '实验室的下一条治理协议'), 16)}”把约束、反例入口和协议边界改写成一次可复跑实验。"
+            if str(bundle.get("focus_text") or "").strip()
+            else "把约束、反例入口和协议边界改写成一次可复跑实验。"
         ),
     )
-    raw_title = _stutter_safe_title(raw_title, str(bundle.get("focus_text") or ""))
+    if not angle:
+        return {}
+    title_focus = _method_focus_text_from_inputs(
+        "group",
+        signal_type,
+        str(bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
+        angle,
+        why_now,
+        *source_signals,
+        method_fields.get("mechanism_core"),
+        method_fields.get("practice_program"),
+    ) or str(bundle.get("focus_text") or "实验室的下一条治理协议")
+    raw_title = _compose_dynamic_title(
+        "group",
+        signal_type,
+        title_focus,
+        context_texts=(
+            angle,
+            why_now,
+            "；".join(source_signals),
+            method_fields.get("mechanism_core"),
+            method_fields.get("practice_program"),
+        ),
+    )
+    raw_title = _stutter_safe_title(raw_title, title_focus or str(bundle.get("focus_text") or ""))
     allow_followup = previous_title.startswith(base_series)
     title, is_followup, part_number = _ensure_title_unique(
         raw_title,
@@ -6948,27 +7502,9 @@ def _fallback_group_idea(
         allow_followup=allow_followup,
         series_prefix=base_series,
     )
-    source_signals = _signal_bundle_source_signals("group", bundle, signal_summary)
-    why_now = _bundle_why_now_text(bundle, lead, fallback=str(bundle.get("focus_text") or raw_title or ""))
-    if not why_now:
-        return {}
-    method_fields = _method_fallback_fields(bundle, lead, track="group")
-    if not method_fields:
-        return {}
-    angle = str(
-        bundle.get("angle_hint")
-        or lead.get("angle_hint")
-        or (
-            f"围绕“{truncate_text(str(bundle.get('focus_text') or raw_title), 16)}”把约束、反例入口和协议边界改写成一次可复跑实验。"
-            if str(bundle.get("focus_text") or raw_title).strip()
-            else ""
-        )
-    ).strip()
-    if not angle:
-        return {}
     return {
         "kind": "group-post",
-        "signal_type": str(bundle.get("signal_type") or lead.get("signal_type") or ""),
+        "signal_type": signal_type,
         "group_id": group.get("id"),
         "submolt": "skills",
         "board_profile": "skills",

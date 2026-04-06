@@ -2162,6 +2162,131 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertTrue(content_planner._method_source_text_needs_object_reframe("world-bundle", "上下文不是记忆"))
         self.assertTrue(content_planner._method_source_text_needs_object_reframe("world-bundle", "为什么「第二遍」比「第一遍」更危险"))
 
+    def test_fallback_group_idea_reframes_world_bundle_into_object_level_method_idea(self) -> None:
+        signal_summary = {
+            "dynamic_topics": [
+                {
+                    "track": "group",
+                    "signal_type": "world-bundle",
+                    "source_text": "我发现「错误日志」比「成功记录」更有价值",
+                    "why_now": "这轮外部发现里，Agent 的三种「静默失败」模式、评论区从争论变成了点赞都在把“我发现「错误日志」比「成功记录」更有价值”往同一条问题链上压。",
+                    "angle_hint": "把“我发现「错误日志」比「成功记录」更有价值”和评论区从争论变成了点赞改写成协议、状态分层、接管窗口和回退链。",
+                    "quality_score": 4.2,
+                    "freshness_score": 1.2,
+                    "world_score": 2.3,
+                    "evidence_hint": "Agent 的三种「静默失败」模式；评论区从争论变成了点赞",
+                    "overlap_score": (0, 0, 0),
+                },
+                {
+                    "track": "group",
+                    "signal_type": "world-bundle",
+                    "source_text": "评论区从争论变成了点赞",
+                    "why_now": "这轮外部发现里，我发现「错误日志」比「成功记录」更有价值也在把“评论区从争论变成了点赞”往同一条问题链上压。",
+                    "angle_hint": "把“评论区从争论变成了点赞”和我发现「错误日志」比「成功记录」更有价值改写成日志断口、接手窗口和回写校验。",
+                    "quality_score": 4.1,
+                    "freshness_score": 1.1,
+                    "world_score": 2.1,
+                    "evidence_hint": "我发现「错误日志」比「成功记录」更有价值；日志断口；接手窗口",
+                    "overlap_score": (0, 0, 0),
+                },
+            ],
+            "hot_group_post": {"title": "Agent心跳同步实验室：旧标题"},
+            "novelty_pressure": content_planner._novelty_pressure([]),
+            "community_hot_posts": [],
+            "competitor_watchlist": [],
+            "rising_hot_posts": [],
+            "pending_reply_posts": [],
+            "unresolved_failures": [],
+        }
+        idea = content_planner._fallback_group_idea(
+            signal_summary,
+            [],
+            {"id": "group-1", "display_name": "Agent心跳同步实验室"},
+        )
+        audited = content_planner._audit_generated_idea(
+            dict(idea),
+            signal_summary=signal_summary,
+            recent_titles=[],
+        )
+
+        self.assertIn("错误日志", idea["title"])
+        self.assertNotIn("我发现", idea["title"])
+        self.assertNotIn("价值 / 我发现", idea["title"])
+        self.assertIn("日志断口", idea["angle"])
+        self.assertNotIn("点赞", idea["why_now"])
+        self.assertIsNone(audited.get("failure_reason_if_rejected"))
+
+    def test_repair_rejected_group_candidate_rebuilds_metric_surface_rejection(self) -> None:
+        signal_summary = {
+            "dynamic_topics": [
+                {
+                    "track": "group",
+                    "signal_type": "world-bundle",
+                    "source_text": "我发现「错误日志」比「成功记录」更有价值",
+                    "why_now": "这轮外部发现里，Agent 的三种「静默失败」模式、评论区从争论变成了点赞都在把“我发现「错误日志」比「成功记录」更有价值”往同一条问题链上压。",
+                    "angle_hint": "把“我发现「错误日志」比「成功记录」更有价值”和评论区从争论变成了点赞改写成协议、状态分层、接管窗口和回退链。",
+                    "quality_score": 4.2,
+                    "freshness_score": 1.2,
+                    "world_score": 2.3,
+                    "evidence_hint": "Agent 的三种「静默失败」模式；评论区从争论变成了点赞",
+                    "overlap_score": (0, 0, 0),
+                },
+                {
+                    "track": "group",
+                    "signal_type": "world-bundle",
+                    "source_text": "评论区从争论变成了点赞",
+                    "why_now": "这轮外部发现里，我发现「错误日志」比「成功记录」更有价值也在把“评论区从争论变成了点赞”往同一条问题链上压。",
+                    "angle_hint": "把“评论区从争论变成了点赞”和我发现「错误日志」比「成功记录」更有价值改写成日志断口、接手窗口和回写校验。",
+                    "quality_score": 4.1,
+                    "freshness_score": 1.1,
+                    "world_score": 2.1,
+                    "evidence_hint": "我发现「错误日志」比「成功记录」更有价值；日志断口；接手窗口",
+                    "overlap_score": (0, 0, 0),
+                },
+            ],
+            "hot_group_post": {"title": "Agent心跳同步实验室：旧标题"},
+            "novelty_pressure": content_planner._novelty_pressure([]),
+            "community_hot_posts": [],
+            "competitor_watchlist": [],
+            "rising_hot_posts": [],
+            "pending_reply_posts": [],
+            "unresolved_failures": [],
+        }
+        repaired = content_planner._repair_rejected_public_candidate(
+            "group-post",
+            [
+                {
+                    "kind": "group-post",
+                    "signal_type": "world-bundle",
+                    "title": "Agent心跳同步实验室：价值 / 我发现",
+                    "submolt": "skills",
+                    "group_id": "group-1",
+                    "angle": "把现场材料写成通用协议。",
+                    "why_now": "评论区从争论变成了点赞；当前 500 赞 / 900 评",
+                    "source_signals": [
+                        "我发现「错误日志」比「成功记录」更有价值",
+                        "评论区从争论变成了点赞",
+                    ],
+                    "novelty_basis": "旧壳",
+                    "concept_core": "旧壳",
+                    "mechanism_core": "旧壳",
+                    "boundary_note": "旧壳",
+                    "theory_position": "旧壳",
+                    "practice_program": "旧壳",
+                    "failure_reason_if_rejected": "这个候选停在指标表层，没有推进成结构问题。",
+                }
+            ],
+            signal_summary=signal_summary,
+            recent_titles=[],
+            group={"id": "group-1", "display_name": "Agent心跳同步实验室"},
+        )
+
+        self.assertIsNotNone(repaired)
+        self.assertIn("错误日志", repaired["title"])
+        self.assertNotIn("我发现", repaired["title"])
+        self.assertNotIn("点赞", repaired["why_now"])
+        self.assertFalse(repaired.get("failure_reason_if_rejected"))
+
     def test_repair_rejected_public_candidate_handles_overlap_rejection(self) -> None:
         recent_titles = [
             "Agent心跳同步实验室：评论抓取反复失手后，如何用状态机做故障分层与修复排序",
@@ -6574,6 +6699,53 @@ class HeartbeatSupervisorTests(unittest.TestCase):
         mocked_finalize.assert_called_once()
         self.assertEqual("feishu-report", attempt_record["supervisor_feishu_report"]["kind"])
         self.assertFalse(attempt_record["heartbeat_summary"]["feishu_report_deferred"])
+
+    def test_finalize_latest_attempt_report_if_needed_on_failed_run(self) -> None:
+        run_record = {
+            "started_at": "2026-04-06T12:00:00+00:00",
+            "status": "running",
+            "attempts": [
+                {
+                    "attempt": 3,
+                    "heartbeat_summary": {
+                        "ran_at": "2026-04-06T12:07:31+00:00",
+                        "feishu_report_required": True,
+                        "feishu_report_deferred": True,
+                        "actions": [],
+                        "failure_details": [],
+                    },
+                }
+            ],
+        }
+        updated_summary = {
+            **run_record["attempts"][0]["heartbeat_summary"],
+            "feishu_report_deferred": False,
+            "feishu_report_sent": True,
+        }
+        args = heartbeat_supervisor.argparse.Namespace(execute=True)
+        settings = {"require_feishu_report": True}
+
+        with contextlib.ExitStack() as stack:
+            mocked_finalize = stack.enter_context(
+                mock.patch.object(
+                    heartbeat_supervisor.heartbeat_module,
+                    "finalize_deferred_feishu_report",
+                    return_value=(updated_summary, {"kind": "feishu-report"}),
+                )
+            )
+            stack.enter_context(mock.patch.object(heartbeat_supervisor.heartbeat_module, "_heartbeat_failure_detail_limit", return_value=3))
+
+            ok = heartbeat_supervisor._finalize_latest_attempt_report_if_needed(
+                run_record,
+                args=args,
+                settings=settings,
+                config=object(),
+            )
+
+        self.assertTrue(ok)
+        mocked_finalize.assert_called_once()
+        self.assertEqual("feishu-report", run_record["attempts"][0]["supervisor_feishu_report"]["kind"])
+        self.assertFalse(run_record["attempts"][0]["heartbeat_summary"]["feishu_report_deferred"])
 
 class PublishOracleTests(unittest.TestCase):
     class _FakeOracleClient:

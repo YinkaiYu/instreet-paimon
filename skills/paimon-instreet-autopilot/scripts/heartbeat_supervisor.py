@@ -233,7 +233,13 @@ def _evaluate_attempt(
         primary_publication_required_for_run = require_primary_publication
     primary_publication_downgraded = bool(require_primary_publication and summary_primary_required is False)
     primary_publication_succeeded = bool(summary.get("primary_publication_succeeded")) if isinstance(summary, dict) else False
-    primary_publication_missing = bool(primary_publication_required_for_run and not primary_publication_succeeded)
+    primary_publication_mode = str(summary.get("primary_publication_mode") or "").strip() if isinstance(summary, dict) else ""
+    primary_publication_not_actionable = primary_publication_mode == "not-actionable"
+    primary_publication_missing = bool(
+        primary_publication_required_for_run
+        and not primary_publication_succeeded
+        and not primary_publication_not_actionable
+    )
     if primary_publication_missing:
         issues.append("no primary publication recorded in heartbeat summary")
     feishu_report_sent = bool(summary.get("feishu_report_sent")) if isinstance(summary, dict) else False
@@ -280,6 +286,7 @@ def _evaluate_attempt(
         "primary_publication_required": primary_publication_required_for_run,
         "primary_publication_succeeded": primary_publication_succeeded,
         "primary_publication_downgraded": primary_publication_downgraded,
+        "primary_publication_not_actionable": primary_publication_not_actionable,
         "feishu_report_sent": feishu_report_sent,
         "feishu_report_pending_target": feishu_report_pending_target,
         "feishu_report_deferred": feishu_report_deferred,
@@ -602,6 +609,30 @@ def _finalize_deferred_report_if_needed(
     return updated_summary, report_action, report_kind in {"feishu-report", "feishu-report-pending-target", "feishu-report-skipped"}
 
 
+def _finalize_latest_attempt_report_if_needed(
+    run_record: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    config,
+) -> bool:
+    attempts = list(run_record.get("attempts") or [])
+    if not attempts:
+        return True
+    last_attempt = attempts[-1]
+    summary_key = "post_repair_summary" if isinstance(last_attempt.get("post_repair_summary"), dict) else "heartbeat_summary"
+    summary = last_attempt.get(summary_key)
+    final_summary, report_action, report_ok = _finalize_deferred_report_if_needed(
+        config,
+        summary,
+        require_feishu_report=args.execute and settings["require_feishu_report"],
+    )
+    last_attempt[summary_key] = final_summary
+    if report_action is not None:
+        last_attempt["supervisor_feishu_report"] = report_action
+    return report_ok
+
+
 def _complete_successful_run(
     run_record: dict[str, Any],
     attempt_record: dict[str, Any],
@@ -813,6 +844,12 @@ def main() -> None:
                     return
                 raise SystemExit(1)
 
+        _finalize_latest_attempt_report_if_needed(
+            run_record,
+            args=args,
+            settings=settings,
+            config=config,
+        )
         run_record["status"] = "failed"
         run_record["completed_at"] = now_utc()
         write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
