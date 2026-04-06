@@ -384,6 +384,10 @@ def _primary_plan_retry_rounds(config) -> int:
         return DEFAULT_PRIMARY_PLAN_RETRY_ROUNDS
 
 
+def _heartbeat_requires_primary_publication(config) -> bool:
+    return bool(config.automation.get("heartbeat_require_primary_publication", False))
+
+
 def _ensure_autonomy_state_files() -> None:
     ensure_external_information_files()
     if not USER_TOPIC_HINTS_PATH.exists():
@@ -8002,7 +8006,8 @@ def main() -> None:
     primary_publication_required = bool(
         args.execute
         and (
-            _plan_has_primary_publication_pressure(plan)
+            _heartbeat_requires_primary_publication(config)
+            or _plan_has_primary_publication_pressure(plan)
             or _carryover_requires_primary_publication(carryover_tasks)
         )
     )

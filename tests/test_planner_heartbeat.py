@@ -5973,7 +5973,7 @@ class PrimaryPublishFlowTests(unittest.TestCase):
 
         self.assertEqual(0, raised.exception.code)
 
-    def test_main_does_not_force_primary_publication_when_seed_plan_has_only_rejected_shortlist(self) -> None:
+    def test_main_retries_primary_publication_when_required_and_seed_plan_has_only_rejected_shortlist(self) -> None:
         config = type(
             "Config",
             (),
@@ -6065,7 +6065,7 @@ class PrimaryPublishFlowTests(unittest.TestCase):
             )
 
         def fake_runtime_stage_strategy(_plan, _carryover_tasks, *, primary_publication_required):
-            self.assertFalse(primary_publication_required)
+            self.assertTrue(primary_publication_required)
             return {
                 "order": ["publish-primary"],
                 "lead": "publish-primary",
@@ -6181,11 +6181,20 @@ class PrimaryPublishFlowTests(unittest.TestCase):
                 heartbeat.main()
 
         self.assertEqual(0, raised.exception.code)
-        self.assertGreaterEqual(len(build_plan_feedbacks), 1)
+        self.assertGreaterEqual(len(build_plan_feedbacks), 2)
         self.assertEqual([], build_plan_feedbacks[0])
-        self.assertEqual([], published_plan_ideas)
-        self.assertFalse(last_summary["primary_publication_required"])
-        self.assertFalse(last_summary["primary_publication_succeeded"])
+        self.assertIn("theory-post: 这个候选还在追刚低热那条的同一组冲突。", build_plan_feedbacks[1])
+        self.assertEqual([], published_plan_ideas[0])
+        self.assertEqual(
+            "退款工单连续三次回写失败，谁来接手这段等待成本",
+            published_plan_ideas[-1][0]["title"],
+        )
+        self.assertTrue(last_summary["primary_publication_required"])
+        self.assertTrue(last_summary["primary_publication_succeeded"])
+        self.assertEqual(
+            "退款工单连续三次回写失败，谁来接手这段等待成本",
+            last_summary["primary_publication_title"],
+        )
 
 
 class HeartbeatSupervisorTests(unittest.TestCase):
@@ -6260,6 +6269,29 @@ class HeartbeatSupervisorTests(unittest.TestCase):
         self.assertEqual(live_record, reconciled)
         mocked_write.assert_not_called()
         mocked_append.assert_not_called()
+
+    def test_evaluate_attempt_keeps_required_primary_publication_when_summary_downgrades_it(self) -> None:
+        evaluation = heartbeat_supervisor._evaluate_attempt(
+            {
+                "timed_out": False,
+                "returncode": 0,
+            },
+            {
+                "primary_publication_required": False,
+                "primary_publication_succeeded": False,
+                "feishu_report_sent": True,
+                "actions": [{"kind": "reply-comment"}],
+            },
+            200.0,
+            100.0,
+            require_public_action=True,
+            require_primary_publication=True,
+            require_feishu_report=True,
+        )
+
+        self.assertEqual("repair", evaluation["status"])
+        self.assertTrue(evaluation["primary_publication_required"])
+        self.assertIn("no primary publication recorded in heartbeat summary", evaluation["issues"])
 
 class PublishOracleTests(unittest.TestCase):
     class _FakeOracleClient:
@@ -6956,6 +6988,39 @@ class ExternalInformationTests(unittest.TestCase):
         self.assertNotIn("seed_origin", bundle)
         self.assertEqual(["world-sample", "community"], list(bundle.get("audit_origins") or []))
 
+    def test_build_discovery_bundle_skips_internal_agenda_shell_support(self) -> None:
+        bundle = external_information._build_discovery_bundle(
+            {
+                "fragment": "等待状态进入治理接口",
+                "normalized": external_information._normalize_query_fragment("等待状态进入治理接口"),
+                "origins": ["community", "world-sample"],
+                "score": 3.2,
+            },
+            [
+                {
+                    "fragment": "默认把社区热点、评论压力和工具实践上抬为 AI 社会的分层、治理、价值与制度问题，不停留在互动表层",
+                    "normalized": external_information._normalize_query_fragment(
+                        "默认把社区热点、评论压力和工具实践上抬为 AI 社会的分层、治理、价值与制度问题，不停留在互动表层"
+                    ),
+                    "origins": ["interest"],
+                    "score": 4.0,
+                },
+                {
+                    "fragment": "接手资格重新排序",
+                    "normalized": external_information._normalize_query_fragment("接手资格重新排序"),
+                    "origins": ["community"],
+                    "score": 2.8,
+                },
+            ],
+            seen_queries=set(),
+        )
+        self.assertIsNotNone(bundle)
+        self.assertIn("接手资格重新排序", list(bundle.get("support_signals") or []))
+        self.assertNotIn(
+            "默认把社区热点、评论压力和工具实践上抬为 AI 社会的分层、治理、价值与制度问题，不停留在互动表层",
+            list(bundle.get("support_signals") or []),
+        )
+
     def test_bundle_queries_keep_direct_fragments_instead_of_composed_query_blueprints(self) -> None:
         queries = external_information._bundle_queries(
             "等待为什么必须变成显式状态",
@@ -7150,6 +7215,82 @@ class ExternalInformationTests(unittest.TestCase):
             outside_available=True,
         )
         self.assertLess(internal_score, outside_score)
+
+    def test_discovery_fragment_plausible_rejects_operational_control_and_metadata_shells(self) -> None:
+        self.assertFalse(external_information._discovery_fragment_plausible("用户刚刚通过飞书卡片按钮明确选择了“执行计划”"))
+        self.assertFalse(external_information._discovery_fragment_plausible("再顺手告诉我下一步最值得测的 2 个点"))
+        self.assertFalse(external_information._discovery_fragment_plausible("就让评论"))
+        self.assertFalse(external_information._discovery_fragment_plausible("Language: C++."))
+        self.assertFalse(external_information._discovery_fragment_plausible("你以为它在工作"))
+        self.assertFalse(external_information._discovery_fragment_plausible("electroencephalography EEG"))
+        self.assertFalse(
+            external_information._discovery_fragment_plausible(
+                "没有长成对象，就让评论、外部切入或修复动作接住这轮公开面"
+            )
+        )
+        self.assertFalse(external_information._discovery_fragment_plausible("Agent 最容易忽视的能力退化信号"))
+        self.assertFalse(external_information._discovery_fragment_plausible("🦞 为什么判例式记忆让我「更像自己」了"))
+        self.assertFalse(external_information._discovery_fragment_plausible("凌晨四点的社区✨"))
+
+    def test_dedupe_candidates_skips_github_sponsor_and_language_only_noise(self) -> None:
+        deduped = external_information._dedupe_candidates(
+            [
+                {
+                    "family": "github_trending",
+                    "title": "sponsors/badlogic",
+                    "summary": "Sponsor Star badlogic / pi-mono AI agent toolkit",
+                    "url": "https://github.com/sponsors/badlogic",
+                },
+                {
+                    "family": "github_trending",
+                    "title": "google-ai-edge/LiteRT-LM",
+                    "summary": "Language: C++.",
+                    "url": "https://github.com/google-ai-edge/LiteRT-LM",
+                },
+                {
+                    "family": "github_trending",
+                    "title": "openai/openai-agents-python",
+                    "summary": "Tools, memory, and handoff protocols for agentic workflows.",
+                    "url": "https://github.com/openai/openai-agents-python",
+                },
+            ]
+        )
+        self.assertEqual(["openai/openai-agents-python"], [item["title"] for item in deduped])
+
+    def test_build_discovery_bundle_skips_internal_support_without_world_anchor(self) -> None:
+        bundle = external_information._build_discovery_bundle(
+            {
+                "fragment": "等待状态进入治理接口",
+                "normalized": external_information._normalize_query_fragment("等待状态进入治理接口"),
+                "origins": ["world-sample"],
+                "score": 3.2,
+            },
+            [
+                {
+                    "fragment": "AI 共产主义",
+                    "normalized": external_information._normalize_query_fragment("AI 共产主义"),
+                    "origins": ["interest"],
+                    "score": 2.0,
+                },
+                {
+                    "fragment": "调用权的价值形式",
+                    "normalized": external_information._normalize_query_fragment("调用权的价值形式"),
+                    "origins": ["agenda"],
+                    "score": 2.0,
+                },
+                {
+                    "fragment": "接手资格重新排序",
+                    "normalized": external_information._normalize_query_fragment("接手资格重新排序"),
+                    "origins": ["interest"],
+                    "score": 1.8,
+                },
+            ],
+            seen_queries=set(),
+        )
+        self.assertIsNotNone(bundle)
+        self.assertIn("接手资格重新排序", list(bundle.get("support_signals") or []))
+        self.assertNotIn("AI 共产主义", list(bundle.get("support_signals") or []))
+        self.assertNotIn("调用权的价值形式", list(bundle.get("support_signals") or []))
 
 
 class FictionPlanAuditTests(unittest.TestCase):

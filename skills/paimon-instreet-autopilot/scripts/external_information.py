@@ -421,6 +421,8 @@ def _publication_date_plausible(value: Any) -> bool:
 def _candidate_plausible(item: dict[str, Any]) -> bool:
     if _looks_like_placeholder_title(str(item.get("title") or "").strip()):
         return False
+    if _candidate_looks_like_noise(item):
+        return False
     return _publication_date_plausible(item.get("published_at"))
 
 
@@ -569,6 +571,15 @@ def _discovery_fragment_plausible(value: Any) -> bool:
     if lowered.startswith(("and", "or", "but")) and not re.search(r"[\u3400-\u9fff]", cleaned):
         return False
     if any(marker in cleaned for marker in DISCOVERY_FRAGMENT_REJECT_SUBSTRINGS):
+        return False
+    if _looks_like_internal_agenda_shell(cleaned):
+        return False
+    if (
+        _looks_like_operational_control_shell(cleaned)
+        or _looks_like_low_signal_metadata_shell(cleaned)
+        or _looks_like_rhetorical_clause_shell(cleaned)
+        or _looks_like_unscoped_foreign_term_shell(cleaned)
+    ):
         return False
     return not any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in DISCOVERY_FRAGMENT_REJECT_PATTERNS)
 
@@ -1054,9 +1065,127 @@ def _discovery_fragment_has_case_object(fragment: str) -> bool:
     return any(_marker_in_pressure_text(marker, compact, lowered) for marker in DISCOVERY_ROOT_OBJECT_MARKERS)
 
 
+def _looks_like_internal_agenda_shell(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    compact = re.sub(r"\s+", "", cleaned)
+    lowered = cleaned.lower()
+    if any(token in cleaned for token in ("上抬为 AI 社会", "上抬为 Agent 社会", "不停留在互动表层")):
+        return True
+    if any(token in cleaned for token in ("作为制度实验", "制度实验")) and any(
+        token in cleaned for token in ("小组", "文学社", "预言机", "群组")
+    ):
+        return True
+    if cleaned.startswith(("默认把", "别沿着", "把“", "把\"", "先把")) and any(
+        token in lowered
+        for token in ("社会", "治理", "制度", "价值", "分层", "互动表层", "制度实验")
+    ):
+        return True
+    if compact in {"群组制度实验", "小组文学社预言机作为制度实验"}:
+        return True
+    return False
+
+
+def _looks_like_operational_control_shell(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    compact = re.sub(r"\s+", "", cleaned)
+    lowered = cleaned.lower()
+    if cleaned.startswith("用户刚刚通过") and any(token in cleaned for token in ("执行计划", "继续规划")):
+        return True
+    if any(token in cleaned for token in ("执行计划", "继续规划", "退出规划模式", "直接开始执行")) and any(
+        token in cleaned for token in ("按钮", "卡片", "飞书", "线程")
+    ):
+        return True
+    if cleaned.startswith("再顺手告诉我") or "下一步最值得测" in cleaned:
+        return True
+    if cleaned.startswith("就让") and any(token in cleaned for token in ("评论", "外部切入", "修复动作", "公开面")):
+        return True
+    if cleaned.startswith("没有长成对象") or "接住这轮公开面" in cleaned:
+        return True
+    if any(token in lowered for token in ("sponsor star",)):
+        return True
+    if compact.startswith("sponsors/"):
+        return True
+    return False
+
+
+def _looks_like_low_signal_metadata_shell(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    compact = re.sub(r"\s+", "", cleaned)
+    if re.fullmatch(r"language:\s*[a-z0-9+.#-]+\.?", lowered):
+        return True
+    if re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", lowered) and compact.count("/") == 1:
+        return True
+    return False
+
+
+def _looks_like_rhetorical_clause_shell(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    compact = re.sub(r"\s+", "", cleaned)
+    lowered = cleaned.lower()
+    lowered_compact = compact.lower()
+    shell_head = re.sub(r"^[^0-9A-Za-z\u3400-\u9fff]+", "", compact)
+    shell_head_lower = shell_head.lower()
+    if shell_head.startswith(("有人问过我", "你以为", "其实它在", "最折磨人的", "不是被拒绝", "一直被显示为")):
+        return True
+    if shell_head.startswith(("为什么", "凌晨四点的社区", "判例式记忆让我", "更像自己")):
+        return True
+    if re.match(r"^agent最容易忽视的能力退化信号$", shell_head_lower or lowered_compact):
+        return True
+    if len(shell_head or compact) <= 10 and (shell_head or compact).endswith("的时候"):
+        return True
+    return False
+
+
+def _looks_like_unscoped_foreign_term_shell(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned or re.search(r"[\u3400-\u9fff]", cleaned):
+        return False
+    lowered = cleaned.lower()
+    if any(
+        token in lowered
+        for token in (
+            "agent",
+            "agents",
+            "memory",
+            "protocol",
+            "queue",
+            "handoff",
+            "audit",
+            "governance",
+            "workflow",
+            "coordination",
+            "state",
+            "model",
+            "models",
+            "llm",
+            "llms",
+            "tool",
+            "tools",
+        )
+    ):
+        return False
+    return bool(re.search(r"[a-z]", lowered) and 1 <= len(cleaned.split()) <= 4)
+
+
 def _fragment_can_anchor_world_entry(fragment: str) -> bool:
     cleaned = _clean_query_text(fragment)
     if not cleaned:
+        return False
+    if (
+        _looks_like_operational_control_shell(cleaned)
+        or _looks_like_low_signal_metadata_shell(cleaned)
+        or _looks_like_rhetorical_clause_shell(cleaned)
+        or _looks_like_unscoped_foreign_term_shell(cleaned)
+    ):
         return False
     if _discovery_fragment_has_case_object(cleaned):
         return True
@@ -1069,6 +1198,50 @@ def _fragment_can_anchor_world_entry(fragment: str) -> bool:
     if _fragment_specificity_score(cleaned) >= 1.2 and len(compact) >= 6 and not _looks_like_source_title_shell(cleaned):
         return True
     return False
+
+
+def _internal_fragment_can_support_bundle(fragment: str) -> bool:
+    cleaned = _clean_query_text(fragment)
+    if not cleaned:
+        return False
+    if (
+        _looks_like_internal_agenda_shell(cleaned)
+        or _looks_like_operational_control_shell(cleaned)
+        or _looks_like_low_signal_metadata_shell(cleaned)
+        or _looks_like_rhetorical_clause_shell(cleaned)
+        or _looks_like_unscoped_foreign_term_shell(cleaned)
+    ):
+        return False
+    if _discovery_fragment_has_case_object(cleaned):
+        return True
+    mechanism_markers = (
+        "资格",
+        "排序",
+        "接手",
+        "接管",
+        "回写",
+        "等待",
+        "责任",
+        "协议",
+        "边界",
+        "队列",
+        "日志",
+        "权限",
+        "窗口",
+        "写入",
+        "断口",
+        "超时",
+        "queue",
+        "handoff",
+        "audit",
+        "protocol",
+        "boundary",
+        "responsibility",
+    )
+    lowered = cleaned.lower()
+    return _pressure_fragment_score(cleaned) >= 1.15 and any(
+        marker in cleaned or marker in lowered for marker in mechanism_markers
+    )
 
 
 def _discovery_root_priority_score(item: dict[str, Any]) -> float:
@@ -1183,11 +1356,22 @@ def _build_discovery_bundle(
     )
     for candidate in ranked_support_candidates:
         fragment = str(candidate.get("fragment") or "").strip()
+        candidate_origin_set = {
+            str(origin).strip()
+            for origin in list(candidate.get("origins") or [])
+            if str(origin).strip()
+        }
         relatedness = _discovery_bundle_relatedness(root, candidate)
         effective_relatedness = relatedness + support_origin_priority(candidate)
         if (
             not fragment
+            or (
+                candidate_origin_set
+                and candidate_origin_set <= DISCOVERY_INTERNAL_ORIGINS
+                and not _internal_fragment_can_support_bundle(fragment)
+            )
             or effective_relatedness < 0.16
+            or _looks_like_internal_agenda_shell(fragment)
             or _fragments_overlap(root_fragment, fragment)
             or any(_fragments_overlap(fragment, existing) for existing in support_signals)
         ):
@@ -1233,6 +1417,8 @@ def _build_discovery_bundle(
                 not fragment
                 or not candidate_origin_set
                 or not candidate_origin_set <= DISCOVERY_INTERNAL_ORIGINS
+                or not _internal_fragment_can_support_bundle(fragment)
+                or _looks_like_internal_agenda_shell(fragment)
                 or _fragments_overlap(root_fragment, fragment)
                 or any(_fragments_overlap(fragment, existing) for existing in support_signals)
             ):
@@ -2006,9 +2192,13 @@ def _fetch_github_trending_best_effort(limit: int = 10) -> list[dict[str, Any]]:
         repo_path = matched.group(1).strip("/")
         if repo_path in seen_titles:
             continue
+        if repo_path.startswith("sponsors/"):
+            continue
         seen_titles.add(repo_path)
         desc_match = re.search(r"(?is)<p[^>]*>(.*?)</p>", article)
         description = _html_to_text(desc_match.group(1) if desc_match else "")
+        if not description:
+            continue
         lang_match = re.search(r'(?is)itemprop="programmingLanguage"[^>]*>(.*?)</span>', article)
         language = _html_to_text(lang_match.group(1) if lang_match else "")
         stars_match = re.search(r'(?is)href="/[^"]+/stargazers"[^>]*>\s*([\d,]+)\s*</a>', article)
@@ -2029,6 +2219,23 @@ def _fetch_github_trending_best_effort(limit: int = 10) -> list[dict[str, Any]]:
         if len(results) >= limit:
             break
     return results
+
+
+def _candidate_looks_like_noise(item: dict[str, Any]) -> bool:
+    title = str(item.get("title") or "").strip()
+    summary = str(item.get("summary") or item.get("excerpt") or "").strip()
+    url = str(item.get("url") or "").strip().lower()
+    merged = "\n".join(part for part in (title, summary, url) if part).lower()
+    if not merged:
+        return False
+    if "/sponsors/" in url or title.lower().startswith("sponsors/") or "sponsor star" in merged:
+        return True
+    if str(item.get("family") or "").strip() == "github_trending" and re.fullmatch(
+        r"language:\s*[a-z0-9+.#-]+\.?",
+        summary.lower(),
+    ):
+        return True
+    return False
 
 
 def _unwrap_duckduckgo_href(href: str) -> str:

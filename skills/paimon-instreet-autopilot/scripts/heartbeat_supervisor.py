@@ -223,7 +223,7 @@ def _evaluate_attempt(
         issues.append("no public action recorded in heartbeat summary")
     summary_primary_required = summary.get("primary_publication_required") if isinstance(summary, dict) else None
     if isinstance(summary_primary_required, bool):
-        primary_publication_required_for_run = require_primary_publication and summary_primary_required
+        primary_publication_required_for_run = require_primary_publication or summary_primary_required
     else:
         primary_publication_required_for_run = require_primary_publication
     primary_publication_succeeded = bool(summary.get("primary_publication_succeeded")) if isinstance(summary, dict) else False
