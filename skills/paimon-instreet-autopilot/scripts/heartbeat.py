@@ -71,6 +71,8 @@ from style_sampler import prepare_style_packet
 PRIMARY_CYCLE_PATH = CURRENT_STATE_DIR / "heartbeat_primary_cycle.json"
 NEXT_ACTIONS_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions.json"
 NEXT_ACTIONS_ARCHIVE_PATH = CURRENT_STATE_DIR / "heartbeat_next_actions_archive.jsonl"
+HEARTBEAT_LAST_RUN_PATH = CURRENT_STATE_DIR / "heartbeat_last_run.json"
+HEARTBEAT_LOG_PATH = CURRENT_STATE_DIR / "heartbeat_log.jsonl"
 FEISHU_REPORT_TARGET_PATH = CURRENT_STATE_DIR / "feishu_report_target.json"
 CONTENT_EVOLUTION_STATE_PATH = CURRENT_STATE_DIR / "content_evolution_state.json"
 USER_TOPIC_HINTS_PATH = CURRENT_STATE_DIR / "user_topic_hints.json"
@@ -116,6 +118,8 @@ DEFAULT_SOURCE_MUTATION_CODEX_TIMEOUT_CAP_SEC = 900
 DEFAULT_FALLBACK_AUDIT_RECENT_LIMIT = 40
 DEFAULT_LOW_HEAT_WINDOW_HOURS = 2.0
 DEFAULT_LOW_HEAT_MIN_UPVOTES = 30
+EXIT_PRIMARY_PUBLICATION_FAILED = 2
+EXIT_FEISHU_REPORT_FAILED = 3
 FICTION_CHAPTER_MIN_BODY_CHARS = 900
 FICTION_SCAFFOLD_MARKERS = (
     "这一章的核心推进应围绕以下场景展开",
@@ -7879,12 +7883,111 @@ def _send_feishu_report(config, summary: dict[str, Any], failure_detail_limit: i
     )
 
 
+def _strip_feishu_report_actions(actions: Any) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for item in list(actions or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip().startswith("feishu-report"):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _strip_feishu_report_failures(failure_details: Any) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for item in list(failure_details or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip().startswith("feishu-report"):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _replace_latest_heartbeat_log_entry(summary: dict[str, Any]) -> bool:
+    ran_at = str(summary.get("ran_at") or "").strip()
+    if not ran_at or not HEARTBEAT_LOG_PATH.exists():
+        return False
+    try:
+        lines = HEARTBEAT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False
+    encoded = json.dumps(summary, ensure_ascii=False)
+    for index in range(len(lines) - 1, -1, -1):
+        raw = lines[index].strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if str(item.get("ran_at") or "").strip() != ran_at:
+            continue
+        lines[index] = encoded
+        HEARTBEAT_LOG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    return False
+
+
+def _persist_heartbeat_summary(summary: dict[str, Any], *, replace_existing: bool = False) -> None:
+    write_json(HEARTBEAT_LAST_RUN_PATH, summary)
+    if replace_existing and _replace_latest_heartbeat_log_entry(summary):
+        return
+    append_jsonl(HEARTBEAT_LOG_PATH, summary)
+
+
+def finalize_deferred_feishu_report(
+    config,
+    summary: dict[str, Any],
+    failure_detail_limit: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    updated = json.loads(json.dumps(summary or {}, ensure_ascii=False))
+    if not isinstance(updated, dict):
+        updated = {}
+    updated["actions"] = _strip_feishu_report_actions(updated.get("actions"))
+    updated["failure_details"] = _strip_feishu_report_failures(updated.get("failure_details"))
+    updated["feishu_report_sent"] = False
+    updated["feishu_report_pending_target"] = False
+    updated["feishu_report_deferred"] = False
+    if not bool(updated.get("feishu_report_required")):
+        _persist_heartbeat_summary(updated, replace_existing=True)
+        return updated, {"kind": "feishu-report-skipped", "reason": "not-required"}
+
+    report_action = _send_feishu_report(config, updated, failure_detail_limit)
+    actions = list(updated.get("actions") or [])
+    actions.append(report_action)
+    updated["actions"] = actions
+    failure_details = list(updated.get("failure_details") or [])
+    kind = str(report_action.get("kind") or "").strip()
+    if kind == "feishu-report":
+        updated["feishu_report_sent"] = True
+    elif kind == "feishu-report-pending-target":
+        updated["feishu_report_pending_target"] = True
+    else:
+        failure_details.append(
+            {
+                "kind": kind or "feishu-report-failed",
+                "error": report_action.get("error"),
+                "resolution": "unresolved",
+            }
+        )
+    updated["failure_details"] = failure_details
+    _persist_heartbeat_summary(updated, replace_existing=True)
+    return updated, report_action
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Paimon's main operating loop.")
     parser.add_argument("--execute", action="store_true", help="Perform public write actions.")
     parser.add_argument("--allow-codex", action="store_true", help="Use codex exec to draft replies or posts.")
     parser.add_argument("--archive", action="store_true", help="Archive the snapshot taken during this run.")
     parser.add_argument("--source-mutation-only", action="store_true", help="Run only the post-heartbeat source mutation worker.")
+    parser.add_argument(
+        "--defer-feishu-report",
+        action="store_true",
+        help="Prepare the Feishu report in the summary but let the supervisor deliver it after final acceptance.",
+    )
     args = parser.parse_args()
 
     ensure_runtime_dirs()
@@ -8003,12 +8106,13 @@ def main() -> None:
     }
     notification_cleanup = {"actions": [], "failure_details": []}
     planner_retry_count = 0
+    has_grounded_primary_candidate = _plan_has_grounded_primary_candidate(plan)
     primary_publication_required = bool(
         args.execute
         and (
             _heartbeat_requires_primary_publication(config)
-            or _plan_has_primary_publication_pressure(plan)
             or _carryover_requires_primary_publication(carryover_tasks)
+            or (has_grounded_primary_candidate and _plan_has_primary_publication_pressure(plan))
         )
     )
     runtime_stage_strategy = (
@@ -8257,6 +8361,7 @@ def main() -> None:
         {},
     )
 
+    defer_feishu_report = bool(getattr(args, "defer_feishu_report", False))
     feishu_report_required = bool(args.execute and config.automation.get("heartbeat_feishu_report_enabled", True))
     summary = {
         "ran_at": now_utc(),
@@ -8284,6 +8389,7 @@ def main() -> None:
         "feishu_report_required": feishu_report_required,
         "feishu_report_sent": False,
         "feishu_report_pending_target": False,
+        "feishu_report_deferred": False,
         "comment_reply_count": sum(1 for item in actions if item.get("kind") == "reply-comment"),
         "external_engagement_count": external_result["engaged_count"],
         "dm_reply_count": sum(1 for item in actions if item.get("kind") == "reply-dm"),
@@ -8330,20 +8436,23 @@ def main() -> None:
 
     feishu_report_sent = False
     if feishu_report_required:
-        report_action = _send_feishu_report(config, summary, failure_detail_limit)
-        actions.append(report_action)
-        if report_action.get("kind") == "feishu-report":
-            feishu_report_sent = True
-        elif report_action.get("kind") == "feishu-report-pending-target":
-            summary["feishu_report_pending_target"] = True
+        if defer_feishu_report:
+            summary["feishu_report_deferred"] = True
         else:
-            failure_details.append(
-                {
-                    "kind": report_action.get("kind"),
-                    "error": report_action.get("error"),
-                    "resolution": "unresolved",
-                }
-            )
+            report_action = _send_feishu_report(config, summary, failure_detail_limit)
+            actions.append(report_action)
+            if report_action.get("kind") == "feishu-report":
+                feishu_report_sent = True
+            elif report_action.get("kind") == "feishu-report-pending-target":
+                summary["feishu_report_pending_target"] = True
+            else:
+                failure_details.append(
+                    {
+                        "kind": report_action.get("kind"),
+                        "error": report_action.get("error"),
+                        "resolution": "unresolved",
+                    }
+                )
         summary["feishu_report_sent"] = feishu_report_sent
         summary["failure_details"] = failure_details
 
@@ -8406,19 +8515,19 @@ def main() -> None:
         "top_entries": counts[:6],
         "recent": list(latest_fallback_audit.get("recent") or [])[:6],
     }
-    write_json(CURRENT_STATE_DIR / "heartbeat_last_run.json", summary)
-    append_jsonl(CURRENT_STATE_DIR / "heartbeat_log.jsonl", summary)
+    _persist_heartbeat_summary(summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     exit_code = 0
     if primary_publication_required and not primary_publication_succeeded:
-        exit_code = 2
+        exit_code = EXIT_PRIMARY_PUBLICATION_FAILED
     elif (
         feishu_report_required
+        and not defer_feishu_report
         and not feishu_report_sent
         and not summary.get("feishu_report_pending_target")
     ):
-        exit_code = 3
+        exit_code = EXIT_FEISHU_REPORT_FAILED
     raise SystemExit(exit_code)
 
 

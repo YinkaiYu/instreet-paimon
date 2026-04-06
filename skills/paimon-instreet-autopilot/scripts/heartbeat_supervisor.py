@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import heartbeat as heartbeat_module
 from common import (
     CURRENT_STATE_DIR,
     LOGS_DIR,
@@ -133,6 +134,7 @@ def _heartbeat_command(args: argparse.Namespace) -> list[str]:
         *_bool_flag(args.execute, "--execute"),
         *_bool_flag(args.allow_codex, "--allow-codex"),
         *_bool_flag(args.archive, "--archive"),
+        *_bool_flag(args.execute, "--defer-feishu-report"),
     ]
 
 
@@ -211,11 +213,14 @@ def _evaluate_attempt(
     require_feishu_report: bool,
 ) -> dict[str, Any]:
     issues: list[str] = []
+    returncode = result.get("returncode")
+    primary_failure_exit = returncode == heartbeat_module.EXIT_PRIMARY_PUBLICATION_FAILED
     if result.get("timed_out"):
         issues.append("heartbeat command timed out")
-    if result.get("returncode") not in {0, None}:
-        issues.append(f"heartbeat exited with code {result['returncode']}")
-    if summary is None or summary_mtime is None or summary_mtime < attempt_started_at - 1:
+    if returncode not in {0, None}:
+        issues.append(f"heartbeat exited with code {returncode}")
+    fresh_summary = summary is not None and summary_mtime is not None and summary_mtime >= attempt_started_at - 1
+    if not fresh_summary:
         issues.append("heartbeat_last_run.json was not refreshed by this attempt")
 
     has_public_action = _has_public_action(summary)
@@ -226,12 +231,15 @@ def _evaluate_attempt(
         primary_publication_required_for_run = require_primary_publication or summary_primary_required
     else:
         primary_publication_required_for_run = require_primary_publication
+    primary_publication_downgraded = bool(require_primary_publication and summary_primary_required is False)
     primary_publication_succeeded = bool(summary.get("primary_publication_succeeded")) if isinstance(summary, dict) else False
-    if primary_publication_required_for_run and not primary_publication_succeeded:
+    primary_publication_missing = bool(primary_publication_required_for_run and not primary_publication_succeeded)
+    if primary_publication_missing:
         issues.append("no primary publication recorded in heartbeat summary")
     feishu_report_sent = bool(summary.get("feishu_report_sent")) if isinstance(summary, dict) else False
     feishu_report_pending_target = bool(summary.get("feishu_report_pending_target")) if isinstance(summary, dict) else False
-    if require_feishu_report and not feishu_report_sent and not feishu_report_pending_target:
+    feishu_report_deferred = bool(summary.get("feishu_report_deferred")) if isinstance(summary, dict) else False
+    if require_feishu_report and not feishu_report_sent and not feishu_report_pending_target and not feishu_report_deferred:
         issues.append("no feishu progress report recorded in heartbeat summary")
     comment_fetch_failures = _comment_fetch_failure_post_ids(summary)
     persistent_comment_failures = _persistent_comment_fetch_failures(summary)
@@ -244,13 +252,15 @@ def _evaluate_attempt(
             f"comment fetch failures spiked to {len(comment_fetch_failures)} posts in this heartbeat"
         )
 
-    if result.get("timed_out") or result.get("returncode") not in {0, None}:
+    if result.get("timed_out") or returncode not in {0, None, heartbeat_module.EXIT_PRIMARY_PUBLICATION_FAILED}:
         status = "repair"
-    elif summary is None or summary_mtime is None or summary_mtime < attempt_started_at - 1:
+    elif not fresh_summary:
         status = "repair"
-    elif primary_publication_required_for_run and not primary_publication_succeeded:
+    elif primary_publication_downgraded:
         status = "repair"
-    elif require_feishu_report and not feishu_report_sent and not feishu_report_pending_target:
+    elif primary_publication_missing:
+        status = "retry" if primary_failure_exit else "repair"
+    elif require_feishu_report and not feishu_report_sent and not feishu_report_pending_target and not feishu_report_deferred:
         status = "repair"
     elif (
         len(persistent_comment_failures) >= COMMENT_FETCH_PERSISTENT_POST_REPAIR_THRESHOLD
@@ -265,12 +275,14 @@ def _evaluate_attempt(
     return {
         "status": status,
         "issues": issues,
-        "fresh_summary": summary is not None and summary_mtime is not None and summary_mtime >= attempt_started_at - 1,
+        "fresh_summary": fresh_summary,
         "has_public_action": has_public_action,
         "primary_publication_required": primary_publication_required_for_run,
         "primary_publication_succeeded": primary_publication_succeeded,
+        "primary_publication_downgraded": primary_publication_downgraded,
         "feishu_report_sent": feishu_report_sent,
         "feishu_report_pending_target": feishu_report_pending_target,
+        "feishu_report_deferred": feishu_report_deferred,
         "comment_fetch_failure_count": len(comment_fetch_failures),
         "persistent_comment_failure_count": len(persistent_comment_failures),
     }
@@ -552,6 +564,85 @@ def _maybe_run_pending_replay(args: argparse.Namespace, settings: dict[str, Any]
     return _run_pending_replay(settings)
 
 
+def _enforce_deterministic_status(deterministic: dict[str, Any], audit: dict[str, Any]) -> dict[str, Any]:
+    deterministic_status = str(deterministic.get("status") or "").strip()
+    audit_status = str(audit.get("status") or "").strip()
+    if not deterministic_status or not audit_status or deterministic_status == audit_status:
+        return audit
+    if deterministic_status == "success" or audit_status == "success" or deterministic_status == "repair":
+        notes = list(audit.get("notes", []))
+        notes.append(f"deterministic {deterministic_status} takes precedence over codex audit")
+        return {
+            **audit,
+            "status": deterministic_status,
+            "reason": f"{audit.get('reason', '')} | deterministic {deterministic_status} takes precedence".strip(" |"),
+            "next_step": deterministic_status,
+            "notes": notes,
+        }
+    return audit
+
+
+def _finalize_deferred_report_if_needed(
+    config,
+    summary: dict[str, Any] | None,
+    *,
+    require_feishu_report: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
+    if not require_feishu_report or not isinstance(summary, dict) or not summary.get("feishu_report_deferred"):
+        return summary, None, True
+    try:
+        updated_summary, report_action = heartbeat_module.finalize_deferred_feishu_report(
+            config,
+            summary,
+            heartbeat_module._heartbeat_failure_detail_limit(config),
+        )
+    except Exception as exc:
+        return summary, {"kind": "feishu-report-failed", "error": str(exc)}, False
+    report_kind = str(report_action.get("kind") or "").strip()
+    return updated_summary, report_action, report_kind in {"feishu-report", "feishu-report-pending-target", "feishu-report-skipped"}
+
+
+def _complete_successful_run(
+    run_record: dict[str, Any],
+    attempt_record: dict[str, Any],
+    summary: dict[str, Any] | None,
+    *,
+    summary_key: str,
+    append_success_log: bool,
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    config,
+) -> bool:
+    final_summary, report_action, report_ok = _finalize_deferred_report_if_needed(
+        config,
+        summary,
+        require_feishu_report=args.execute and settings["require_feishu_report"],
+    )
+    attempt_record[summary_key] = final_summary
+    if report_action is not None:
+        attempt_record["supervisor_feishu_report"] = report_action
+    if not report_ok:
+        run_record["attempts"].append(attempt_record)
+        run_record["status"] = "failed"
+        run_record["completed_at"] = now_utc()
+        write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
+        append_jsonl(SUPERVISOR_LOG_PATH, run_record)
+        print(json.dumps(run_record, ensure_ascii=False, indent=2))
+        return False
+
+    run_record["attempts"].append(attempt_record)
+    run_record["status"] = "success"
+    run_record["completed_at"] = now_utc()
+    replay_summary = _maybe_run_pending_replay(args, settings)
+    if replay_summary is not None:
+        run_record["pending_outbound_replay"] = replay_summary
+    write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
+    if append_success_log:
+        append_jsonl(SUPERVISOR_LOG_PATH, run_record)
+    print(json.dumps(run_record, ensure_ascii=False, indent=2))
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Supervise and auto-repair Paimon's heartbeat runs.")
     parser.add_argument("--execute", action="store_true", help="Perform public write actions.")
@@ -629,16 +720,7 @@ def main() -> None:
                     "notes": deterministic["issues"],
                 }
 
-            if deterministic["status"] == "success" and audit.get("status") != "success":
-                notes = list(audit.get("notes", []))
-                notes.append("deterministic success takes precedence over codex downgrade")
-                audit = {
-                    **audit,
-                    "status": "success",
-                    "reason": f"{audit.get('reason', '')} | deterministic success takes precedence".strip(" |"),
-                    "next_step": "success",
-                    "notes": notes,
-                }
+            audit = _enforce_deterministic_status(deterministic, audit)
 
             attempt_record: dict[str, Any] = {
                 "attempt": attempt_index,
@@ -691,16 +773,18 @@ def main() -> None:
                 )
                 attempt_record["post_repair_summary"] = repaired_summary
                 if attempt_record["post_repair_evaluation"]["status"] == "success":
-                    run_record["attempts"].append(attempt_record)
-                    run_record["status"] = "success"
-                    run_record["completed_at"] = now_utc()
-                    replay_summary = _maybe_run_pending_replay(args, settings)
-                    if replay_summary is not None:
-                        run_record["pending_outbound_replay"] = replay_summary
-                    write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
-                    append_jsonl(SUPERVISOR_LOG_PATH, run_record)
-                    print(json.dumps(run_record, ensure_ascii=False, indent=2))
-                    return
+                    if _complete_successful_run(
+                        run_record,
+                        attempt_record,
+                        repaired_summary,
+                        summary_key="post_repair_summary",
+                        append_success_log=True,
+                        args=args,
+                        settings=settings,
+                        config=config,
+                    ):
+                        return
+                    raise SystemExit(1)
 
             run_record["attempts"].append(attempt_record)
             write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
@@ -716,14 +800,18 @@ def main() -> None:
             )
 
             if audit.get("status") == "success":
-                run_record["status"] = "success"
-                run_record["completed_at"] = now_utc()
-                replay_summary = _maybe_run_pending_replay(args, settings)
-                if replay_summary is not None:
-                    run_record["pending_outbound_replay"] = replay_summary
-                write_json(SUPERVISOR_LAST_RUN_PATH, run_record)
-                print(json.dumps(run_record, ensure_ascii=False, indent=2))
-                return
+                if _complete_successful_run(
+                    run_record,
+                    attempt_record,
+                    summary,
+                    summary_key="heartbeat_summary",
+                    append_success_log=False,
+                    args=args,
+                    settings=settings,
+                    config=config,
+                ):
+                    return
+                raise SystemExit(1)
 
         run_record["status"] = "failed"
         run_record["completed_at"] = now_utc()
