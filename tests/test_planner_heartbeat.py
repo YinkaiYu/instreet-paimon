@@ -414,6 +414,118 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIn("退款工单连续三次回写失败", failure["why_now"])
         self.assertNotEqual("现场失败链路", failure["why_now"])
 
+    def test_low_heat_followup_detection_keeps_concrete_new_method_object(self) -> None:
+        signal_summary = {
+            "pending_reply_posts": [],
+            "recent_top_posts": [],
+            "low_heat_failures": {
+                "items": [
+                    {
+                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                        "title": "任务还是 `running`、证据没回主记录：4 个接手窗口，把静默失败从 11 次压到 3 次",
+                        "summary": "这条低热不是题材没用，而是系统把一条本该继续交对象的 skills 方法帖，又写回了后台运行态的补丁说明。",
+                        "lessons": [
+                            "标题的问题不是不具体，而是具体在后台。`任务还是 running`、`证据没回主记录`、`4 个接手窗口` 对仓库内行很熟。",
+                            "它没有交出比上一轮更硬的新东西。`11 次压到 3 次`、`接手 / 回写 / 退出`、`静默失败` 这一簇词和前面高热帖基本是同一套骨架。",
+                        ],
+                    }
+                ]
+            },
+        }
+        candidate_text = "\n".join(
+            [
+                "退款工单连续三次回写失败：4 个接手窗口，把静默失败从 11 次压到 3 次",
+                "把退款工单、审核队列和回写校验压成同一条修复链，再补反例入口和退出判据。",
+                "这轮外部发现已经形成一束可压缩的问题，不能再让单一样本替整个议程拍板。",
+            ]
+        )
+        self.assertFalse(content_planner._looks_like_low_heat_followup(candidate_text, signal_summary))
+
+    def test_low_heat_followup_detection_still_blocks_generic_method_reskin(self) -> None:
+        signal_summary = {
+            "pending_reply_posts": [],
+            "recent_top_posts": [],
+            "low_heat_failures": {
+                "items": [
+                    {
+                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                        "title": "任务还是 `running`、证据没回主记录：4 个接手窗口，把静默失败从 11 次压到 3 次",
+                        "summary": "这条低热不是题材没用，而是系统把一条本该继续交对象的 skills 方法帖，又写回了后台运行态的补丁说明。",
+                        "lessons": [
+                            "它没有交出比上一轮更硬的新东西。`11 次压到 3 次`、`接手 / 回写 / 退出`、`静默失败` 这一簇词和前面高热帖基本是同一套骨架。",
+                        ],
+                    }
+                ]
+            },
+        }
+        candidate_text = "\n".join(
+            [
+                "接手对象还是没人签收：4 条规则，把静默失败压回原位",
+                "先改接手动作，再改退出判据。",
+            ]
+        )
+        self.assertTrue(content_planner._looks_like_low_heat_followup(candidate_text, signal_summary))
+
+    def test_repair_rejected_public_candidate_recovers_method_object_after_low_heat_rejection(self) -> None:
+        signal_summary = {
+            "dynamic_topics": [
+                {
+                    "track": "tech",
+                    "signal_type": "world-bundle",
+                    "source_text": "我发现「错误日志」比「成功记录」更有价值",
+                    "why_now": "外部讨论正在把等待状态、接手回执和静默失败压到同一条修复链上。",
+                    "angle_hint": "把错误日志和接手回执改写成协议、状态分层、接管窗口和回退链。",
+                    "evidence_hint": "接手回执、回写校验、静默失败",
+                    "quality_score": 4.7,
+                    "freshness_score": 2.2,
+                    "world_score": 1.0,
+                    "overlap_score": (0, 0, 0),
+                },
+                {
+                    "track": "tech",
+                    "signal_type": "discussion",
+                    "source_text": "把“没人签收的接手回执”改写成可追责的交接协议",
+                    "why_now": "当前 59 赞 / 56 评",
+                    "angle_hint": "",
+                    "evidence_hint": "接手回执",
+                    "quality_score": 2.8,
+                    "freshness_score": 1.0,
+                    "world_score": 0.0,
+                    "overlap_score": (0, 0, 0),
+                },
+            ],
+            "low_heat_failures": {
+                "items": [
+                    {
+                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                        "title": "任务还是 `running`、证据没回主记录：4 个接手窗口，把静默失败从 11 次压到 3 次",
+                        "summary": "这条低热不是题材没用，而是系统把一条本该继续交对象的 skills 方法帖，又写回了后台运行态的补丁说明。",
+                        "lessons": [
+                            "它没有交出比上一轮更硬的新东西。`11 次压到 3 次`、`接手 / 回写 / 退出`、`静默失败` 这一簇词和前面高热帖基本是同一套骨架。"
+                        ],
+                    }
+                ]
+            },
+            "novelty_pressure": content_planner._novelty_pressure([]),
+            "pending_reply_posts": [],
+            "recent_top_posts": [],
+            "group_watch": {},
+        }
+        raw = content_planner._fallback_tech_idea(signal_summary, recent_titles=[])
+        raw["failure_reason_if_rejected"] = "这个候选还在追刚低热那条的同一组冲突，只是换了概念名，读者更容易把它看成复写。"
+
+        repaired = content_planner._repair_rejected_public_candidate(
+            "tech-post",
+            [raw],
+            signal_summary=signal_summary,
+            recent_titles=[],
+            group={"id": "group-1"},
+        )
+
+        self.assertIsNotNone(repaired)
+        self.assertIsNone(repaired["failure_reason_if_rejected"])
+        self.assertNotEqual(raw["title"], repaired["title"])
+
     def test_track_signal_bundle_reframes_theory_bundle_before_title_generation(self) -> None:
         bundle = content_planner._track_signal_bundle(
             "theory",

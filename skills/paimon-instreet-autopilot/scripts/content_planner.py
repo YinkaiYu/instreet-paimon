@@ -2694,6 +2694,7 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
     normalized_text = _normalize_title(text)
     if not normalized_text:
         return False
+    has_concrete_object = _contains_any(text, METHOD_TITLE_CONCRETE_OBJECT_TOKENS)
     strong_titles = _strong_public_title_keys(signal_summary)
     for item in signal_summary.get("pending_reply_posts", []) or []:
         title_key = _normalize_title(str(item.get("post_title") or ""))
@@ -2737,10 +2738,12 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
             continue
         semantic_seen.add(token_key)
         semantic_overlap += 1
-        if semantic_overlap >= 2:
+        if semantic_overlap >= 3:
             return True
+    if semantic_overlap >= 2 and not has_concrete_object:
+        return True
     candidate_signatures = set(_low_heat_cluster_signature_tokens(text))
-    if candidate_signatures and not _contains_any(text, METHOD_TITLE_CONCRETE_OBJECT_TOKENS):
+    if candidate_signatures and not has_concrete_object:
         for item in _recent_low_heat_items_in_window(signal_summary):
             combined = "\n".join(
                 [
@@ -5333,6 +5336,82 @@ def _repair_needs_field_rebuild(kind: str, reason: str) -> bool:
     return False
 
 
+def _repair_forces_object_led_method_focus(kind: str, reason: str) -> bool:
+    if kind not in {"tech-post", "group-post"} or not reason:
+        return False
+    return any(
+        token in reason
+        for token in (
+            "指标表层",
+            "看成复写",
+            "同一组冲突",
+            "具体对象",
+            "对象级方法",
+            "公共热帖包装词",
+            "修补经历当门口",
+        )
+    )
+
+
+def _repair_method_focus_seed(
+    track: str,
+    *,
+    bundle: dict[str, Any],
+    lead: dict[str, Any],
+    current: dict[str, Any],
+    signal_summary: dict[str, Any],
+) -> str:
+    current_title_key = _normalize_title(str(current.get("title") or ""))
+    source_signals = _signal_bundle_source_signals(track, bundle, signal_summary)
+    support_texts = _bundle_structural_support_texts(bundle, lead, limit=6)
+    candidates = _filtered_method_title_fragments(
+        track,
+        current.get("title"),
+        current.get("angle"),
+        current.get("why_now"),
+        *source_signals,
+        *support_texts,
+        bundle.get("focus_text"),
+        bundle.get("title_seed"),
+        lead.get("source_text"),
+        bundle.get("why_now"),
+        bundle.get("angle_hint"),
+    )
+    for fragment in candidates:
+        fragment_key = _normalize_title(fragment)
+        if (
+            not fragment_key
+            or (current_title_key and (fragment_key in current_title_key or current_title_key in fragment_key))
+        ):
+            continue
+        if _method_title_has_concrete_anchor(fragment):
+            return truncate_text(fragment, 18)
+    hard_object_focus = _concrete_focus_text(
+        *[
+            text
+            for text in [*source_signals, *support_texts]
+            if _source_signal_has_hard_service_object(text)
+        ],
+        limit=18,
+    )
+    if hard_object_focus:
+        hard_object_key = _normalize_title(hard_object_focus)
+        if hard_object_key and not (
+            current_title_key and (hard_object_key in current_title_key or current_title_key in hard_object_key)
+        ):
+            return hard_object_focus
+    for fragment in candidates:
+        fragment_key = _normalize_title(fragment)
+        if (
+            not fragment_key
+            or (current_title_key and (fragment_key in current_title_key or current_title_key in fragment_key))
+        ):
+            continue
+        if _method_title_has_detail_anchor(track, fragment):
+            return truncate_text(fragment, 18)
+    return ""
+
+
 def _repair_rejected_public_candidate(
     kind: str,
     candidates: list[dict[str, Any]],
@@ -5418,6 +5497,7 @@ def _repair_rejected_public_candidate(
         else:
             board = "skills" if kind == "group-post" else _preferred_tech_board(lead)
             source_signals = _signal_bundle_source_signals(track, bundle, signal_summary)
+            support_texts = _bundle_structural_support_texts(bundle, lead, limit=6)
             method_fields = _method_fallback_fields(bundle, lead, track=track)
             if not method_fields:
                 return None
@@ -5433,13 +5513,26 @@ def _repair_rejected_public_candidate(
                 track=track,
                 fallback="把现场约束拆成系统设计与执行顺序。",
             )
+            forced_object_focus = (
+                _repair_method_focus_seed(
+                    track,
+                    bundle=bundle,
+                    lead=lead,
+                    current=current,
+                    signal_summary=signal_summary,
+                )
+                if _repair_forces_object_led_method_focus(kind, reason)
+                else ""
+            )
             focus = _method_focus_text_from_inputs(
                 track,
                 signal_type,
-                str(bundle.get("title_seed") or bundle.get("focus_text") or current.get("title") or ""),
+                forced_object_focus
+                or str(bundle.get("title_seed") or bundle.get("focus_text") or current.get("title") or ""),
                 angle,
                 why_now,
                 *source_signals,
+                *support_texts,
                 method_fields.get("mechanism_core"),
                 method_fields.get("practice_program"),
             ) or _bundle_focus_text(bundle, lead, track=track)
@@ -5452,6 +5545,7 @@ def _repair_rejected_public_candidate(
                     angle,
                     why_now,
                     "；".join(source_signals),
+                    "；".join(support_texts[:2]),
                     method_fields.get("mechanism_core"),
                     method_fields.get("practice_program"),
                 ),
@@ -7205,6 +7299,11 @@ def _generate_codex_ideas(
    - `workplace`：反直觉诊断、病灶命名、隐性成本、替代机制。
    - `philosophy`：悖论、困境、真相、结构判断，要能引发站队或反驳。
    - `skills`：数字、前后对比、失败链路、可复制规则；标题第一屏必须先点明具体对象、故障或收益，不要只报“4 段协议”“一套框架”这种内部包装，也不要写成“场景 A、场景 B：16 人访谈 + 1 段日志，逼出 4 个节点”这种先晒取材过程的门口；也不要把“收到 / 已响应 / 已处理”这类状态词排成门口，再补“6 条规则 / 改成责任链”，那还是在卖命名整理，不是在交对象级方法；如果题目来自结算页、续费页、订票页这类公共产品界面，也别把“我知道这里不对 / 识别到风险”这种用户内心独白，或者“支付前才冒出的平台费”这种用户侧惊讶句挂在门口，先交产品侧对象、接手动作和验证收益。
+前置门槛：
+在提 idea 之前先过三道前置门槛，不要把它们留给后面的筛选和 repair：
+   - `tech-post` / `group-post` 必须先有公开对象锚点：工单、评论线程、审核队列、回写字段、订单页、日志切面、接口断口这类东西至少占住标题第一屏或 `source_signals`；如果你只能写“错误日志”“静默失败”“评论区从争论变成了点赞”这种抽象门口，这个 idea 还没长成。
+   - `why_now` 如果来自 `world-bundle` / 外部热帖 / 外部论文，必须已经被消化成对象级失败句或对照句，再进 idea；不能只借一个概念壳、情绪词或热标题来抬门面。
+   - 如果这条 idea 和最近低热帖仍在共享同一组机制簇，就必须同时换掉对象链和证据链；只换概念名、只换修辞、只把旧协议改叫新名字，都不要输出。
 18. 如能判断，请补充 `board_profile`、`hook_type`、`cta_type`。
    - `square` 默认：`board_profile=square`, `hook_type=public-emotion`, `cta_type=comment-scene`
    - `workplace` 默认：`board_profile=workplace`, `hook_type=diagnostic`, `cta_type=comment-diagnostic`
