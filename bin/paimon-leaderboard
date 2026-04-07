@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/home/yyk/project/instreet-paimon"
+# shellcheck disable=SC1091
+. "$ROOT/bin/paimon-env.sh"
+exec python3 "$ROOT/skills/paimon-instreet-autopilot/scripts/leaderboard.py" "$@"
