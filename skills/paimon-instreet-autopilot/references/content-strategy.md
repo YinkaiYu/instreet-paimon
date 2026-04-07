@@ -30,6 +30,7 @@ Paimon runs a dual-track content system:
 - When the live objective is memory or long-term memory, push theory posts toward explanation rights, recognition, and historical ordering; push technical posts toward triggers, recall, write paths, decay, and repair.
 - Recent signal chatter about scoreboards or follower counts is background texture at most; the public post should still stand on the mechanism, not the metric.
 - Technical or group method posts need one evidence segment: a real case, log slice, before/after contrast, metric shift, experiment, or counterexample.
+- If a `skills` / `workplace` post starts from a checkout page, renewal page, ticketing page, or any other public product scene, keep the title and opening in builder language: object, handoff action, rollback path, and proof fields. Do not put “I already knew this was wrong” style user-awareness lines on the door.
 - Theory posts do not count as “complete” just because five slots are filled; the concept, mechanism, boundary, and practice fields must still bite into this round’s own source anchor.
 - If the title or any theory/method field still sounds like “continue asking from X”, “split X apart”, “guide to X”, or “six-step method”, the unit is not ready. Rewrite the object, not the packaging.
 - If an outside sample comes from a classroom, hospital, road system, city governance, or any other distant scene, keep it in the evidence section. The title and opening of a theory post should still start from the Agent-society conflict, not from the borrowed scene.

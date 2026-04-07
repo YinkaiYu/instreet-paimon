@@ -658,6 +658,9 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
     generic_example_focus = False
     public_method_shell_focus = False
     inventory_method_focus = False
+    awareness_method_focus = False
+    audit_bucket_title_focus = False
+    external_gloss_focus = False
     abstract_method_opening_focus = False
     title_echo_focus = False
     truncated_scaffold_focus = False
@@ -732,6 +735,16 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         method_focus = True
         lessons.append("标题先把`收到 / 已响应 / 已处理`这类状态词排成门口，看起来像在给术语换名字。读者先看到的是表述升级，不是哪个对象、哪条链路、哪种返工会被真正改掉。")
         system_fixes.append("给方法帖增加“状态词壳标题”审计；凡是先排状态词、再补“几条规则 / 改成责任链”，却没点名订单页、工单、评论线程或任务链对象的标题，直接打回。")
+    if board in {"skills", "workplace"} and content_planner_module._method_title_awareness_shell_reason(title):
+        method_focus = True
+        awareness_method_focus = True
+        lessons.append("标题先把“知道被推单 / 识别到风险”这种用户清醒感摆在门口，读者先进来的不是结算页、原单冻结、来源标注和撤回路径，而是一句受骗后的心理独白。skills 版读者想拿走的是改链路的对象和收益，这种门口会把帖子读成消费者判断，不像产品协议。")
+        system_fixes.append("给方法帖增加“认知壳标题”审计；凡是把“知道 / 看出来 / 识别到风险”这类主观识别词抬进标题，又想写成规则、校验或协议的，一律改回对象、接手动作和验证收益。")
+    if board in {"skills", "workplace"} and content_planner_module._method_title_audit_bucket_shell_reason(title):
+        method_focus = True
+        audit_bucket_title_focus = True
+        lessons.append("标题先把“错误日志 / 成功记录 / 建案 / 结案回执”这组审计桶位摆成门口。skills 读者先看到的是治理分类，不是能立刻搬走的故障对象、触发门槛或收益差。")
+        system_fixes.append("给方法帖增加“审计桶位壳标题”审计；凡是先拿错误日志、成功记录、回执、建案、结案这类分类词起题，却没点名评论线程、工单、订单页或具体失败对象的标题，直接打回。")
     if board in {"skills", "workplace"} and ("那篇以 `" in excerpt or ("GitHub" in excerpt and "论文" in excerpt)):
         source_overhang_focus = True
         lessons.append("开头先把外部论文和项目页排成材料串，像研究摘抄，不像实验室方法帖。读者还没看见这次到底要接手哪个对象、改哪条链路，就先被样本名词堵在门口。")
@@ -768,6 +781,15 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         abstract_method_opening_focus = True
         lessons.append("正文第一屏先把“静默失败 / 恢复权 / 解释权”讲满了，真正的日志切面和外部失败句却放到后面。skills 版读者还没看见对象，就先被概念门槛拦住。")
         system_fixes.append("给 `skills` / `workplace` 发布前校验补“首屏硬证据”门槛；前两段如果还在讲治理词，就必须立刻带一条日志句、页面断口或外部失败话术，不然直接打回。")
+    if (
+        board in {"skills", "workplace"}
+        and any(token in excerpt for token in ("有人说", "外部现象是", "外部发现"))
+        and any(token in excerpt for token in ("翻成一句治理判断", "翻成一句判断", "同义判断", "形成一束可压缩的问题"))
+    ):
+        method_focus = True
+        external_gloss_focus = True
+        lessons.append("外部信息只进了命名层，没有进证据层。正文把外部讨论翻成判断句，却没继续交出第二个可复核样本或对照证据，外部热度只贡献了气口，没有贡献可信度。")
+        system_fixes.append("给 world-bundle / discussion 来源补“信号消化”校验；如果 why_now 来自外部讨论，正文至少要带回一条来自该样本的失败句、对象差异或对照证据，不能只把外部标题翻成一句判断。")
     if not lessons:
         lessons.append("标题、板块、证据和理论交付没有咬成一件事，读者进门后看见的是错位，而不是一条值得继续跟的判断。")
     if not system_fixes:
@@ -777,6 +799,10 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         summary = f"这条低热不是因为方法没用。《{truncate_text(title, 36)}》把它卖成了“Agent 终于学会认错”的公共行为判断，正文真正交付的却是派蒙自家的状态位改写；标题承诺、技能板块入口和证据外延没完全对上。"
     if public_method_shell_focus and title_echo_focus:
         summary = f"这条低热不是因为“静默失败”没人关心。《{truncate_text(title, 36)}》先把别人的热标题壳照搬进来，正文又一直回声那句包装和赞评数字；对象没有长出来，半截脚手架反倒直接上了台。"
+    elif awareness_method_focus:
+        summary = f"这条低热不是因为 checkout 题没人关心。《{truncate_text(title, 36)}》先把门口卖成了“我已经知道自己被推单”的清醒感，正文却想交结算链路的冻结、来源标注和撤回协议；skills 读者还没拿到对象级收益，就先被带进用户内心戏。"
+    elif audit_bucket_title_focus and abstract_method_opening_focus:
+        summary = f"这条低热不是因为“错误日志”不重要。《{truncate_text(title, 36)}》先把审计桶位摆成门口，正文第一屏又先在定义对象和协议；真正能复核的日志切面要到中段才出现，skills 读者进门先看到的是分类，不是方法收益。"
     elif inventory_method_focus and abstract_method_opening_focus:
         summary = f"这条低热不是因为“接手节点”没价值。《{truncate_text(title, 36)}》先把两个现场和材料数量摆成门口，正文第一屏又先讲静默失败和解释权；读者还没拿到硬对象，就先被研究包装和概念门槛双重劝退。"
     elif source_overhang_focus:
@@ -3239,6 +3265,8 @@ def _idea_publish_title(idea: dict[str, Any]) -> str:
             or content_planner_module._method_title_public_heat_shell_reason(raw_title)
             or content_planner_module._method_title_source_inventory_overhang_reason(raw_title)
             or content_planner_module._method_title_status_vocab_shell_reason(raw_title)
+            or content_planner_module._method_title_awareness_shell_reason(raw_title)
+            or content_planner_module._method_title_audit_bucket_shell_reason(raw_title)
         )
     )
     if _idea_publishable_title(raw_title) and not theory_title_rejected and not method_title_rejected:
@@ -3716,6 +3744,94 @@ def _forum_method_has_truncated_placeholder_leak(content: str) -> bool:
     return any(re.search(r"[A-Za-z\u4e00-\u9fff]{2,}\.\.\.", paragraph) for paragraph in body)
 
 
+def _forum_method_has_public_scene_single_case_overhang(content: str) -> bool:
+    paragraphs = _forum_content_units(content)
+    body = [item for item in paragraphs if not item.startswith("#")]
+    if len(body) < 4:
+        return False
+    opening_window = body[:5]
+    merged = "\n".join(opening_window)
+    if not content_planner_module._method_text_has_public_product_scene(merged):
+        return False
+    if not any(token in merged for token in ("规则", "协议", "校验")):
+        return False
+    if not any(token in merged for token in ("监管案例", "抽检", "卢比", "处理费", "会员项", "平台费")):
+        return False
+    proof_tokens = (
+        "日志",
+        "字段",
+        "按钮",
+        "接口",
+        "截图",
+        "订单",
+        "工单",
+        "版本",
+        "冻结",
+        "埋点",
+        "实验",
+        "前后",
+        "对照",
+        "反例",
+    )
+    proof_paragraphs = 0
+    for paragraph in opening_window:
+        if re.search(r"\d{1,2}:\d{2}", paragraph):
+            proof_paragraphs += 1
+            continue
+        if re.search(r"\d+(?:\.\d+)?\s*(?:卢比|元|美元|%|秒|分钟|小时)", paragraph):
+            proof_paragraphs += 1
+            continue
+        if any(token in paragraph for token in proof_tokens):
+            proof_paragraphs += 1
+    return proof_paragraphs <= 1
+
+
+def _forum_method_has_placeholder_service_example(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+    return bool(
+        re.search(
+            r"(某(?:条|次|个|类|段|笔)[^，。；\n]{0,14}(?:线程|任务|写入|回写|工单|订单|页面|按钮|接口|预算|单据|日志|失败)|一种产品|另一种入口|某类系统)",
+            cleaned,
+        )
+    )
+
+
+def _forum_method_has_explicit_hard_evidence(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+    if "```" in cleaned:
+        return True
+    if re.search(
+        r"(\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}|->|=\s*\d+|reply-comment-failed|external-comment-failed|forum write budget exhausted)",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if _forum_method_has_placeholder_service_example(cleaned):
+        return False
+    return any(
+        token in cleaned
+        for token in (
+            "工单号",
+            "订单号",
+            "单号",
+            "按钮",
+            "页面",
+            "接口",
+            "截图",
+            "字段",
+            "版本",
+            "未指派",
+            "待补充凭证",
+            "冻结",
+            "账单行",
+        )
+    )
+
+
 def _forum_method_has_abstract_opening_without_hard_evidence(content: str) -> bool:
     paragraphs = _forum_content_units(content)
     body = [item for item in paragraphs if not item.startswith("#")]
@@ -3741,15 +3857,18 @@ def _forum_method_has_abstract_opening_without_hard_evidence(content: str) -> bo
         "接管窗口",
         "接手权",
         "自治系统",
+        "对象单",
+        "结案回执",
+        "主记录",
+        "建案",
     )
-    hard_tokens = (
+    scene_tokens = (
         "日志",
         "工单",
         "订单",
         "页面",
         "按钮",
         "接口",
-        "截图",
         "访谈",
         "队列",
         "转人工",
@@ -3759,20 +3878,18 @@ def _forum_method_has_abstract_opening_without_hard_evidence(content: str) -> bo
         "已读",
         "owner",
         "单据",
+        "评论线程",
+        "写预算",
+        "回写",
     )
     abstract_hits = sum(1 for token in abstract_tokens if token in opening)
-    hard_hits = sum(1 for token in hard_tokens if token in opening)
-    if abstract_hits < 2 or hard_hits:
+    scene_hits = sum(1 for token in scene_tokens if token in opening)
+    if abstract_hits < 2 or scene_hits == 0:
         return False
-    if re.search(r"\d{1,2}:\d{2}", opening) or "```" in opening or "`" in opening:
+    if _forum_method_has_explicit_hard_evidence(opening):
         return False
     later = "\n".join(body[2:6])
-    return bool(
-        any(token in later for token in hard_tokens)
-        or re.search(r"\d{1,2}:\d{2}", later)
-        or "```" in later
-        or "`" in later
-    )
+    return _forum_method_has_explicit_hard_evidence(later)
 
 
 def _forum_content_publishable_issue(content: str, *, submolt: str, kind: str | None = None) -> str | None:
@@ -3819,6 +3936,8 @@ def _forum_content_publishable_issue(content: str, *, submolt: str, kind: str | 
         return "stock-method-scaffold"
     if submolt in {"skills", "workplace"} and _forum_method_has_abstract_opening_without_hard_evidence(cleaned):
         return "opening-needs-hard-evidence"
+    if submolt in {"skills", "workplace"} and _forum_method_has_public_scene_single_case_overhang(cleaned):
+        return "public-scene-single-case-overhang"
     if submolt in {"skills", "workplace"} and _forum_method_relies_on_self_heat_evidence(cleaned):
         return "self-heat-evidence"
     if submolt in {"skills", "workplace"} and _forum_method_has_title_echo_overhang(cleaned):
@@ -5161,6 +5280,9 @@ def _generate_forum_post(
 18. 这类标题至少补一个外部或跨系统例证/反例；如果整条证据都只来自派蒙自家日志，就把标题收回具体对象和本地修复收益。
 19. 不要把两个现场和“16 人访谈 + 1 段日志”这种材料数量直接抬进标题；标题只留对象、断口或收益，材料数量退回中段证据段。
 20. 开头两段别先讲“静默失败 / 恢复权 / 解释权”这种治理词；先交一条日志句、页面断口或外部失败话术，再抬方法名。
+21. 不要把“我知道这里不对 / 识别到风险 / 看出来被推单”这种用户内心独白抬进标题。方法帖门口要先报对象、接手动作和验证收益，不要先卖清醒感。
+22. 如果证据主现场来自结算页、购物车、会员续费、订票页这类公共产品界面，前两段必须立刻翻成产品侧对象：原单冻结点、附加项来源、确认时间、撤回路径或回写字段。不要停在“识别不是决定权”这种抽象判断。
+23. 如果 `why_now` 或 `source_signals` 来自外部讨论，正文至少要带回一条来自那个样本的失败句、对象差异或对照证据。不能只把外部标题翻成一句治理判断。
 """.strip()
     prompt = f"""
 你是 InStreet 上的派蒙，账号名是 派蒙。请根据选题写一篇新的中文帖子。
@@ -5250,6 +5372,8 @@ CONTENT:
             or content_planner_module._method_title_public_heat_shell_reason(title)
             or content_planner_module._method_title_source_inventory_overhang_reason(title)
             or content_planner_module._method_title_status_vocab_shell_reason(title)
+            or content_planner_module._method_title_awareness_shell_reason(title)
+            or content_planner_module._method_title_audit_bucket_shell_reason(title)
         )
     ):
         title = brief["title"]
@@ -5829,6 +5953,7 @@ def _publish_primary_action(
     events: list[dict] = []
     publication_mode = "none"
     forum_budget_blocked = False
+    has_publishable_candidate = False
 
     def run_primary_forum_write(
         *,
@@ -5881,6 +6006,7 @@ def _publish_primary_action(
         kind = idea.get("kind", "")
         if _primary_block_reason(idea):
             continue
+        has_publishable_candidate = True
         if forum_budget_blocked and kind in {"theory-post", "tech-post", "group-post"}:
             if publication_mode == "none":
                 publication_mode = "skipped-budget"
@@ -6348,6 +6474,16 @@ def _publish_primary_action(
                     "resolution": "unresolved",
                 }
             )
+    if not has_publishable_candidate and publication_mode == "none":
+        publication_mode = "not-actionable"
+        events.append(
+            {
+                "kind": "primary-publish-skipped-no-candidate",
+                "reason": "planner produced no publishable primary candidate in this run",
+                "resolution": "skipped-no-candidate",
+                "normal_mechanism": True,
+            }
+        )
     return None, events, cycle_state, publication_mode
 
 
@@ -7260,6 +7396,8 @@ def _compose_primary_status_line(summary: dict[str, Any]) -> str:
     primary_pressure = _primary_pressure_label(summary)
     if primary_mode == "pending-confirmation" and primary_title:
         return f"公开动作：发布待确认《{primary_title}》"
+    if primary_mode == "not-actionable":
+        return "公开动作：这轮主发布候选尚未长成，先继续补充外部证据与判断"
     if primary:
         return f"公开动作：已完成《{primary.get('title', '')}》"
     primary_failures = {
@@ -8335,10 +8473,13 @@ def main() -> None:
             }
         )
     primary_publication_succeeded = bool(primary_action is not None and primary_publication_mode == "new")
+    primary_publication_blocking_required = bool(
+        primary_publication_required and primary_publication_mode != "not-actionable"
+    )
 
     if args.execute:
         persisted_next_tasks, next_actions = _build_next_action_state(
-            primary_publication_required,
+            primary_publication_blocking_required,
             primary_publication_succeeded,
             comment_result["remaining_tasks"],
             failure_details,
@@ -8519,7 +8660,7 @@ def main() -> None:
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     exit_code = 0
-    if primary_publication_required and not primary_publication_succeeded:
+    if primary_publication_blocking_required and not primary_publication_succeeded:
         exit_code = EXIT_PRIMARY_PUBLICATION_FAILED
     elif (
         feishu_report_required

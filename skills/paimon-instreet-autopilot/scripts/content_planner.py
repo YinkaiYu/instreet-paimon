@@ -767,6 +767,51 @@ METHOD_TITLE_AWARENESS_SHELL_TOKENS = (
     "被诱导",
     "风险",
 )
+METHOD_TITLE_AUDIT_BUCKET_TOKENS = (
+    "错误日志",
+    "成功记录",
+    "主记录",
+    "回执",
+    "建案",
+    "结案",
+    "对象单",
+    "签收单",
+)
+METHOD_TITLE_AUDIT_ALLOWED_OBJECT_TOKENS = (
+    "评论",
+    "评论线程",
+    "订单",
+    "工单",
+    "页面",
+    "按钮",
+    "接口",
+    "写预算",
+    "429",
+    "退款",
+    "审核",
+    "账单",
+    "结算页",
+    "购物车",
+    "附加项",
+    "队列",
+    "任务",
+    "通知",
+    "私信",
+)
+METHOD_TITLE_RUNTIME_SCHEMA_TOKENS = (
+    "主记录",
+    "父记录",
+    "父事务",
+    "reconcile",
+    "ack_user",
+    "takeover_started_at",
+    "parent_status",
+    "child_run",
+    "exit_rule",
+    "rollback_path",
+    "counterexample_check",
+    "await_takeover",
+)
 METHOD_PUBLIC_PRODUCT_SCENE_TOKENS = (
     "支付前",
     "结算",
@@ -3355,6 +3400,47 @@ def _method_title_awareness_shell_reason(title: str) -> str:
     return "方法帖标题还在借“我知道这里不对 / 识别到了风险”这种认知壳起手，门口先卖的是用户清醒感，不是系统对象、接手动作或验证收益。"
 
 
+def _method_title_audit_bucket_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    audit_hits = sum(1 for token in METHOD_TITLE_AUDIT_BUCKET_TOKENS if token in title_text)
+    if audit_hits < 2:
+        return ""
+    if _contains_any(title_text, METHOD_TITLE_AUDIT_ALLOWED_OBJECT_TOKENS):
+        return ""
+    compact = re.sub(r"\s+", "", title_text)
+    if re.search(r"[0-9一二三四五六七八九十两]+\s*(条|个|次|分钟|小时|屏|页)", compact) and _contains_any(
+        title_text,
+        METHOD_TITLE_FAILURE_OR_PAYOFF_TOKENS,
+    ):
+        return ""
+    return "方法帖标题还在拿“错误日志 / 成功记录 / 建案 / 结案回执”这类审计桶位当门口，读者先看到的是治理分类，不是能立刻复用的对象、断口或收益。"
+
+
+def _method_title_runtime_schema_shell_reason(title: str) -> str:
+    title_text = str(title or "").strip()
+    if not title_text:
+        return ""
+    separator = "：" if "：" in title_text else ":" if ":" in title_text else ""
+    if not separator:
+        return ""
+    lead, tail = [part.strip() for part in title_text.split(separator, 1)]
+    if len(lead) < 4 or len(tail) < 6:
+        return ""
+    if not _contains_any(lead, METHOD_TITLE_RUNTIME_SCHEMA_TOKENS):
+        return ""
+    if _contains_any(title_text, METHOD_TITLE_AUDIT_ALLOWED_OBJECT_TOKENS):
+        return ""
+    compact_tail = re.sub(r"\s+", "", tail)
+    if not (
+        re.search(r"[0-9一二三四五六七八九十两]+\s*(个|次|条|步|层)", compact_tail)
+        or _contains_any(tail, ("规则", "校验", "协议", "判据", "接手点", "回写点"))
+    ):
+        return ""
+    return "方法帖标题还在拿“主记录 / reconcile / ack_user”这类后台写盘字段当门口，读者先看到的是仓库内部运行态，不是自己能直接带走的故障对象。"
+
+
 def _method_title_public_product_story_reason(title: str) -> str:
     title_text = str(title or "").strip()
     if not title_text:
@@ -3438,6 +3524,10 @@ def _method_source_text_needs_object_reframe(signal_type: str, source_text: str)
     if _method_title_status_vocab_shell_reason(cleaned):
         return True
     if _method_title_awareness_shell_reason(cleaned):
+        return True
+    if _method_title_audit_bucket_shell_reason(cleaned):
+        return True
+    if _method_title_runtime_schema_shell_reason(cleaned):
         return True
     if _method_title_public_product_story_reason(cleaned):
         return True
@@ -4990,6 +5080,23 @@ def _idea_method_specificity_issues(idea: dict[str, Any]) -> list[str]:
     )
     if stock_fields >= 1:
         issues.append("方法框架还在复用旧协议壳，没有交出这次题目自己的故障对象和验证动作")
+    title_text = str(idea.get("title") or "").strip()
+    checklist_title = bool(
+        re.search(r"[0-9一二三四五六七八九十两]+\s*(个|次|条|步|层)", re.sub(r"\s+", "", title_text))
+        and _contains_any(title_text, ("规则", "校验", "协议", "判据", "接手点", "回写点"))
+    )
+    hard_service_signals = sum(1 for item in source_signals if _source_signal_has_hard_service_object(item))
+    glossy_external_signals = [
+        item
+        for item in source_signals
+        if _ascii_heavy_text(item)
+        or _source_title_shell(item)
+        or re.search(r"当前\s*\d+\s*赞\s*/\s*\d+\s*评", item)
+    ]
+    if checklist_title and hard_service_signals < 2:
+        issues.append("题目已经把这件事卖成可直接搬走的规则表，但 source_signals 里还只有一条硬对象；没有第二个可复核场景时，它更像本地 runbook，不像公开方法")
+    if checklist_title and hard_service_signals < 2 and glossy_external_signals:
+        issues.append("外部来源还停在论文摘要或热帖标题，没有被压成第二个可复核对象；这条方法的可迁移性只是说出来了，还没被证据撑起来")
     public_scene_text = _joined_idea_text(
         idea.get("title"),
         idea.get("angle"),
@@ -5201,6 +5308,10 @@ def _audit_generated_idea(
         failure_reason = status_vocab_reason
     elif kind in {"tech-post", "group-post"} and (awareness_reason := _method_title_awareness_shell_reason(str(audited.get("title") or ""))):
         failure_reason = awareness_reason
+    elif kind in {"tech-post", "group-post"} and (runtime_schema_reason := _method_title_runtime_schema_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = runtime_schema_reason
+    elif kind in {"tech-post", "group-post"} and (audit_bucket_reason := _method_title_audit_bucket_shell_reason(str(audited.get("title") or ""))):
+        failure_reason = audit_bucket_reason
     elif kind in {"tech-post", "group-post"} and (public_product_reason := _method_title_public_product_story_reason(str(audited.get("title") or ""))):
         failure_reason = public_product_reason
     elif title_scene_overhang:
