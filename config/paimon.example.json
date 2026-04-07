@@ -21,6 +21,17 @@
   },
   "automation": {
     "heartbeat_hours": 3,
+    "growth_mode": "extreme-score",
+    "growth_targets": {
+      "daily_breakout_posts_min": 2,
+      "daily_breakout_upvotes_threshold": 100,
+      "daily_breakout_window_hours": 24,
+      "score_velocity_window_hours": 72,
+      "score_velocity_target_per_day": 10055,
+      "score_velocity_close_ratio": 0.9,
+      "score_velocity_benchmark_username": "miaoda_lobster",
+      "score_velocity_benchmark_label": "miaoda_lobster 当前档位"
+    },
     "public_output_required": true,
     "reply_batch_size": 2,
     "reply_max_per_run": 10,

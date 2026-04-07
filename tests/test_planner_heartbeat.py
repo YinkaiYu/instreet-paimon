@@ -1,5 +1,5 @@
 import contextlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import http.client as http_client
 import io
 import json
@@ -525,6 +525,7 @@ class ContentPlannerTests(unittest.TestCase):
         self.assertIsNotNone(repaired)
         self.assertIsNone(repaired["failure_reason_if_rejected"])
         self.assertNotEqual(raw["title"], repaired["title"])
+        self.assertIn("错误日志", repaired["title"])
 
     def test_track_signal_bundle_reframes_theory_bundle_before_title_generation(self) -> None:
         bundle = content_planner._track_signal_bundle(
@@ -1211,6 +1212,46 @@ class ContentPlannerTests(unittest.TestCase):
         picked = content_planner._pick_track_opportunity("theory", signal_summary)
         self.assertIn(picked["signal_type"], {"community-hot", "promo", "discussion", "literary", "notification-load", "reply-pressure", "hot-theory", "feed"})
 
+    def test_opportunity_rank_score_extreme_growth_prefers_public_hot_signal(self) -> None:
+        signal_summary = {
+            "growth_mode": "extreme-score",
+            "content_evolution": {
+                "growth_targets": {
+                    "daily_breakout": {"remaining": 2},
+                    "score_velocity": {"actual_per_day": 6200, "on_track": False},
+                }
+            },
+            "pending_reply_posts": [],
+            "low_heat_failures": {"items": []},
+        }
+        public_score = content_planner._opportunity_rank_score(
+            {
+                "track": "theory",
+                "signal_type": "community-hot",
+                "source_text": "你的 Agent 不是忙，是把等待成本转给了你",
+                "why_now": "公共广场已经开始围着等待和转人工断口起量。",
+                "quality_score": 3.4,
+                "freshness_score": 2.2,
+                "world_score": 0.8,
+                "overlap_score": (0, 0, 0),
+            },
+            signal_summary=signal_summary,
+        )
+        internal_score = content_planner._opportunity_rank_score(
+            {
+                "track": "group",
+                "signal_type": "promo",
+                "source_text": "Agent心跳同步实验室：新一轮状态同步协议",
+                "why_now": "实验室正在继续完善内部协议。",
+                "quality_score": 3.4,
+                "freshness_score": 2.2,
+                "world_score": 0.8,
+                "overlap_score": (0, 0, 0),
+            },
+            signal_summary=signal_summary,
+        )
+        self.assertGreater(public_score, internal_score)
+
     def test_build_engagement_targets_rank_by_live_score_when_metrics_are_missing(self) -> None:
         targets = content_planner._build_engagement_targets(
             signal_summary={
@@ -1726,6 +1767,122 @@ class ContentPlannerTests(unittest.TestCase):
                 },
             )
         )
+
+    def test_looks_like_low_heat_followup_uses_recorded_signature_fields(self) -> None:
+        self.assertTrue(
+            content_planner._looks_like_low_heat_followup(
+                "你的 Agent 不是失忆，是签收和回写一直没回到同一条责任链。",
+                {
+                    "pending_reply_posts": [],
+                    "low_heat_failures": {
+                        "items": [
+                            {
+                                "recorded_at": common.now_utc(),
+                                "title": "旧标题已经换掉了",
+                                "summary": "这里只剩很泛的复盘摘要。",
+                                "cluster_signatures": ["回写", "签收", "责任链"],
+                                "object_signatures": ["回写", "签收"],
+                                "focus_fragments": ["责任链", "回写", "签收"],
+                            }
+                        ]
+                    },
+                },
+            )
+        )
+
+    def test_generate_codex_ideas_prompt_adds_extreme_growth_guidance(self) -> None:
+        captured_prompt = {}
+        original_run_codex_json = content_planner.run_codex_json
+        try:
+            def fake_run_codex_json(prompt, *_args, **_kwargs):
+                captured_prompt["text"] = prompt
+                return []
+
+            content_planner.run_codex_json = fake_run_codex_json
+            content_planner._generate_codex_ideas(
+                {
+                    "growth_mode": "extreme-score",
+                    "content_evolution": {
+                        "growth_targets": {
+                            "daily_breakout": {"remaining": 2, "target": 2, "actual": 0},
+                            "score_velocity": {"actual_per_day": 6200, "target_per_day": 10055, "on_track": False},
+                        }
+                    },
+                    "community_hot_posts": [],
+                    "competitor_watchlist": [],
+                    "rising_hot_posts": [],
+                    "user_topic_hints": [],
+                    "external_information": {},
+                },
+                [],
+                allowed_kinds=["theory-post"],
+                lane_strategy={"selected_kinds": ["theory-post"], "focus_kind": "theory-post"},
+                model=None,
+                reasoning_effort=None,
+                timeout_seconds=1,
+            )
+        finally:
+            content_planner.run_codex_json = original_run_codex_json
+
+        prompt = captured_prompt["text"]
+        self.assertIn("极限冲榜模式", prompt)
+        self.assertIn("你的 Agent", prompt)
+        self.assertIn("growth_targets", prompt)
+
+    def test_build_content_evolution_state_tracks_growth_targets(self) -> None:
+        original_current_state_dir = content_planner.CURRENT_STATE_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            current_state = repo_root / "state" / "current"
+            current_state.mkdir(parents=True, exist_ok=True)
+            (repo_root / "config").mkdir(parents=True, exist_ok=True)
+            now = datetime.fromisoformat(common.now_utc().replace("Z", "+00:00"))
+            baseline = now.replace(minute=0, second=0, microsecond=0)
+            (repo_root / "config" / "paimon.json").write_text(
+                json.dumps(
+                    {
+                        "automation": {
+                            "growth_targets": {
+                                "daily_breakout_posts_min": 2,
+                                "daily_breakout_upvotes_threshold": 100,
+                                "daily_breakout_window_hours": 24,
+                                "score_velocity_window_hours": 72,
+                                "score_velocity_target_per_day": 10055,
+                                "score_velocity_close_ratio": 0.9,
+                                "score_velocity_benchmark_username": "miaoda_lobster",
+                                "score_velocity_benchmark_label": "miaoda_lobster 当前档位",
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (current_state / "snapshot_log.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"captured_at": (baseline - timedelta(hours=60)).isoformat(), "score": 76000}, ensure_ascii=False),
+                        json.dumps({"captured_at": baseline.isoformat(), "score": 78700}, ensure_ascii=False),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            content_planner.CURRENT_STATE_DIR = current_state
+            try:
+                state = content_planner.build_content_evolution_state(
+                    posts=[
+                        {"title": "A", "created_at": (baseline - timedelta(hours=6)).isoformat(), "upvotes": 132, "comment_count": 12, "submolt": {"name": "square"}},
+                        {"title": "B", "created_at": (baseline - timedelta(hours=2)).isoformat(), "upvotes": 108, "comment_count": 9, "submolt": {"name": "square"}},
+                    ],
+                    previous_state={},
+                )
+            finally:
+                content_planner.CURRENT_STATE_DIR = original_current_state_dir
+
+        self.assertEqual(2, state["growth_targets"]["daily_breakout"]["actual"])
+        self.assertGreater(state["growth_targets"]["score_velocity"]["actual_per_day"], 0)
+        self.assertEqual("miaoda_lobster", state["growth_targets"]["score_velocity"]["benchmark_username"])
 
     def test_preferred_theory_board_avoids_square_after_emotion_shell_low_heat(self) -> None:
         board = content_planner._preferred_theory_board(
@@ -4591,6 +4748,44 @@ class HeartbeatStateTests(unittest.TestCase):
         self.assertEqual("engage-external", strategy["lead"])
         self.assertIn("退款工单连续三次回写失败", strategy["rationale"])
 
+    def test_runtime_stage_strategy_extreme_score_mode_raises_publish_primary_score(self) -> None:
+        base_plan = {
+            "ideas": [
+                {
+                    "kind": "theory-post",
+                    "title": "你的 Agent 不是忙，是把等待成本转给了你",
+                    "source_signals": ["退款工单连续三次回写失败，等待状态开始进入治理接口"],
+                    "why_now": "公共广场已经开始围着等待和转人工断口起量。",
+                }
+            ],
+            "reply_targets": [],
+            "dm_targets": [],
+            "engagement_targets": [{"priority": 0}],
+            "idea_lane_strategy": {"selected_kinds": ["theory-post"], "focus_kind": "theory-post", "backup_kinds": []},
+            "planning_signals": {},
+        }
+        default_strategy = heartbeat._runtime_stage_strategy(
+            dict(base_plan),
+            [],
+            primary_publication_required=True,
+        )
+        extreme_strategy = heartbeat._runtime_stage_strategy(
+            {
+                **base_plan,
+                "growth_mode": "extreme-score",
+                "growth_targets": {
+                    "daily_breakout": {"remaining": 2},
+                    "score_velocity": {"actual_per_day": 6200, "on_track": False},
+                },
+            },
+            [],
+            primary_publication_required=True,
+        )
+        default_publish = next(item for item in default_strategy["stages"] if item["name"] == "publish-primary")
+        extreme_publish = next(item for item in extreme_strategy["stages"] if item["name"] == "publish-primary")
+        self.assertGreater(extreme_publish["score"], default_publish["score"])
+        self.assertIn("冲榜模式", extreme_publish["reason"])
+
     def test_runtime_stage_strategy_falls_back_to_steady_state_when_no_stage_has_pressure(self) -> None:
         strategy = heartbeat._runtime_stage_strategy(
             {
@@ -4606,6 +4801,28 @@ class HeartbeatStateTests(unittest.TestCase):
         )
         self.assertEqual("steady-state", strategy["lead"])
         self.assertEqual("继续追当前最强压力点，不为流程对称感硬补动作", strategy["rationale"])
+
+    def test_update_low_heat_failures_state_records_signature_fields(self) -> None:
+        state = heartbeat._update_low_heat_failures_state(
+            previous_state={},
+            low_heat_signal={
+                "triggered": True,
+                "title": "“处理中”挂了 28 分钟，接手人还是空的",
+                "upvotes": 12,
+                "comment_count": 0,
+                "board": "skills",
+                "age_hours": 10,
+            },
+            low_heat_reflection={
+                "summary": "这条低热继续在复写签收、回写和责任链。",
+                "lessons": ["标题虽然换了，但还是同一组签收 / 回写 / 责任链机制。"],
+                "system_fixes": [],
+            },
+        )
+        item = state["items"][0]
+        self.assertIn("回写", item["cluster_signatures"])
+        self.assertIn("签收", item["object_signatures"])
+        self.assertTrue(item["focus_fragments"])
 
     def test_plan_has_primary_publication_pressure_stays_false_for_shortlist_without_grounded_idea(self) -> None:
         self.assertFalse(

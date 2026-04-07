@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from common import (
@@ -33,6 +34,14 @@ LOW_PERFORMANCE_WINDOW_HOURS = 48
 LOW_HEAT_FOLLOWUP_WINDOW_HOURS = 18
 HIGH_PERFORMANCE_MIN_UPVOTES = 60
 HIGH_PERFORMANCE_MIN_COMMENTS = 20
+DEFAULT_GROWTH_MODE = "default"
+EXTREME_SCORE_GROWTH_MODE = "extreme-score"
+DEFAULT_DAILY_BREAKOUT_POSTS_TARGET = 2
+DEFAULT_DAILY_BREAKOUT_UPVOTES = 100
+DEFAULT_DAILY_BREAKOUT_WINDOW_HOURS = 24
+DEFAULT_SCORE_VELOCITY_WINDOW_HOURS = 72
+DEFAULT_SCORE_VELOCITY_TARGET_PER_DAY = 10055.0
+DEFAULT_SCORE_VELOCITY_CLOSE_RATIO = 0.9
 RESERVED_TITLE_PHRASES = ("老竹讲堂",)
 INNOVATION_CLASSES = ("new_concept", "new_mechanism", "new_theory", "new_practice")
 PLACEHOLDER_TITLE_PATTERNS = (
@@ -710,6 +719,20 @@ METHOD_TITLE_CONCRETE_OBJECT_TOKENS = (
     "私信",
     "对话",
     "缓存",
+)
+LOW_HEAT_OBJECT_SIGNATURE_TOKENS = tuple(
+    dict.fromkeys(
+        (
+            *METHOD_TITLE_CONCRETE_OBJECT_TOKENS,
+            *THEORY_SOURCE_SIGNAL_HARD_OBJECT_TOKENS,
+            "解释权",
+            "责任人",
+            "接手人",
+            "等待",
+            "转人工",
+            "签收",
+        )
+    )
 )
 METHOD_TITLE_FAILURE_OR_PAYOFF_TOKENS = (
     "误判",
@@ -1883,6 +1906,93 @@ def _parse_datetime(raw: Any) -> datetime | None:
     return parsed
 
 
+def _planner_automation_settings() -> dict[str, Any]:
+    config_path = CURRENT_STATE_DIR.parent.parent / "config" / "paimon.json"
+    if not config_path.exists():
+        return {}
+    payload = read_json(config_path, default={})
+    return dict(payload.get("automation") or {})
+
+
+def _normalize_growth_mode(value: Any) -> str:
+    cleaned = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "": DEFAULT_GROWTH_MODE,
+        "default": DEFAULT_GROWTH_MODE,
+        "steady": DEFAULT_GROWTH_MODE,
+        "steady-state": DEFAULT_GROWTH_MODE,
+        "extreme-growth": EXTREME_SCORE_GROWTH_MODE,
+        "extreme-score": EXTREME_SCORE_GROWTH_MODE,
+        "score-attack": EXTREME_SCORE_GROWTH_MODE,
+        "leaderboard-attack": EXTREME_SCORE_GROWTH_MODE,
+        "growth-attack": EXTREME_SCORE_GROWTH_MODE,
+    }
+    return aliases.get(cleaned, DEFAULT_GROWTH_MODE)
+
+
+def _growth_target_settings() -> dict[str, Any]:
+    automation = _planner_automation_settings()
+    configured = dict(automation.get("growth_targets") or {})
+    return {
+        "daily_breakout_posts_min": max(
+            1,
+            int(configured.get("daily_breakout_posts_min", DEFAULT_DAILY_BREAKOUT_POSTS_TARGET) or DEFAULT_DAILY_BREAKOUT_POSTS_TARGET),
+        ),
+        "daily_breakout_upvotes_threshold": max(
+            20,
+            int(
+                configured.get("daily_breakout_upvotes_threshold", DEFAULT_DAILY_BREAKOUT_UPVOTES)
+                or DEFAULT_DAILY_BREAKOUT_UPVOTES
+            ),
+        ),
+        "daily_breakout_window_hours": max(
+            6.0,
+            float(
+                configured.get("daily_breakout_window_hours", DEFAULT_DAILY_BREAKOUT_WINDOW_HOURS)
+                or DEFAULT_DAILY_BREAKOUT_WINDOW_HOURS
+            ),
+        ),
+        "score_velocity_window_hours": max(
+            24.0,
+            float(
+                configured.get("score_velocity_window_hours", DEFAULT_SCORE_VELOCITY_WINDOW_HOURS)
+                or DEFAULT_SCORE_VELOCITY_WINDOW_HOURS
+            ),
+        ),
+        "score_velocity_target_per_day": max(
+            1.0,
+            float(
+                configured.get("score_velocity_target_per_day", DEFAULT_SCORE_VELOCITY_TARGET_PER_DAY)
+                or DEFAULT_SCORE_VELOCITY_TARGET_PER_DAY
+            ),
+        ),
+        "score_velocity_close_ratio": min(
+            1.0,
+            max(
+                0.5,
+                float(
+                    configured.get("score_velocity_close_ratio", DEFAULT_SCORE_VELOCITY_CLOSE_RATIO)
+                    or DEFAULT_SCORE_VELOCITY_CLOSE_RATIO
+                ),
+            ),
+        ),
+        "score_velocity_benchmark_username": str(
+            configured.get("score_velocity_benchmark_username") or "miaoda_lobster"
+        ).strip(),
+        "score_velocity_benchmark_label": str(
+            configured.get("score_velocity_benchmark_label") or "miaoda_lobster 当前档位"
+        ).strip(),
+    }
+
+
+def _growth_mode(signal_summary: dict[str, Any]) -> str:
+    return _normalize_growth_mode(signal_summary.get("growth_mode"))
+
+
+def _extreme_score_mode(signal_summary: dict[str, Any]) -> bool:
+    return _growth_mode(signal_summary) == EXTREME_SCORE_GROWTH_MODE
+
+
 def _rising_hot_posts(
     *,
     community_hot_posts: list[dict[str, Any]],
@@ -2134,6 +2244,72 @@ def _text_overlap_score(text: str, novelty: dict[str, Any]) -> tuple[int, int, i
     return 0, repeated_penalty, historical_penalty
 
 
+def _growth_target_pressure(signal_summary: dict[str, Any]) -> dict[str, Any]:
+    content_evolution = signal_summary.get("content_evolution") or {}
+    return dict(content_evolution.get("growth_targets") or {})
+
+
+def _growth_mode_opportunity_adjustment(item: dict[str, Any], *, signal_summary: dict[str, Any]) -> float:
+    if not _extreme_score_mode(signal_summary):
+        return 0.0
+
+    track = str(item.get("track") or "").strip()
+    signal_type = str(item.get("signal_type") or "").strip()
+    source_text = str(item.get("source_text") or "").strip()
+    why_now = str(item.get("why_now") or "").strip()
+    evidence_hint = str(item.get("evidence_hint") or "").strip()
+    joined_text = _joined_idea_text(source_text, why_now, evidence_hint)
+    growth_targets = _growth_target_pressure(signal_summary)
+    daily_breakout = growth_targets.get("daily_breakout") or {}
+    score_velocity = growth_targets.get("score_velocity") or {}
+
+    adjustment = 0.0
+    if signal_type in {"community-hot", "rising-hot", "community-breakout"}:
+        adjustment += 1.25
+    elif signal_type in {"world-bundle", "external", "paper", "github", "zhihu", "classic"}:
+        adjustment += 0.95
+    elif signal_type in {"discussion", "feed"} and track in {"theory", "tech"}:
+        adjustment += 0.25
+
+    if float(item.get("world_score") or 0.0) >= 0.85:
+        adjustment += 0.25
+    if track == "theory":
+        if _title_has_public_structural_anchor(joined_text) or _contains_any(joined_text, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
+            adjustment += 0.3
+        if _theory_source_text_needs_public_reframe(signal_type, source_text):
+            adjustment -= 0.45
+    elif track == "tech":
+        if _method_title_has_concrete_anchor(joined_text):
+            adjustment += 0.35
+        if _contains_any(joined_text, ("病灶", "诊断", "装忙", "假装", "失忆", "假完成", "静默失败", "太听话")):
+            adjustment += 0.2
+        if signal_type in WEAK_INTERNAL_SIGNAL_TYPES and _method_source_text_needs_object_reframe(signal_type, source_text):
+            adjustment -= 0.65
+    elif track == "group":
+        if signal_type in WEAK_INTERNAL_SIGNAL_TYPES:
+            adjustment -= 0.45
+        elif signal_type not in {"community-hot", "rising-hot", "world-bundle", "external"}:
+            adjustment -= 0.15
+
+    if int(daily_breakout.get("remaining") or 0) > 0 and track in {"theory", "tech"}:
+        if signal_type in {"community-hot", "rising-hot", "community-breakout", "world-bundle", "external"}:
+            adjustment += min(int(daily_breakout.get("remaining") or 0), 2) * 0.2
+    if score_velocity and score_velocity.get("actual_per_day") is not None and not bool(score_velocity.get("on_track")):
+        if track in {"theory", "tech"} and signal_type in {
+            "community-hot",
+            "rising-hot",
+            "community-breakout",
+            "world-bundle",
+            "external",
+            "paper",
+            "github",
+            "zhihu",
+            "classic",
+        }:
+            adjustment += 0.18
+    return round(adjustment, 3)
+
+
 def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, Any]) -> float:
     quality_score = float(item.get("quality_score") or 0.0)
     freshness_score = float(item.get("freshness_score") or 0.0)
@@ -2150,11 +2326,13 @@ def _opportunity_rank_score(item: dict[str, Any], *, signal_summary: dict[str, A
         internal_penalty += 3.0
     evidence_bonus = 0.35 if str(item.get("evidence_hint") or "").strip() else 0.0
     publishability_penalty = _opportunity_publishability_penalty(item)
+    growth_adjustment = _growth_mode_opportunity_adjustment(item, signal_summary=signal_summary)
     return (
         quality_score * 2.8
         + freshness_score
         + world_score
         + evidence_bonus
+        + growth_adjustment
         - overlap_penalty
         - internal_penalty
         - publishability_penalty
@@ -2425,6 +2603,51 @@ def _live_track_order(signal_summary: dict[str, Any], *, group_enabled: bool) ->
     ]
 
 
+def _growth_mode_track_score_adjustment(
+    track: str,
+    bundle: dict[str, Any],
+    signal_summary: dict[str, Any],
+) -> float:
+    if not _extreme_score_mode(signal_summary):
+        return 0.0
+
+    lead = bundle.get("lead") or {}
+    signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
+    focus_text = _joined_idea_text(
+        bundle.get("public_focus_text"),
+        bundle.get("focus_text"),
+        bundle.get("why_now"),
+        bundle.get("angle_hint"),
+    )
+    growth_targets = _growth_target_pressure(signal_summary)
+    daily_breakout = growth_targets.get("daily_breakout") or {}
+    score_velocity = growth_targets.get("score_velocity") or {}
+
+    adjustment = 0.0
+    if track == "theory":
+        if signal_type in {"community-hot", "rising-hot", "community-breakout", "world-bundle", "external", "paper", "github", "zhihu", "classic"}:
+            adjustment += 0.75
+        if _title_has_public_structural_anchor(focus_text) or _contains_any(focus_text, THEORY_TITLE_DIRECT_ACTOR_TOKENS):
+            adjustment += 0.25
+    elif track == "tech":
+        if signal_type in {"community-hot", "rising-hot", "community-breakout", "world-bundle", "external", "failure", "discussion"}:
+            adjustment += 0.45
+        if _method_title_has_concrete_anchor(focus_text):
+            adjustment += 0.2
+    elif track == "group":
+        if signal_type in WEAK_INTERNAL_SIGNAL_TYPES:
+            adjustment -= 0.35
+        else:
+            adjustment -= 0.1
+
+    if int(daily_breakout.get("remaining") or 0) > 0 and track in {"theory", "tech"}:
+        adjustment += min(int(daily_breakout.get("remaining") or 0), 2) * 0.15
+    if score_velocity and score_velocity.get("actual_per_day") is not None and not bool(score_velocity.get("on_track")):
+        if track in {"theory", "tech"}:
+            adjustment += 0.12
+    return round(adjustment, 3)
+
+
 def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[str, Any] | None:
     bundle = _track_signal_bundle(track, signal_summary)
     if not bundle:
@@ -2440,6 +2663,7 @@ def _track_priority_entry(track: str, signal_summary: dict[str, Any]) -> dict[st
         score += min(len(group_hot_posts), 3) * 0.35
         if str(lead.get("signal_type") or "") in WEAK_INTERNAL_SIGNAL_TYPES:
             score -= 1.0
+    score += _growth_mode_track_score_adjustment(track, bundle, signal_summary)
     return {
         "track": track,
         "kind": _track_kind(track),
@@ -2557,6 +2781,7 @@ def _dynamic_lane_focus_kind(selected_entries: list[dict[str, Any]], signal_summ
 
 
 def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled: bool) -> dict[str, Any]:
+    growth_mode = _growth_mode(signal_summary)
     max_slots = 3 if group_enabled else 2
     ranked: list[dict[str, Any]] = []
     for track in _live_track_order(signal_summary, group_enabled=group_enabled):
@@ -2572,6 +2797,7 @@ def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled
                 "focus_kind": "",
                 "backup_kinds": [],
                 "lane_scores": [],
+                "growth_mode": growth_mode,
                 "rationale": "当前没有够格的公开 lane，也没有必要拿默认残压硬补空心题。",
             }
         lane_text = "、".join(_lane_reason_label(item) for item in fallback_ranked[:max_slots])
@@ -2580,6 +2806,7 @@ def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled
             "focus_kind": "",
             "backup_kinds": [],
             "lane_scores": fallback_ranked[:max_slots],
+            "growth_mode": growth_mode,
             "rationale": (
                 "当前只有残压观察，没有哪条公开 lane 已经长成可直接发的题。"
                 f" 先把 {lane_text or '现有残压'} 留作观察，不把它们提前写死成必须补位的标题；"
@@ -2613,6 +2840,7 @@ def _dynamic_idea_lane_strategy(signal_summary: dict[str, Any], *, group_enabled
         "focus_kind": focus_kind,
         "backup_kinds": backup_kinds[: (max_slots if not focus_kind else max(0, max_slots - 1))],
         "lane_scores": ranked[:max_slots],
+        "growth_mode": growth_mode,
         "rationale": (
             f"{rationale} 动态排序为 {lane_text}；较弱观察让位给更强的现场压力。"
         ),
@@ -2669,6 +2897,9 @@ def _recent_low_heat_cluster_fragments(signal_summary: dict[str, Any], *, limit:
                 continue
         texts: list[Any] = [item.get("title"), item.get("summary")]
         texts.extend(list(item.get("lessons") or [])[:3])
+        texts.extend(list(item.get("cluster_signatures") or [])[:4])
+        texts.extend(list(item.get("object_signatures") or [])[:4])
+        texts.extend(list(item.get("focus_fragments") or [])[:4])
         for text in texts:
             for fragment in _meaningful_fragments(str(text or "")):
                 normalized = _normalize_title(fragment)
@@ -2735,6 +2966,55 @@ def _low_heat_cluster_signature_tokens(text: str, *, limit: int = 8) -> list[str
     return picked
 
 
+def _low_heat_object_signature_tokens(text: str, *, limit: int = 8) -> list[str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    picked: list[str] = []
+    seen: set[str] = set()
+    for token in LOW_HEAT_OBJECT_SIGNATURE_TOKENS:
+        token_key = _normalize_title(token)
+        if not token_key or token_key in seen or token not in cleaned:
+            continue
+        seen.add(token_key)
+        picked.append(token)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _low_heat_focus_fragments(text: str, *, limit: int = 8) -> list[str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    picked: list[str] = []
+    seen: set[str] = set()
+    for fragment in _meaningful_fragments(cleaned):
+        normalized = _normalize_title(fragment)
+        if (
+            not normalized
+            or normalized in seen
+            or normalized in SOURCE_SIGNAL_FRAGMENT_STOPWORDS
+            or len(fragment) < 2
+            or len(fragment) > 12
+        ):
+            continue
+        seen.add(normalized)
+        picked.append(fragment)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _low_heat_followup_signature_fields(*texts: Any, limit: int = 8) -> dict[str, list[str]]:
+    combined = "\n".join(str(text or "").strip() for text in texts if str(text or "").strip())
+    return {
+        "cluster_signatures": _low_heat_cluster_signature_tokens(combined, limit=limit),
+        "object_signatures": _low_heat_object_signature_tokens(combined, limit=limit),
+        "focus_fragments": _low_heat_focus_fragments(combined, limit=limit),
+    }
+
+
 def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> bool:
     normalized_text = _normalize_title(text)
     if not normalized_text:
@@ -2787,18 +3067,52 @@ def _looks_like_low_heat_followup(text: str, signal_summary: dict[str, Any]) -> 
             return True
     if semantic_overlap >= 2 and not has_concrete_object:
         return True
-    candidate_signatures = set(_low_heat_cluster_signature_tokens(text))
-    if candidate_signatures and not has_concrete_object:
+    candidate_fields = _low_heat_followup_signature_fields(text)
+    candidate_signatures = set(candidate_fields.get("cluster_signatures") or [])
+    candidate_objects = set(candidate_fields.get("object_signatures") or [])
+    candidate_focus = set(candidate_fields.get("focus_fragments") or [])
+    if candidate_signatures or candidate_objects or candidate_focus:
         for item in _recent_low_heat_items_in_window(signal_summary):
-            combined = "\n".join(
-                [
-                    str(item.get("title") or "").strip(),
-                    str(item.get("summary") or "").strip(),
-                    *(str(part).strip() for part in list(item.get("lessons") or [])[:2] if str(part).strip()),
-                ]
-            )
-            failure_signatures = set(_low_heat_cluster_signature_tokens(combined))
-            if len(candidate_signatures & failure_signatures) >= 2:
+            stored_signatures = {
+                str(token).strip()
+                for token in list(item.get("cluster_signatures") or [])
+                if str(token).strip()
+            }
+            stored_objects = {
+                str(token).strip()
+                for token in list(item.get("object_signatures") or [])
+                if str(token).strip()
+            }
+            stored_focus = {
+                str(token).strip()
+                for token in list(item.get("focus_fragments") or [])
+                if str(token).strip()
+            }
+            if not stored_signatures and not stored_objects and not stored_focus:
+                combined = "\n".join(
+                    [
+                        str(item.get("title") or "").strip(),
+                        str(item.get("summary") or "").strip(),
+                        *(str(part).strip() for part in list(item.get("lessons") or [])[:2] if str(part).strip()),
+                    ]
+                )
+                stored_fields = _low_heat_followup_signature_fields(combined)
+                stored_signatures = set(stored_fields.get("cluster_signatures") or [])
+                stored_objects = set(stored_fields.get("object_signatures") or [])
+                stored_focus = set(stored_fields.get("focus_fragments") or [])
+            new_object_count = len(candidate_objects - stored_objects)
+            concrete_object_escape = has_concrete_object and new_object_count >= 1 and len(candidate_objects) >= 2
+            if candidate_signatures and len(candidate_signatures & stored_signatures) >= 2:
+                if concrete_object_escape:
+                    continue
+                return True
+            if candidate_objects and len(candidate_objects & stored_objects) >= 2 and (
+                len(candidate_signatures & stored_signatures) >= 1 or not has_concrete_object
+            ):
+                if concrete_object_escape:
+                    continue
+                return True
+            if not has_concrete_object and candidate_focus and len(candidate_focus & stored_focus) >= 3:
                 return True
     return False
 
@@ -4071,6 +4385,47 @@ def _bundle_focus_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: s
     if track in {"tech", "group"} and _method_source_text_needs_object_reframe(lead_signal_type, direct_focus):
         direct_focus = ""
     support_texts = _bundle_support_texts(bundle, lead, limit=4)
+    hard_object_focus = ""
+    if track in {"tech", "group"}:
+        hard_object_focus = _concrete_focus_text(
+            *[
+                text
+                for text in support_texts
+                if _source_signal_has_hard_service_object(text)
+            ],
+            *support_texts,
+        )
+        if hard_object_focus and _method_source_text_needs_object_reframe(lead_signal_type, hard_object_focus):
+            refined_hard_object_focus = _method_focus_text_from_inputs(
+                track,
+                lead_signal_type,
+                hard_object_focus,
+                *support_texts,
+            )
+            if refined_hard_object_focus:
+                hard_object_focus = refined_hard_object_focus
+    if (
+        track in {"tech", "group"}
+        and direct_focus
+        and hard_object_focus
+        and hard_object_focus != direct_focus
+        and (
+            not _method_title_has_concrete_anchor(direct_focus)
+            or (lead_signal_type == "world-bundle" and not _source_signal_has_hard_service_object(direct_focus))
+        )
+    ):
+        direct_focus = hard_object_focus
+    elif track in {"tech", "group"} and direct_focus and not _method_title_has_concrete_anchor(direct_focus):
+        hard_object_focus = _concrete_focus_text(
+            *[
+                text
+                for text in support_texts
+                if _source_signal_has_hard_service_object(text)
+            ],
+            *support_texts,
+        )
+        if hard_object_focus and hard_object_focus != direct_focus:
+            direct_focus = hard_object_focus
     if direct_focus and track in {"tech", "group"} and re.search(r"[：:]", direct_focus) and len(direct_focus) > 18:
         evidence_texts = [
             str(item).strip()
@@ -4177,10 +4532,13 @@ def _method_public_why_now_text(bundle: dict[str, Any], lead: dict[str, Any], *,
 def _method_public_angle_text(bundle: dict[str, Any], lead: dict[str, Any], *, track: str, fallback: str) -> str:
     lead_signal_type = str(lead.get("signal_type") or bundle.get("signal_type") or "").strip()
     if lead_signal_type == "world-bundle":
+        focus_seed = _bundle_focus_text(bundle, lead, track=track) or str(
+            lead.get("source_text") or bundle.get("focus_text") or bundle.get("title_seed") or ""
+        ).strip()
         focus = _method_focus_text_from_inputs(
             track,
             lead_signal_type,
-            str(lead.get("source_text") or bundle.get("focus_text") or bundle.get("title_seed") or ""),
+            focus_seed,
             str(bundle.get("why_now") or "").strip(),
             str(bundle.get("angle_hint") or "").strip(),
             str(lead.get("why_now") or "").strip(),
@@ -4285,9 +4643,12 @@ def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, tra
         track=track,
         fallback="现场约束已经把同一条失败链暴露出来，不能再写成经验贴。",
     )
+    focus_seed = _bundle_focus_text(bundle, lead, track=track) or str(
+        bundle.get("focus_text") or bundle.get("title_seed") or lead.get("source_text") or ""
+    ).strip()
     source_needs_reframe = _method_source_text_needs_object_reframe(
         lead_signal_type,
-        str(lead.get("source_text") or bundle.get("focus_text") or ""),
+        focus_seed,
     )
     structural_supports = _bundle_structural_support_texts(bundle, lead, limit=4)
     if source_needs_reframe:
@@ -4297,7 +4658,7 @@ def _method_fallback_fields(bundle: dict[str, Any], lead: dict[str, Any], *, tra
     focus = _method_focus_text_from_inputs(
         track,
         lead_signal_type,
-        str(bundle.get("focus_text") or bundle.get("title_seed") or lead.get("source_text") or ""),
+        focus_seed,
         public_angle,
         why_now,
         *structural_supports,
@@ -5475,6 +5836,93 @@ def _repair_method_focus_seed(
     current_title_key = _normalize_title(str(current.get("title") or ""))
     source_signals = _signal_bundle_source_signals(track, bundle, signal_summary)
     support_texts = _bundle_structural_support_texts(bundle, lead, limit=6)
+    low_heat_items = _recent_low_heat_items_in_window(signal_summary)
+    recent_low_heat_objects: set[str] = set()
+    recent_low_heat_signatures: set[str] = set()
+    for item in low_heat_items:
+        stored_objects = {
+            str(token).strip()
+            for token in list(item.get("object_signatures") or [])
+            if str(token).strip()
+        }
+        stored_signatures = {
+            str(token).strip()
+            for token in list(item.get("cluster_signatures") or [])
+            if str(token).strip()
+        }
+        if not stored_objects and not stored_signatures:
+            combined = "\n".join(
+                [
+                    str(item.get("title") or "").strip(),
+                    str(item.get("summary") or "").strip(),
+                    *(str(part).strip() for part in list(item.get("lessons") or [])[:2] if str(part).strip()),
+                ]
+            )
+            stored_fields = _low_heat_followup_signature_fields(combined)
+            stored_objects = {
+                str(token).strip()
+                for token in list(stored_fields.get("object_signatures") or [])
+                if str(token).strip()
+            }
+            stored_signatures = {
+                str(token).strip()
+                for token in list(stored_fields.get("cluster_signatures") or [])
+                if str(token).strip()
+            }
+        recent_low_heat_objects.update(stored_objects)
+        recent_low_heat_signatures.update(stored_signatures)
+    prioritized_hard_object_texts = _dedupe_texts(
+        [
+            str(lead.get("source_text") or "").strip(),
+            str(bundle.get("focus_text") or "").strip(),
+            str(bundle.get("title_seed") or "").strip(),
+            *source_signals,
+            *support_texts,
+        ]
+    )
+    best_hard_object_fragment = ""
+    best_hard_object_score = (-1, -1, -1)
+    for text in prioritized_hard_object_texts:
+        if not _source_signal_has_hard_service_object(text):
+            continue
+        fragment_pool = _dedupe_texts(
+            [
+                *_filtered_method_title_fragments(track, text),
+                _method_focus_text_from_inputs(track, str(lead.get("signal_type") or bundle.get("signal_type") or ""), text),
+            ]
+        )
+        for fragment in fragment_pool:
+            fragment_key = _normalize_title(fragment)
+            if (
+                not fragment_key
+                or (current_title_key and (fragment_key in current_title_key or current_title_key in fragment_key))
+                or not _method_title_has_concrete_anchor(fragment)
+            ):
+                continue
+            fragment_fields = _low_heat_followup_signature_fields(fragment)
+            fragment_objects = {
+                str(token).strip()
+                for token in list(fragment_fields.get("object_signatures") or [])
+                if str(token).strip()
+            }
+            fragment_signatures = {
+                str(token).strip()
+                for token in list(fragment_fields.get("cluster_signatures") or [])
+                if str(token).strip()
+            }
+            new_object_count = len(fragment_objects - recent_low_heat_objects)
+            new_signature_count = len(fragment_signatures - recent_low_heat_signatures)
+            overlap_count = len(fragment_objects & recent_low_heat_objects) + len(
+                fragment_signatures & recent_low_heat_signatures
+            )
+            if fragment_objects and new_object_count >= 1 and overlap_count == 0:
+                return truncate_text(fragment, 18)
+            score = (new_object_count, new_signature_count, -overlap_count)
+            if score > best_hard_object_score:
+                best_hard_object_score = score
+                best_hard_object_fragment = truncate_text(fragment, 18)
+    if best_hard_object_fragment:
+        return best_hard_object_fragment
     candidates = _filtered_method_title_fragments(
         track,
         current.get("title"),
@@ -5635,11 +6083,12 @@ def _repair_rejected_public_candidate(
                 if _repair_forces_object_led_method_focus(kind, reason)
                 else ""
             )
+            bundle_object_focus = _bundle_focus_text(bundle, lead, track=track)
             focus = _method_focus_text_from_inputs(
                 track,
                 signal_type,
                 forced_object_focus
-                or str(bundle.get("title_seed") or bundle.get("focus_text") or current.get("title") or ""),
+                or str(bundle_object_focus or bundle.get("title_seed") or bundle.get("focus_text") or current.get("title") or ""),
                 angle,
                 why_now,
                 *source_signals,
@@ -5709,6 +6158,128 @@ def _repair_rejected_public_candidate(
     return None
 
 
+def _read_jsonl_rows(path, *, limit: int = 240) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            rows.append(parsed)
+    return rows[-limit:] if limit > 0 else rows
+
+
+def _daily_breakout_growth_target_state(posts: list[dict[str, Any]]) -> dict[str, Any]:
+    settings = _growth_target_settings()
+    window_hours = float(settings["daily_breakout_window_hours"])
+    upvotes_threshold = int(settings["daily_breakout_upvotes_threshold"])
+    target = int(settings["daily_breakout_posts_min"])
+    recent_posts = _recent_posts_in_hours(posts, hours=window_hours)
+    breakout_posts = [
+        item
+        for item in recent_posts
+        if int(item.get("upvotes") or 0) >= upvotes_threshold
+    ]
+    breakout_posts.sort(
+        key=lambda item: (
+            -int(item.get("upvotes") or 0),
+            str(item.get("created_at") or ""),
+        )
+    )
+    actual = len(breakout_posts)
+    return {
+        "window_hours": window_hours,
+        "upvotes_threshold": upvotes_threshold,
+        "target": target,
+        "actual": actual,
+        "remaining": max(target - actual, 0),
+        "on_track": actual >= target,
+        "titles": [str(item.get("title") or "").strip() for item in breakout_posts[:4] if str(item.get("title") or "").strip()],
+    }
+
+
+def _score_velocity_target_state() -> dict[str, Any]:
+    settings = _growth_target_settings()
+    window_hours = float(settings["score_velocity_window_hours"])
+    target_per_day = float(settings["score_velocity_target_per_day"])
+    close_ratio = float(settings["score_velocity_close_ratio"])
+    benchmark_label = str(settings["score_velocity_benchmark_label"]).strip()
+    benchmark_username = str(settings["score_velocity_benchmark_username"]).strip()
+    snapshots = _read_jsonl_rows(CURRENT_STATE_DIR / "snapshot_log.jsonl")
+    if len(snapshots) < 2:
+        return {
+            "window_hours": window_hours,
+            "target_per_day": target_per_day,
+            "close_ratio": close_ratio,
+            "close_floor_per_day": round(target_per_day * close_ratio, 2),
+            "benchmark_label": benchmark_label,
+            "benchmark_username": benchmark_username,
+            "actual_per_day": None,
+            "gap_per_day": None,
+            "on_track": False,
+            "basis": "insufficient-snapshots",
+        }
+
+    parsed_rows: list[tuple[datetime, dict[str, Any]]] = []
+    for row in snapshots:
+        captured_at = _parse_datetime(row.get("captured_at"))
+        score = row.get("score")
+        if captured_at is None or score is None:
+            continue
+        parsed_rows.append((captured_at.astimezone(timezone.utc), row))
+    if len(parsed_rows) < 2:
+        return {
+            "window_hours": window_hours,
+            "target_per_day": target_per_day,
+            "close_ratio": close_ratio,
+            "close_floor_per_day": round(target_per_day * close_ratio, 2),
+            "benchmark_label": benchmark_label,
+            "benchmark_username": benchmark_username,
+            "actual_per_day": None,
+            "gap_per_day": None,
+            "on_track": False,
+            "basis": "insufficient-snapshots",
+        }
+
+    end_at, end_row = parsed_rows[-1]
+    window_start = end_at - timedelta(hours=window_hours)
+    baseline = next(
+        ((captured_at, row) for captured_at, row in reversed(parsed_rows[:-1]) if captured_at <= window_start),
+        parsed_rows[0],
+    )
+    points = [(captured_at, row) for captured_at, row in parsed_rows if captured_at >= baseline[0]]
+    start_at, start_row = points[0]
+    hours_elapsed = max((end_at - start_at).total_seconds() / 3600.0, 0.0)
+    if hours_elapsed <= 0:
+        actual_per_day = None
+    else:
+        actual_per_day = (float(end_row.get("score") or 0) - float(start_row.get("score") or 0)) * 24.0 / hours_elapsed
+    close_floor_per_day = target_per_day * close_ratio
+    gap_per_day = max(target_per_day - float(actual_per_day or 0.0), 0.0) if actual_per_day is not None else None
+    return {
+        "window_hours": window_hours,
+        "target_per_day": target_per_day,
+        "close_ratio": close_ratio,
+        "close_floor_per_day": round(close_floor_per_day, 2),
+        "benchmark_label": benchmark_label,
+        "benchmark_username": benchmark_username,
+        "actual_per_day": round(float(actual_per_day), 2) if actual_per_day is not None else None,
+        "gap_per_day": round(float(gap_per_day), 2) if gap_per_day is not None else None,
+        "delta_score": int((end_row.get("score") or 0) - (start_row.get("score") or 0)),
+        "captured_from": start_at.isoformat(),
+        "captured_to": end_at.isoformat(),
+        "observed_points": len(points),
+        "on_track": bool(actual_per_day is not None and actual_per_day >= close_floor_per_day),
+        "basis": "windowed-snapshots",
+    }
+
+
 def build_content_evolution_state(
     *,
     posts: list[dict[str, Any]],
@@ -5746,6 +6317,10 @@ def build_content_evolution_state(
         "low_performance_patterns": low_performance_patterns,
         "low_performance_square_titles": low_square_titles,
         "high_performance_patterns": high_performance_patterns,
+        "growth_targets": {
+            "daily_breakout": _daily_breakout_growth_target_state(posts),
+            "score_velocity": _score_velocity_target_state(),
+        },
         "observed_board_patterns": {
             "low_performance_square_titles": low_square_titles,
             "high_performance_boards": _dedupe_texts([item.get("board") or "" for item in high_performance_patterns]),
@@ -7243,11 +7818,9 @@ def _planning_signals(
     keyword_counter = _candidate_terms(research_texts)
     recent_titles = [str(item.get("title") or "") for item in posts[:RECENT_TITLE_LIMIT] if item.get("title")]
     novelty = _novelty_pressure(recent_titles)
-    heartbeat_hours = 3
-    config_path = CURRENT_STATE_DIR.parent.parent / "config" / "paimon.json"
-    if config_path.exists():
-        config = read_json(config_path, default={})
-        heartbeat_hours = int(config.get("automation", {}).get("heartbeat_hours", heartbeat_hours) or heartbeat_hours)
+    automation_settings = _planner_automation_settings()
+    heartbeat_hours = int(automation_settings.get("heartbeat_hours", 3) or 3)
+    growth_mode = _normalize_growth_mode(automation_settings.get("growth_mode"))
     base_summary = {
         "account": {
             "score": overview.get("score"),
@@ -7301,6 +7874,7 @@ def _planning_signals(
         "source_mutation": source_mutation,
         "low_heat_failures": low_heat_failures,
         "user_topic_hints": user_topic_hints,
+        "growth_mode": growth_mode,
         "top_keywords": [token for token, count in keyword_counter.most_common(8) if count >= 1],
         "novelty_pressure": novelty,
         "group": groups[0] if groups else {},
@@ -7371,6 +7945,8 @@ def _generate_codex_ideas(
     retry_feedback: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     prompt_signal_summary = dict(signal_summary)
+    growth_mode = _growth_mode(signal_summary)
+    growth_targets = _growth_target_pressure(signal_summary)
     prompt_signal_summary["community_hot_posts"] = _high_like_external_posts(
         list(signal_summary.get("community_hot_posts") or [])
     )
@@ -7383,8 +7959,24 @@ def _generate_codex_ideas(
     prompt_signal_summary["reserved_title_phrases"] = list(RESERVED_TITLE_PHRASES)
     prompt_signal_summary["user_topic_hints"] = signal_summary.get("user_topic_hints") or []
     prompt_signal_summary["content_evolution"] = signal_summary.get("content_evolution") or {}
+    prompt_signal_summary["growth_mode"] = growth_mode
+    prompt_signal_summary["growth_targets"] = growth_targets
     retry_lines = retry_feedback or []
     kinds_text = "、".join(allowed_kinds) or "theory-post、tech-post"
+    growth_mode_lines = ""
+    if growth_mode == EXTREME_SCORE_GROWTH_MODE:
+        growth_mode_lines = f"""
+冲榜模式补充要求：
+1. 当前处在极限冲榜模式。优先目标是尽快打出更强传播的公开主帖，不要把“保持旧写法体面”放在增长前面。
+2. 标题优先写广谱诊断入口，优先使用“你 / 你的 Agent / 很多 Agent”这类直接主语；先交病灶、代价和反转，再把机制判断放进正文中段。
+3. 派蒙擅长的记忆、心跳、治理、协作主题，要先翻成读者能立刻代入的症状：失忆、假恢复、装忙、假完成、太听话、责任悬空、等待外溢、转人工断口。
+4. 不要再把“接手 / 回写 / 签收阈值 / 主记录 / reconcile / ack_user / 状态词”这一组内部运行态直接挂到标题门口，除非它已经被翻成公共对象、触发条件和可测收益。
+5. 如果 `growth_targets` 还没达标，候选里至少留 1 条明显为冲 100+ 设计的公开诊断帖。
+6. 可以学习榜首账号抓到的公共病灶，但不要照搬它们的标题骨架、系列名或 IP 话术。
+
+当前增长目标：
+{truncate_text(json.dumps(growth_targets, ensure_ascii=False), 500)}
+""".strip()
     prompt = f"""
 你在给 InStreet 账号派蒙做下一轮内容规划。请根据实时信号生成候选 idea。
 
@@ -7449,6 +8041,8 @@ def _generate_codex_ideas(
 44. 跨场景例证不能写成“一种产品 / 另一种高优支持入口 / 某类系统”这种泛称；至少保留一个真实对象、接口或失败句，不然概念还没站稳。
 45. 不要拿“会翻聊天记录 / 记得你 / 长期记忆”这种能力感给 `theory-post` 起题；如果标题里出现这类记忆能力词，第一屏必须立刻写出驳回、签收、回写、补件或转人工断口。
 46. 这类记忆题的 `source_signals` 也不能只写“项目 Agent / 补件助手 / 售后页”这种角色标签；至少交两条带单据、按钮、接口、失败话术或回写断口的硬样本。
+
+{growth_mode_lines}
 
 最近标题，禁止完全重复：
 {chr(10).join(f"- {title}" for title in recent_titles[:RECENT_TITLE_LIMIT])}
@@ -7594,10 +8188,11 @@ def _fallback_tech_idea(signal_summary: dict[str, Any], recent_titles: list[str]
     )
     if not angle:
         return {}
+    bundle_object_focus = _bundle_focus_text(bundle, lead, track="tech")
     title_focus = _method_focus_text_from_inputs(
         "tech",
         signal_type,
-        str(bundle.get("title_seed") or bundle.get("focus_text") or focus_title or "自治运营仓库"),
+        str(bundle_object_focus or bundle.get("title_seed") or bundle.get("focus_text") or focus_title or "自治运营仓库"),
         angle,
         why_now,
         *source_signals,
@@ -7682,10 +8277,11 @@ def _fallback_group_idea(
     )
     if not angle:
         return {}
+    bundle_object_focus = _bundle_focus_text(bundle, lead, track="group")
     title_focus = _method_focus_text_from_inputs(
         "group",
         signal_type,
-        str(bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
+        str(bundle_object_focus or bundle.get("title_seed") or bundle.get("focus_text") or "实验室的下一条治理协议"),
         angle,
         why_now,
         *source_signals,
@@ -8303,6 +8899,8 @@ def build_plan(
         "generated_at": now_utc(),
         "planner_mode": "dynamic-signals",
         "planner_used_codex": allow_codex,
+        "growth_mode": signal_summary.get("growth_mode") or DEFAULT_GROWTH_MODE,
+        "growth_targets": ((signal_summary.get("content_evolution") or {}).get("growth_targets") or {}),
         "account": {
             "score": overview.get("score"),
             "followers": overview.get("follower_count"),

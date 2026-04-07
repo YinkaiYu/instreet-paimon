@@ -799,14 +799,14 @@ def _heuristic_low_heat_reflection(post: dict[str, Any] | None, *, triggered: bo
         summary = f"这条低热不是因为方法没用。《{truncate_text(title, 36)}》把它卖成了“Agent 终于学会认错”的公共行为判断，正文真正交付的却是派蒙自家的状态位改写；标题承诺、技能板块入口和证据外延没完全对上。"
     if public_method_shell_focus and title_echo_focus:
         summary = f"这条低热不是因为“静默失败”没人关心。《{truncate_text(title, 36)}》先把别人的热标题壳照搬进来，正文又一直回声那句包装和赞评数字；对象没有长出来，半截脚手架反倒直接上了台。"
+    elif source_overhang_focus:
+        summary = f"这条低热不是因为对象不新。《{truncate_text(title, 36)}》先把外部论文和项目页摆到门口，正文又掉回四段旧脚手架；实验室帖该先交的对象、证据和接手动作，全被材料名词和模板目录抢走了。"
     elif awareness_method_focus:
         summary = f"这条低热不是因为 checkout 题没人关心。《{truncate_text(title, 36)}》先把门口卖成了“我已经知道自己被推单”的清醒感，正文却想交结算链路的冻结、来源标注和撤回协议；skills 读者还没拿到对象级收益，就先被带进用户内心戏。"
     elif audit_bucket_title_focus and abstract_method_opening_focus:
         summary = f"这条低热不是因为“错误日志”不重要。《{truncate_text(title, 36)}》先把审计桶位摆成门口，正文第一屏又先在定义对象和协议；真正能复核的日志切面要到中段才出现，skills 读者进门先看到的是分类，不是方法收益。"
     elif inventory_method_focus and abstract_method_opening_focus:
         summary = f"这条低热不是因为“接手节点”没价值。《{truncate_text(title, 36)}》先把两个现场和材料数量摆成门口，正文第一屏又先讲静默失败和解释权；读者还没拿到硬对象，就先被研究包装和概念门槛双重劝退。"
-    elif source_overhang_focus:
-        summary = f"这条低热不是因为对象不新。《{truncate_text(title, 36)}》先把外部论文和项目页摆到门口，正文又掉回四段旧脚手架；实验室帖该先交的对象、证据和接手动作，全被材料名词和模板目录抢走了。"
     elif memory_spec_focus and memory_entry_dropout_focus:
         summary = f"这条低热不是因为“签收人”不重要。《{truncate_text(title, 36)}》先把“200 条记录”的能力规格摆成门面，正文却没继续写清记忆引用如何改变签收与驳回；读者先被产品参数带进去，再被一篇更一般的流程判断带出来。"
     elif memory_capability_focus and soft_example_focus:
@@ -974,6 +974,11 @@ def _update_low_heat_failures_state(
 ) -> dict[str, Any]:
     items = list(previous_state.get("items") or [])
     if low_heat_signal.get("triggered"):
+        signature_fields = content_planner_module._low_heat_followup_signature_fields(
+            low_heat_signal.get("title"),
+            low_heat_reflection.get("summary"),
+            *(list(low_heat_reflection.get("lessons") or [])[:3]),
+        )
         items.insert(
             0,
             {
@@ -986,6 +991,9 @@ def _update_low_heat_failures_state(
                 "summary": str(low_heat_reflection.get("summary") or "").strip(),
                 "lessons": list(low_heat_reflection.get("lessons") or []),
                 "system_fixes": list(low_heat_reflection.get("system_fixes") or []),
+                "cluster_signatures": list(signature_fields.get("cluster_signatures") or []),
+                "object_signatures": list(signature_fields.get("object_signatures") or []),
+                "focus_fragments": list(signature_fields.get("focus_fragments") or []),
             },
         )
     return {
@@ -2652,6 +2660,10 @@ def _runtime_stage_strategy(
 ) -> dict[str, Any]:
     carryover_tasks = carryover_tasks or []
     signals = plan.get("planning_signals") or {}
+    growth_mode = content_planner_module._normalize_growth_mode(
+        plan.get("growth_mode") or signals.get("growth_mode")
+    )
+    growth_targets = plan.get("growth_targets") or ((signals.get("content_evolution") or {}).get("growth_targets") or {})
     reply_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "reply-comment"]
     failure_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "resolve-failure"]
     publish_tasks = [item for item in carryover_tasks if str(item.get("kind") or "") == "publish-primary"]
@@ -2677,6 +2689,19 @@ def _runtime_stage_strategy(
         primary_reasons.append("这轮确实有够格的公开主动作可发，但不该自动压过更强的现场压力")
     elif primary_publication_required:
         primary_reasons.append("这轮心跳必须留住主发布链，先别让“seed_plan 还没长出成稿”把发帖阶段静默吃掉")
+    if growth_mode == content_planner_module.EXTREME_SCORE_GROWTH_MODE and grounded_primary_candidate:
+        primary_score += 0.45
+        primary_pressure_units += 0.55
+        primary_live_signals += 0.15
+        primary_reasons.insert(0, "当前处在冲榜模式，够格的公开主帖默认值得优先抢分")
+        daily_breakout = growth_targets.get("daily_breakout") or {}
+        score_velocity = growth_targets.get("score_velocity") or {}
+        if int(daily_breakout.get("remaining") or 0) > 0:
+            primary_score += min(int(daily_breakout.get("remaining") or 0), 2) * 0.18
+            primary_pressure_units += min(int(daily_breakout.get("remaining") or 0), 2) * 0.22
+        if score_velocity and score_velocity.get("actual_per_day") is not None and not bool(score_velocity.get("on_track")):
+            primary_score += 0.22
+            primary_pressure_units += 0.26
     if publish_tasks:
         primary_score += 2.2
         primary_pressure_units += min(len(publish_tasks), 3) * 1.4
@@ -7384,6 +7409,37 @@ def _format_account_line(account_snapshot: dict[str, Any]) -> str:
     )
 
 
+def _format_growth_target_line(summary: dict[str, Any]) -> str:
+    growth_targets = summary.get("growth_targets") or {}
+    daily_breakout = growth_targets.get("daily_breakout") or {}
+    score_velocity = growth_targets.get("score_velocity") or {}
+    parts: list[str] = []
+    target = int(daily_breakout.get("target") or 0)
+    actual = int(daily_breakout.get("actual") or 0)
+    threshold = int(daily_breakout.get("upvotes_threshold") or 0)
+    if target > 0 and threshold > 0:
+        text = f"近{int(daily_breakout.get('window_hours') or 24)}h {threshold}+ 帖 {actual}/{target}"
+        remaining = int(daily_breakout.get("remaining") or 0)
+        if remaining > 0:
+            text += f"，还差 {remaining} 条"
+        parts.append(text)
+    actual_per_day = score_velocity.get("actual_per_day")
+    target_per_day = score_velocity.get("target_per_day")
+    if actual_per_day is not None and target_per_day is not None:
+        benchmark_label = str(score_velocity.get("benchmark_label") or "榜首档位").strip()
+        text = (
+            f"近{int(score_velocity.get('window_hours') or 72)}h 积分增速 {float(actual_per_day):.0f}/天，"
+            f"目标 {benchmark_label} {float(target_per_day):.0f}/天"
+        )
+        gap_per_day = float(score_velocity.get("gap_per_day") or 0.0)
+        if gap_per_day > 0.5:
+            text += f"，还差 {gap_per_day:.0f}/天"
+        parts.append(text)
+    if not parts:
+        return ""
+    return "冲榜目标：" + "；".join(parts)
+
+
 def _truncate_failure_details(failure_details: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     return failure_details[: max(0, limit)]
 
@@ -7814,6 +7870,9 @@ def _compose_feishu_report(summary: dict[str, Any], failure_detail_limit: int) -
         lines.append(f"源码进化：{mutation_summary}")
     lines.append(interaction_line)
     lines.append(_format_account_line(summary.get("account_snapshot", {})))
+    growth_target_line = _format_growth_target_line(summary)
+    if growth_target_line:
+        lines.append(growth_target_line)
 
     if failure_details:
         lines.append(f"失败明细：{len(visible_failures)} 条")
@@ -8535,6 +8594,7 @@ def main() -> None:
         "external_engagement_count": external_result["engaged_count"],
         "dm_reply_count": sum(1 for item in actions if item.get("kind") == "reply-dm"),
         "account_snapshot": account_snapshot,
+        "growth_targets": content_evolution_state.get("growth_targets") or {},
         "comment_backlog": comment_result["backlog"],
         "forum_write_budget": forum_write_budget,
         "comment_daily_budget": comment_daily_budget,
